@@ -38,7 +38,7 @@ import { Circle, G, Line, Path, Rect, Svg, Text as SvgText } from 'react-native-
 
 function analysisUrlFromEnv() {
   const rawUrl = process.env.EXPO_PUBLIC_ANALYSIS_API_URL || process.env.EXPO_PUBLIC_ANALYSIS_API_BASE_URL;
-  const fallbackUrl = 'http://127.0.0.1:8000/analyze';
+  const fallbackUrl = 'https://impuls-chl1.onrender.com';
   const cleanedUrl = String(rawUrl || fallbackUrl).trim().replace(/\/+$/, '');
   return cleanedUrl.endsWith('/analyze') ? cleanedUrl : `${cleanedUrl}/analyze`;
 }
