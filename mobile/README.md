@@ -27,6 +27,30 @@ python3 -m pip install -r requirements.txt
 python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
+## Render Backend
+
+The backend is Render-ready from the project root:
+
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+- Health check path: `/health`
+
+If you use Render Blueprint, `../render.yaml` contains the same settings.
+
+After Render gives you a service URL, create `mobile/.env`:
+
+```bash
+EXPO_PUBLIC_ANALYSIS_API_BASE_URL=https://your-render-service.onrender.com
+```
+
+You can also use the full endpoint instead:
+
+```bash
+EXPO_PUBLIC_ANALYSIS_API_URL=https://your-render-service.onrender.com/analyze
+```
+
+Restart Expo with `npx expo start -c` after changing env vars.
+
 ## Run Mobile App
 
 In a second terminal:

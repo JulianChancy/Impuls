@@ -22,7 +22,14 @@ import {
 } from './src/storage';
 import { Circle, G, Line, Path, Rect, Svg, Text as SvgText } from 'react-native-svg';
 
-const ANALYSIS_API_URL = process.env.EXPO_PUBLIC_ANALYSIS_API_URL || 'http://192.168.1.244:8000/analyze';
+function analysisUrlFromEnv() {
+  const rawUrl = process.env.EXPO_PUBLIC_ANALYSIS_API_URL || process.env.EXPO_PUBLIC_ANALYSIS_API_BASE_URL;
+  const fallbackUrl = 'http://127.0.0.1:8000/analyze';
+  const cleanedUrl = String(rawUrl || fallbackUrl).trim().replace(/\/+$/, '');
+  return cleanedUrl.endsWith('/analyze') ? cleanedUrl : `${cleanedUrl}/analyze`;
+}
+
+const ANALYSIS_API_URL = analysisUrlFromEnv();
 
 const movementOptions = [
   ['plyometric', 'Plyometric'],
