@@ -17,6 +17,12 @@ export async function signOut() {
   if (error) throw error;
 }
 
+export async function updatePassword(newPassword) {
+  const { data, error } = await requireSupabase().auth.updateUser({ password: newPassword });
+  if (error) throw error;
+  return data;
+}
+
 export async function getCurrentUser() {
   if (!isSupabaseConfigured) {
     console.log('[LOCAL FALLBACK] Supabase auth not configured.');

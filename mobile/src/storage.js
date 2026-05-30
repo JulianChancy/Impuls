@@ -17,9 +17,29 @@ export const emptyExercise = {
 };
 
 export const defaultData = {
-  version: 4,
+  version: 5,
   profile: {
     name: '',
+    onboarding_completed: false,
+    tutorialFlags: {
+      checkin_seen: false,
+      programme_seen: false,
+      insights_seen: false,
+      dashboard_seen: false,
+    },
+    pbs: {
+      jump_height: '',
+      approach_jump: '',
+      standing_jump: '',
+      rsi: '',
+      ft: '',
+      gct: '',
+      sprint_time: '',
+      sprint_distance: '',
+      bar_velocity: '',
+      lift_name: '',
+      lift_weight: '',
+    },
   },
   programme: {
     calendar_name: '',
@@ -108,9 +128,34 @@ function migrateProgramme(programme = {}) {
   };
 }
 
-function migrateProfile(profile = {}, version) {
-  if (version < 4 && profile.name === 'Alex') return { name: '' };
-  return { ...defaultData.profile, ...profile };
+function migrateProfile(profile = {}, version, parsed = {}) {
+  const cleanedName = version < 4 && profile.name === 'Alex' ? '' : (profile.name || '');
+  const realCheckIns = Array.isArray(parsed.checkIns)
+    ? parsed.checkIns.filter((checkIn) => !String(checkIn.id || '').startsWith('sample_checkin_'))
+    : [];
+  const realSessions = Array.isArray(parsed.sessions)
+    ? parsed.sessions.filter((session) => !String(session.id || '').startsWith('sample_session_'))
+    : [];
+  const hasExistingUse = Boolean(
+    cleanedName ||
+    realCheckIns.length ||
+    realSessions.length
+  );
+  const onboardingCompleted = profile.onboarding_completed;
+  return {
+    ...defaultData.profile,
+    ...profile,
+    name: cleanedName,
+    onboarding_completed: onboardingCompleted === undefined ? hasExistingUse : Boolean(onboardingCompleted),
+    tutorialFlags: {
+      ...defaultData.profile.tutorialFlags,
+      ...(profile.tutorialFlags || {}),
+    },
+    pbs: {
+      ...defaultData.profile.pbs,
+      ...(profile.pbs || {}),
+    },
+  };
 }
 
 function migrateActiveSession(activeSession = {}, version) {
@@ -146,7 +191,7 @@ export async function loadAppData() {
       ...cloneData(defaultData),
       ...parsed,
       version: defaultData.version,
-      profile: migrateProfile(parsed.profile, version),
+      profile: migrateProfile(parsed.profile, version, parsed),
       programme: migrateProgramme(parsed.programme),
       activeSession: migrateActiveSession(parsed.activeSession, version),
       checkInDraft: migrateCheckInDraft(parsed.checkInDraft, version),

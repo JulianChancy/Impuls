@@ -26,6 +26,7 @@ import {
   signIn,
   signOut,
   signUp,
+  updatePassword,
 } from './src/auth';
 import {
   loadAppDataFromSupabase,
@@ -97,6 +98,9 @@ const dashboardMetrics = [
   { key: 'rsi', label: 'RSI', category: 'Performance', color: '#1F7A40' },
   { key: 'ft', label: 'FT', category: 'Performance', color: '#2E8B57' },
   { key: 'gct', label: 'GCT', category: 'Performance', color: '#6AA84F' },
+  { key: 'sprint_time', label: 'Sprint Time', category: 'Performance', color: '#B86B18' },
+  { key: 'bar_velocity', label: 'Bar Velocity', category: 'Performance', color: '#2F8F6B' },
+  { key: 'weight', label: 'Weight', category: 'Performance', color: '#33332F' },
   { key: 'load', label: 'Session Load', category: 'Load', color: '#1F7A40' },
   { key: 'volume', label: 'Volume', category: 'Load', color: '#387D45' },
   { key: 'contacts', label: 'Contacts', category: 'Load', color: '#4E8F58' },
@@ -109,6 +113,29 @@ const dashboardMetrics = [
   { key: 'readiness', label: 'Readiness', category: 'Recovery', color: '#2D9A68' },
   { key: 'pain', label: 'Pain', category: 'Irritation', color: '#E13F32' },
   { key: 'pain_delta', label: 'Irritation Delta', category: 'Irritation', color: '#C73A2E' },
+];
+
+const performanceMetricKeys = ['performance', 'height_or_distance', 'ft', 'gct', 'rsi', 'sprint_time', 'bar_velocity', 'weight'];
+const jumpMetricKeys = ['height_or_distance', 'ft', 'gct', 'rsi'];
+const liftMetricKeys = ['weight', 'bar_velocity'];
+const emptyTutorialFlags = {
+  checkin_seen: false,
+  programme_seen: false,
+  insights_seen: false,
+  dashboard_seen: false,
+};
+const pbFields = [
+  ['jump_height', 'Jump height / distance'],
+  ['approach_jump', 'Approach jump'],
+  ['standing_jump', 'Standing jump'],
+  ['rsi', 'RSI'],
+  ['ft', 'FT'],
+  ['gct', 'GCT'],
+  ['sprint_time', 'Sprint time'],
+  ['sprint_distance', 'Sprint distance'],
+  ['bar_velocity', 'Bar velocity'],
+  ['lift_name', 'Main lift name'],
+  ['lift_weight', 'Main lift weight'],
 ];
 
 function todayLabel() {
@@ -377,6 +404,36 @@ function orderedRows(analysis) {
 
 function metricSeries(analysis, key) {
   return analysis?.metricSeries?.[key] || [];
+}
+
+function dashboardMetricConfig(key) {
+  return dashboardMetrics.find((item) => item.key === key) || { key, label: formatMetricName(key), category: 'Performance', color: '#24883B' };
+}
+
+function metricTrendFromPerformanceAnalysis(analysis, key) {
+  return analysis?.performanceMetricAnalysis?.metricTrends?.[key] || analysis?.trendInsights?.[key];
+}
+
+function multiMetricSeriesForKeys(analysis, keys) {
+  return keys.map((key) => {
+    const metric = dashboardMetricConfig(key);
+    return {
+      key,
+      label: metric.label,
+      color: metric.color,
+      points: metricSeries(analysis, key),
+      stats: metricStats(analysis, key),
+    };
+  });
+}
+
+function hasJumpProfileMetrics(analysis) {
+  return metricSeries(analysis, 'height_or_distance').length >= 2
+    && ['ft', 'gct', 'rsi'].some((key) => metricSeries(analysis, key).length >= 2);
+}
+
+function hasLiftProfileMetrics(analysis) {
+  return metricSeries(analysis, 'weight').length >= 2 && metricSeries(analysis, 'bar_velocity').length >= 2;
 }
 
 function metricStats(analysis, key) {
@@ -757,20 +814,6 @@ export default function App() {
     );
   }
 
-  if (!analysis) {
-    return (
-      <SafeAreaView style={styles.safe}>
-        <View style={styles.backendState}>
-          <Text style={styles.h1}>{analysisError ? 'Analysis backend unavailable.' : 'Analyzing stored data...'}</Text>
-          <Text style={styles.bodyText}>
-            {analysisError || `Waiting for ${ANALYSIS_API_URL}. Start the FastAPI backend, then reload or edit any stored data.`}
-          </Text>
-          {analysisLoading ? <Text style={styles.muted}>Request in progress.</Text> : null}
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   function updateDraft(key, value) {
     setData((current) => ({
       ...current,
@@ -792,20 +835,63 @@ export default function App() {
     }));
   }
 
-  function updateProfileName(value) {
-    const nextProfile = { ...(data.profile || {}), name: value };
+  function persistProfile(nextProfile) {
+    if (!currentUser) return;
+    saveProfileToSupabase(currentUser.id, nextProfile)
+      .then(() => console.log('[SUPABASE SAVE] Profile saved'))
+      .catch((error) => {
+        console.error('[SUPABASE SAVE] Profile save failed. Local copy preserved.', error);
+        console.log('[LOCAL FALLBACK] Profile remains in local storage.');
+      });
+  }
+
+  function updateProfile(patch) {
+    const currentProfile = data.profile || {};
+    const nextProfile = {
+      ...currentProfile,
+      ...(typeof patch === 'function' ? patch(currentProfile) : patch),
+    };
     setData((current) => ({
       ...current,
-      profile: { ...(current.profile || {}), name: value },
+      profile: { ...(current.profile || {}), ...nextProfile },
     }));
-    if (currentUser) {
-      saveProfileToSupabase(currentUser.id, nextProfile)
-        .then(() => console.log('[SUPABASE SAVE] Profile saved'))
-        .catch((error) => {
-          console.error('[SUPABASE SAVE] Profile save failed. Local copy preserved.', error);
-          console.log('[LOCAL FALLBACK] Profile name remains in local storage.');
-        });
-    }
+    persistProfile(nextProfile);
+  }
+
+  function updateProfileName(value) {
+    updateProfile({ name: value });
+  }
+
+  function updateProfilePb(key, value) {
+    updateProfile((profile) => ({
+      pbs: {
+        ...(profile.pbs || {}),
+        [key]: value,
+      },
+    }));
+  }
+
+  function dismissTutorial(flagKey) {
+    updateProfile((profile) => ({
+      tutorialFlags: {
+        ...emptyTutorialFlags,
+        ...(profile.tutorialFlags || {}),
+        [flagKey]: true,
+      },
+    }));
+  }
+
+  function resetTutorialHints() {
+    updateProfile({ tutorialFlags: { ...emptyTutorialFlags } });
+  }
+
+  function replayOnboarding() {
+    updateProfile({ onboarding_completed: false });
+  }
+
+  function completeOnboarding(targetScreen) {
+    updateProfile({ onboarding_completed: true });
+    setScreen(targetScreen);
   }
 
   function addExercise() {
@@ -892,9 +978,11 @@ export default function App() {
       setAuthLoading(true);
       await signUp(authEmail.trim(), authPassword);
       console.log('[AUTH] Sign up submitted');
+      return true;
     } catch (error) {
       console.error('[AUTH] Sign up failed.', error);
       Alert.alert('Sign up failed', error.message || 'Could not sign up with Supabase.');
+      return false;
     } finally {
       setAuthLoading(false);
     }
@@ -905,9 +993,11 @@ export default function App() {
       setAuthLoading(true);
       await signIn(authEmail.trim(), authPassword);
       console.log('[AUTH] Sign in submitted');
+      return true;
     } catch (error) {
       console.error('[AUTH] Sign in failed.', error);
       Alert.alert('Sign in failed', error.message || 'Could not sign in with Supabase.');
+      return false;
     } finally {
       setAuthLoading(false);
     }
@@ -926,6 +1016,65 @@ export default function App() {
     }
   }
 
+  async function handleChangePassword(newPassword, confirmPassword) {
+    if (newPassword !== confirmPassword) {
+      Alert.alert('Password mismatch', 'New password and confirm password must match.');
+      return false;
+    }
+    if (!newPassword || newPassword.length < 6) {
+      Alert.alert('Password too short', 'Use at least 6 characters.');
+      return false;
+    }
+    try {
+      await updatePassword(newPassword);
+      Alert.alert('Password updated', 'Your Supabase password has been changed.');
+      console.log('[AUTH] Password updated');
+      return true;
+    } catch (error) {
+      console.error('[AUTH] Password update failed.', error);
+      Alert.alert('Password update failed', error.message || 'Could not update password.');
+      return false;
+    }
+  }
+
+  if (!data.profile?.onboarding_completed) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <StatusBar style="dark" />
+        <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <ScrollView contentContainerStyle={[styles.content, styles.onboardingContent]} keyboardShouldPersistTaps="handled">
+            <OnboardingScreen
+              profile={data.profile || {}}
+              authEmail={authEmail}
+              authPassword={authPassword}
+              authLoading={authLoading}
+              setAuthEmail={setAuthEmail}
+              setAuthPassword={setAuthPassword}
+              updateProfileName={updateProfileName}
+              onSignUp={handleSignUp}
+              onSignIn={handleSignIn}
+              onComplete={completeOnboarding}
+            />
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    );
+  }
+
+  if (!analysis) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.backendState}>
+          <Text style={styles.h1}>{analysisError ? 'Analysis backend unavailable.' : 'Analyzing stored data...'}</Text>
+          <Text style={styles.bodyText}>
+            {analysisError || `Waiting for ${ANALYSIS_API_URL}. Start the FastAPI backend, then reload or edit any stored data.`}
+          </Text>
+          {analysisLoading ? <Text style={styles.muted}>Request in progress.</Text> : null}
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="dark" />
@@ -936,7 +1085,14 @@ export default function App() {
               <TodayScreen data={data} analysis={analysis} setScreen={setScreen} startTodayTraining={startTodayTraining} />
             )}
             {screen === 'checkin' && (
-              <CheckInScreen draft={data.checkInDraft} updateDraft={updateDraft} saveCheckIn={saveCheckIn} setScreen={setScreen} />
+              <CheckInScreen
+                draft={data.checkInDraft}
+                updateDraft={updateDraft}
+                saveCheckIn={saveCheckIn}
+                setScreen={setScreen}
+                tutorialSeen={data.profile?.tutorialFlags?.checkin_seen}
+                onDismissTutorial={() => dismissTutorial('checkin_seen')}
+              />
             )}
             {screen === 'checkinReview' && (
               <CheckInReviewScreen
@@ -963,6 +1119,8 @@ export default function App() {
                 selectedDate={selectedCalendarDate}
                 setSelectedDate={setSelectedCalendarDate}
                 setScreen={setScreen}
+                tutorialSeen={data.profile?.tutorialFlags?.programme_seen}
+                onDismissTutorial={() => dismissTutorial('programme_seen')}
               />
             )}
             {screen === 'editCalendar' && (
@@ -993,7 +1151,15 @@ export default function App() {
               />
             )}
             {screen === 'insights' && (
-              <InsightsScreen data={data} analysis={analysis} setScreen={setScreen} setSelectedInsight={setSelectedInsight} setSelectedDashboardMetric={setSelectedDashboardMetric} />
+              <InsightsScreen
+                data={data}
+                analysis={analysis}
+                setScreen={setScreen}
+                setSelectedInsight={setSelectedInsight}
+                setSelectedDashboardMetric={setSelectedDashboardMetric}
+                tutorialSeen={data.profile?.tutorialFlags?.insights_seen}
+                onDismissTutorial={() => dismissTutorial('insights_seen')}
+              />
             )}
             {screen === 'detail' && (
               <InsightDetailScreen data={data} analysis={analysis} insightId={selectedInsight} setScreen={setScreen} setSelectedDashboardMetric={setSelectedDashboardMetric} />
@@ -1006,10 +1172,12 @@ export default function App() {
                 setMetricKey={setSelectedDashboardMetric}
                 setSelectedInsight={setSelectedInsight}
                 setScreen={setScreen}
+                tutorialSeen={data.profile?.tutorialFlags?.dashboard_seen}
+                onDismissTutorial={() => dismissTutorial('dashboard_seen')}
               />
             )}
             {screen === 'profile' && (
-              <StorageScreen
+              <ProfileScreen
                 data={data}
                 clearAll={clearAll}
                 currentUser={currentUser}
@@ -1019,9 +1187,13 @@ export default function App() {
                 setAuthEmail={setAuthEmail}
                 setAuthPassword={setAuthPassword}
                 updateProfileName={updateProfileName}
+                updateProfilePb={updateProfilePb}
+                resetTutorialHints={resetTutorialHints}
+                replayOnboarding={replayOnboarding}
                 onSignUp={handleSignUp}
                 onSignIn={handleSignIn}
                 onSignOut={handleSignOut}
+                onChangePassword={handleChangePassword}
               />
             )}
           </ScrollView>
@@ -1073,10 +1245,124 @@ function TodayScreen({ data, analysis, setScreen, startTodayTraining }) {
   );
 }
 
-function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen }) {
+function OnboardingScreen({
+  profile,
+  authEmail,
+  authPassword,
+  authLoading,
+  setAuthEmail,
+  setAuthPassword,
+  updateProfileName,
+  onSignUp,
+  onSignIn,
+  onComplete,
+}) {
+  const [step, setStep] = useState(1);
+  const name = profile?.name || '';
+
+  async function submitAuth(action) {
+    const ok = await action();
+    if (ok) setStep(2);
+  }
+
+  return (
+    <View style={styles.onboardingScreen}>
+      <Text style={styles.h1}>Welcome to Impuls</Text>
+      <Text style={styles.screenSubtitle}>Impuls connects what you did, how you felt, and how you performed.</Text>
+
+      <View style={styles.onboardingSteps}>
+        {[1, 2, 3].map((item) => (
+          <View key={item} style={[styles.onboardingStepDot, step === item && styles.onboardingStepDotActive]} />
+        ))}
+      </View>
+
+      {step === 1 ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Account setup</Text>
+          <Input label="Name" value={name} onChangeText={updateProfileName} />
+          <TextInput
+            autoCapitalize="none"
+            keyboardType="email-address"
+            placeholder="Email"
+            style={styles.input}
+            value={authEmail}
+            onChangeText={setAuthEmail}
+          />
+          <TextInput
+            placeholder="Password"
+            secureTextEntry
+            style={styles.input}
+            value={authPassword}
+            onChangeText={setAuthPassword}
+          />
+          <View style={styles.authActions}>
+            <Pressable style={styles.authButton} onPress={() => submitAuth(onSignUp)} disabled={authLoading}>
+              <Text style={styles.authButtonText}>Create Account</Text>
+            </Pressable>
+            <Pressable style={[styles.authButton, styles.authButtonDark]} onPress={() => submitAuth(onSignIn)} disabled={authLoading}>
+              <Text style={[styles.authButtonText, styles.authButtonTextLight]}>Sign In</Text>
+            </Pressable>
+          </View>
+          <ActionButton title="Continue Locally" tone="outline" onPress={() => setStep(2)} />
+        </View>
+      ) : null}
+
+      {step === 2 ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>How Impuls works</Text>
+          <OnboardingInfoCard title="Programme or log training" body="Capture sessions, exercises, sets, reps, contacts, intent, and intensity." />
+          <OnboardingInfoCard title="Check in with recovery, pain, and performance" body="Log the response state that belongs to the training you did." />
+          <OnboardingInfoCard title="Learn your response patterns over time" body="Repeated session + check-in pairs become evidence for trends and relationships." />
+          <ActionButton title="Next" tone="black" onPress={() => setStep(3)} />
+        </View>
+      ) : null}
+
+      {step === 3 ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Quick start</Text>
+          <ActionButton title="Start with Programme" tone="black" onPress={() => onComplete('calendar')} />
+          <ActionButton title="Start with Check-in" tone="outline" onPress={() => onComplete('checkin')} />
+          <ActionButton title="Go to Today" tone="outline" onPress={() => onComplete('today')} />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function OnboardingInfoCard({ title, body }) {
+  return (
+    <View style={styles.onboardingInfoCard}>
+      <Text style={styles.cardTitle}>{title}</Text>
+      <Text style={styles.muted}>{body}</Text>
+    </View>
+  );
+}
+
+function TutorialHint({ visible, title, body, onDismiss }) {
+  if (!visible) return null;
+  return (
+    <View style={styles.tutorialHint}>
+      <View style={styles.flex}>
+        <Text style={styles.label}>{title}</Text>
+        <Text style={styles.smallCopy}>{body}</Text>
+      </View>
+      <Pressable style={styles.hintDismiss} onPress={onDismiss}>
+        <Text style={styles.hintDismissText}>Got it</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSeen, onDismissTutorial }) {
   return (
     <View style={styles.screen}>
       <Header title="Daily Check-in" subtitle={todayLabel()} onBack={() => setScreen('today')} />
+      <TutorialHint
+        visible={!tutorialSeen}
+        title="Check-in response state"
+        body="Check-ins capture today’s response state: pain, freshness, soreness, and optional performance metrics."
+        onDismiss={onDismissTutorial}
+      />
       <FormSection number="1." title="Pain">
         <SliderField label="Pain (0-10)" value={draft.pain_score} onChange={(value) => updateDraft('pain_score', value)} />
         <Input label="Location (optional)" value={String(draft.pain_location || '')} onChangeText={(value) => updateDraft('pain_location', value)} />
@@ -1122,9 +1408,6 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen }) {
         )}
       </FormSection>
       <ActionButton title="Save Check-in" tone="black" onPress={saveCheckIn} />
-      <Pressable style={styles.centerLink} onPress={() => setScreen('profile')}>
-        <Text style={styles.centerLinkText}>View stored JSON</Text>
-      </Pressable>
     </View>
   );
 }
@@ -1644,7 +1927,7 @@ function ReviewScreen({ analysis, setScreen }) {
   );
 }
 
-function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScreen }) {
+function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScreen, tutorialSeen, onDismissTutorial }) {
   const programme = data.programme;
   const macro = currentMacro(programme);
   const block = currentBlock(programme);
@@ -1702,6 +1985,12 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
   return (
     <View style={styles.screen}>
       <Header title="Programme" onBack={() => setScreen('today')} />
+      <TutorialHint
+        visible={!tutorialSeen}
+        title="Programme context"
+        body="Programme structure gives context to your response patterns. Sessions, exercises, sets, reps, contacts, intent, and intensity make insights more specific."
+        onDismiss={onDismissTutorial}
+      />
       <View style={styles.calendarTitleRow}>
         <View>
           <Text style={styles.label}>{macro?.macro_block_name || 'No macro cycle selected'}</Text>
@@ -2356,7 +2645,7 @@ function EditPlannedSessionScreen({ data, setData, sessionId, setScreen }) {
   );
 }
 
-function InsightsScreen({ data, analysis, setScreen, setSelectedInsight, setSelectedDashboardMetric }) {
+function InsightsScreen({ data, analysis, setScreen, setSelectedInsight, setSelectedDashboardMetric, tutorialSeen, onDismissTutorial }) {
   const [activeFilter, setActiveFilter] = useState('Overview');
   const [insightTab, setInsightTab] = useState('current');
   const rows = orderedRows(analysis);
@@ -2382,6 +2671,12 @@ function InsightsScreen({ data, analysis, setScreen, setSelectedInsight, setSele
         <Text style={styles.h1}>Insights</Text>
         <View style={styles.filterPill}><Text style={styles.filterText}>{rows.length} logs</Text></View>
       </View>
+      <TutorialHint
+        visible={!tutorialSeen}
+        title="Insight strength"
+        body="Insights become stronger after repeated session + check-in pairs. Early patterns are exploratory."
+        onDismiss={onDismissTutorial}
+      />
       <View style={styles.filterTabs}>
         {[
           ['current', 'Current'],
@@ -2579,6 +2874,10 @@ function InsightSectionDetail({ data, analysis, section, setScreen, setSelectedD
 
       {section.id === 'performance' && (
         <>
+          <PerformanceMetricAnalysisInsightCard
+            analysis={analysis}
+            onOpenMetric={(metricKey) => openDashboard(metricKey)}
+          />
           <DashboardPreview title="Performance Trend" metricKey="performance" analysis={analysis} onOpen={() => openDashboard('performance')} />
           <RelationshipBars title="Strongest Performance Relationship" relationships={analysis.relationships.filter((item) => item.yKey === 'performance')} />
           <RankedDayCards title="Best Performance Days" points={bestPerformance} valueKey="performance" />
@@ -2651,7 +2950,7 @@ function InsightSectionDetail({ data, analysis, section, setScreen, setSelectedD
   );
 }
 
-function DashboardScreen({ data, analysis, metricKey, setMetricKey, setSelectedInsight, setScreen }) {
+function DashboardScreen({ data, analysis, metricKey, setMetricKey, setSelectedInsight, setScreen, tutorialSeen, onDismissTutorial }) {
   const [rangeFilter, setRangeFilter] = useState('month');
   const [rangeMenuOpen, setRangeMenuOpen] = useState(false);
   const [macroFilter, setMacroFilter] = useState('all');
@@ -2684,6 +2983,12 @@ function DashboardScreen({ data, analysis, metricKey, setMetricKey, setSelectedI
         <Text style={styles.h1}>Metric Dashboard</Text>
         <View style={styles.filterPill}><Text style={styles.filterText}>{metric.category}</Text></View>
       </View>
+      <TutorialHint
+        visible={!tutorialSeen}
+        title="Metric evidence"
+        body="Use the dashboard to inspect one metric directly: trend, mean, SD, changes, relationships, and chart evidence."
+        onDismiss={onDismissTutorial}
+      />
       <View style={styles.filterTabs}>
         {categories.map((category) => (
           <Pressable
@@ -2705,6 +3010,9 @@ function DashboardScreen({ data, analysis, metricKey, setMetricKey, setSelectedI
           ))}
         </View>
       </View>
+      {activeCategory === 'Performance' ? (
+        <PerformanceMetricAnalysisCard analysis={analysis} selectedMetricKey={metric.key} />
+      ) : null}
       <MetricFigure
         title={`${metric.label} Time Series`}
         metric={metric}
@@ -2843,6 +3151,154 @@ function DashboardPreview({ title, metricKey, analysis, onOpen }) {
       <ActionButton title="Open Metric Dashboard" tone="outline" onPress={onOpen} />
     </View>
   );
+}
+
+function PerformanceMetricAnalysisInsightCard({ analysis, onOpenMetric }) {
+  const performanceAnalysis = analysis?.performanceMetricAnalysis;
+  if (!performanceAnalysis) {
+    return (
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Performance Metric Analysis</Text>
+        <Text style={styles.bodyText}>Performance metric analysis is collecting.</Text>
+      </View>
+    );
+  }
+
+  const strongest = performanceAnalysis.strongestPerformanceMetric;
+  const availableProfiles = [
+    performanceAnalysis.jumpProfile,
+    performanceAnalysis.sprintProfile,
+    performanceAnalysis.liftProfile,
+  ].filter((profile) => profile?.availableMetrics?.length && profile?.interpretation);
+
+  return (
+    <View style={styles.card}>
+      <Text style={styles.sectionTitle}>Performance Metric Analysis</Text>
+      <Text style={styles.figureResult}>{performanceAnalysis.evidenceSummary || 'Performance metric analysis is collecting.'}</Text>
+      <Text style={styles.bodyText}>{performanceAnalysis.combinedInterpretation || 'Performance metric analysis is collecting.'}</Text>
+      {availableProfiles.map((profile) => (
+        <View key={profile.id} style={styles.analysisSubcard}>
+          <Text style={styles.label}>{profile.label}</Text>
+          <Text style={styles.smallCopy}>{profile.interpretation}</Text>
+        </View>
+      ))}
+      {strongest?.reason ? (
+        <View style={styles.evidenceRow}>
+          <Text style={styles.evidenceBadge}>{strongest.label}</Text>
+          <Text style={styles.evidenceBadge}>{strongest.status || 'Collecting'}</Text>
+          <Text style={styles.evidenceBadge}>n = {strongest.n || 0}</Text>
+        </View>
+      ) : null}
+      {strongest?.reason ? <Text style={styles.bodyText}>{strongest.reason}</Text> : null}
+      <ActionButton title="Open Performance Metrics" tone="outline" onPress={() => onOpenMetric(strongest?.key || 'performance')} />
+    </View>
+  );
+}
+
+function PerformanceMetricAnalysisCard({ analysis, selectedMetricKey }) {
+  const performanceAnalysis = analysis?.performanceMetricAnalysis;
+  if (!performanceAnalysis) {
+    return (
+      <View style={styles.chartCard}>
+        <Text style={styles.sectionTitle}>Performance Metric Analysis</Text>
+        <Text style={styles.bodyText}>Performance metric analysis is collecting.</Text>
+      </View>
+    );
+  }
+
+  const strongest = performanceAnalysis.strongestPerformanceMetric;
+  const selectedTrend = performanceMetricKeys.includes(selectedMetricKey)
+    ? performanceAnalysis.metricTrends?.[selectedMetricKey]
+    : null;
+
+  return (
+    <View style={styles.chartCard}>
+      <Text style={styles.sectionTitle}>Performance Metric Analysis</Text>
+      <Text style={styles.figureResult}>{performanceAnalysis.evidenceSummary || 'Performance metric analysis is collecting.'}</Text>
+      <Text style={styles.bodyText}>{performanceAnalysis.combinedInterpretation || 'Performance metric analysis is collecting.'}</Text>
+      {strongest ? (
+        <View style={styles.evidenceRow}>
+          <Text style={styles.evidenceBadge}>Strongest: {strongest.label}</Text>
+          <Text style={styles.evidenceBadge}>{strongest.status || 'Collecting'}</Text>
+          <Text style={styles.evidenceBadge}>n = {strongest.n || 0}</Text>
+        </View>
+      ) : null}
+      {selectedTrend ? (
+        <View style={styles.analysisSubcard}>
+          <Text style={styles.label}>{selectedTrend.label || dashboardMetricConfig(selectedMetricKey).label}</Text>
+          <Text style={styles.smallCopy}>{selectedTrend.evidenceStatement || 'Metric trend is collecting.'}</Text>
+          <Text style={styles.smallCopy}>{selectedTrend.interpretation || 'Metric interpretation is collecting.'}</Text>
+        </View>
+      ) : null}
+      <PerformanceMetricAnalysisChart analysis={analysis} selectedMetricKey={selectedMetricKey} />
+    </View>
+  );
+}
+
+function PerformanceMetricAnalysisChart({ analysis, selectedMetricKey }) {
+  if (selectedMetricKey === 'performance') {
+    const metric = dashboardMetricConfig('performance');
+    const points = metricSeries(analysis, 'performance');
+    if (hasJumpProfileMetrics(analysis)) {
+      return (
+        <View style={styles.figureInner}>
+          <Text style={styles.label}>Jump metric profile</Text>
+          <MultiMetricLineChart series={multiMetricSeriesForKeys(analysis, jumpMetricKeys)} />
+        </View>
+      );
+    }
+    if (points.length < 2) return <Text style={styles.figureLimitation}>Performance metric analysis is collecting.</Text>;
+    return (
+      <MetricFigure
+        title="Performance Score Trend"
+        metric={metric}
+        points={points}
+        insight={metricTrendFromPerformanceAnalysis(analysis, 'performance')}
+        compact
+      />
+    );
+  }
+
+  if (jumpMetricKeys.includes(selectedMetricKey)) {
+    if (!hasJumpProfileMetrics(analysis)) {
+      return <Text style={styles.figureLimitation}>Jump profile needs height/distance plus FT/GCT or RSI before combined interpretation is available.</Text>;
+    }
+    return (
+      <View style={styles.figureInner}>
+        <Text style={styles.label}>Jump metric profile</Text>
+        <MultiMetricLineChart series={multiMetricSeriesForKeys(analysis, jumpMetricKeys)} />
+      </View>
+    );
+  }
+
+  if (selectedMetricKey === 'sprint_time') {
+    const metric = dashboardMetricConfig('sprint_time');
+    const points = metricSeries(analysis, 'sprint_time');
+    if (points.length < 2) return <Text style={styles.figureLimitation}>Sprint/lift profile is collecting.</Text>;
+    return (
+      <MetricFigure
+        title="Sprint Time Trend"
+        metric={metric}
+        points={points}
+        insight={metricTrendFromPerformanceAnalysis(analysis, 'sprint_time')}
+        compact
+      />
+    );
+  }
+
+  if (liftMetricKeys.includes(selectedMetricKey)) {
+    if (!hasLiftProfileMetrics(analysis)) {
+      return <Text style={styles.figureLimitation}>Sprint/lift profile is collecting.</Text>;
+    }
+    return (
+      <View style={styles.figureInner}>
+        <Text style={styles.label}>Lift metric profile</Text>
+        <MultiMetricLineChart series={multiMetricSeriesForKeys(analysis, liftMetricKeys)} />
+      </View>
+    );
+  }
+
+  return <Text style={styles.figureLimitation}>Performance metric analysis is collecting.</Text>;
 }
 
 function MetricFigure({ title, metric, points, insight, compact = false, filterControl = null }) {
@@ -3485,7 +3941,7 @@ function ForecastCard({ title, basis, fallback, insight }) {
   );
 }
 
-function StorageScreen({
+function ProfileScreen({
   data,
   clearAll,
   currentUser,
@@ -3495,12 +3951,21 @@ function StorageScreen({
   setAuthEmail,
   setAuthPassword,
   updateProfileName,
+  updateProfilePb,
+  resetTutorialHints,
+  replayOnboarding,
   onSignUp,
   onSignIn,
   onSignOut,
+  onChangePassword,
 }) {
+  const [showDeveloperTools, setShowDeveloperTools] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const pbs = data.profile?.pbs || {};
   const preview = JSON.stringify(
     {
+      profile: data.profile,
       programme: data.programme,
       sessions: data.sessions.slice(0, 2),
       checkIns: data.checkIns.slice(0, 2),
@@ -3510,22 +3975,20 @@ function StorageScreen({
   );
   return (
     <View style={styles.screen}>
-      <Text style={styles.h1}>Storage</Text>
+      <Text style={styles.h1}>Profile</Text>
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Profile</Text>
+        <Text style={styles.sectionTitle}>Account</Text>
         <Input label="Name" value={data.profile?.name || ''} onChangeText={updateProfileName} />
-      </View>
-      <View style={styles.authCard}>
         <View style={styles.rowBetween}>
           <View style={styles.flex}>
-            <Text style={styles.sectionTitle}>Developer Supabase Auth</Text>
+            <Text style={styles.label}>Email</Text>
             <Text style={styles.muted}>
-              {currentUser ? `Signed in as ${currentUser.email || currentUser.id}` : 'Not signed in. Local storage is active.'}
+              {currentUser ? (currentUser.email || currentUser.id) : 'Local mode'}
             </Text>
           </View>
           <View style={[styles.authStatus, currentUser && styles.authStatusActive]}>
             <Text style={[styles.authStatusText, currentUser && styles.authStatusTextActive]}>
-              {currentUser ? 'Supabase' : 'Local'}
+              {currentUser ? 'Signed in' : 'Local mode'}
             </Text>
           </View>
         </View>
@@ -3548,7 +4011,7 @@ function StorageScreen({
             />
             <View style={styles.authActions}>
               <Pressable style={styles.authButton} onPress={onSignUp} disabled={authLoading}>
-                <Text style={styles.authButtonText}>Sign Up</Text>
+                <Text style={styles.authButtonText}>Create Account</Text>
               </Pressable>
               <Pressable style={[styles.authButton, styles.authButtonDark]} onPress={onSignIn} disabled={authLoading}>
                 <Text style={[styles.authButtonText, styles.authButtonTextLight]}>Sign In</Text>
@@ -3560,17 +4023,75 @@ function StorageScreen({
             <Text style={styles.authButtonText}>Sign Out</Text>
           </Pressable>
         )}
-        <Text style={styles.axisLabel}>Temporary developer UI. Authenticated check-ins, completed sessions, and check-in insights also save to Supabase.</Text>
       </View>
-      <View style={styles.metricStrip}>
-        <Metric label="Sessions" value={data.sessions.length} />
-        <Metric label="Check-ins" value={data.checkIns.length} />
-        <Metric label="Exercises" value={(data.activeSession.exercises || []).length} />
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Personal Bests</Text>
+        <View style={styles.profileFieldGrid}>
+          {pbFields.map(([key, label]) => (
+            <View key={key} style={styles.profileFieldCell}>
+              <Input label={label} value={pbs[key] || ''} onChangeText={(value) => updateProfilePb(key, value)} />
+            </View>
+          ))}
+        </View>
       </View>
-      <View style={styles.jsonBox}>
-        <Text style={styles.jsonText}>{preview}</Text>
+
+      {currentUser ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Password</Text>
+          <TextInput
+            placeholder="New password"
+            secureTextEntry
+            style={styles.input}
+            value={newPassword}
+            onChangeText={setNewPassword}
+          />
+          <TextInput
+            placeholder="Confirm password"
+            secureTextEntry
+            style={styles.input}
+            value={confirmPassword}
+            onChangeText={setConfirmPassword}
+          />
+          <ActionButton
+            title="Change Password"
+            tone="black"
+            onPress={async () => {
+              const ok = await onChangePassword(newPassword, confirmPassword);
+              if (ok) {
+                setNewPassword('');
+                setConfirmPassword('');
+              }
+            }}
+          />
+        </View>
+      ) : null}
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>App setup</Text>
+        <ActionButton title="Replay onboarding" tone="outline" onPress={replayOnboarding} />
+        <ActionButton title="Reset tutorial hints" tone="outline" onPress={resetTutorialHints} />
       </View>
-      <ActionButton title="Reset Local Data" tone="outline" onPress={clearAll} />
+
+      <View style={styles.card}>
+        <Pressable style={styles.rowBetween} onPress={() => setShowDeveloperTools((current) => !current)}>
+          <Text style={styles.sectionTitle}>Developer tools</Text>
+          <Text style={styles.chevron}>{showDeveloperTools ? '⌃' : '⌄'}</Text>
+        </Pressable>
+        {showDeveloperTools ? (
+          <>
+            <View style={styles.metricStrip}>
+              <Metric label="Sessions" value={data.sessions.length} />
+              <Metric label="Check-ins" value={data.checkIns.length} />
+              <Metric label="Exercises" value={(data.activeSession.exercises || []).length} />
+            </View>
+            <View style={styles.jsonBox}>
+              <Text style={styles.jsonText}>{preview}</Text>
+            </View>
+            <ActionButton title="Reset Local Data" tone="outline" onPress={clearAll} />
+          </>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -3946,6 +4467,15 @@ const styles = StyleSheet.create({
   appShell: { flex: 1 },
   content: { padding: 20, paddingBottom: 144 },
   screen: { gap: 18 },
+  onboardingContent: { paddingBottom: 40 },
+  onboardingScreen: { gap: 18, paddingTop: 16 },
+  onboardingSteps: { flexDirection: 'row', gap: 8 },
+  onboardingStepDot: { backgroundColor: '#D9D9D4', borderRadius: 999, height: 8, width: 26 },
+  onboardingStepDotActive: { backgroundColor: '#111111', width: 42 },
+  onboardingInfoCard: { backgroundColor: '#F7F7F5', borderColor: '#E8E8E4', borderRadius: 14, borderWidth: 1, gap: 6, padding: 12 },
+  tutorialHint: { alignItems: 'flex-start', backgroundColor: '#ECF8EF', borderColor: '#CFE8D4', borderRadius: 16, borderWidth: 1, flexDirection: 'row', gap: 12, padding: 14 },
+  hintDismiss: { backgroundColor: '#111111', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7 },
+  hintDismissText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
   h1: { fontSize: 30, fontWeight: '800', color: '#111111', letterSpacing: -0.4 },
   screenSubtitle: { color: '#686862', fontSize: 15, fontWeight: '500', lineHeight: 21 },
   date: { marginTop: 10, fontSize: 14, fontWeight: '800', color: '#111111' },
@@ -3969,6 +4499,8 @@ const styles = StyleSheet.create({
   authButtonDark: { backgroundColor: '#111111', borderColor: '#111111' },
   authButtonText: { color: '#111111', fontWeight: '900' },
   authButtonTextLight: { color: '#FFFFFF' },
+  profileFieldGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  profileFieldCell: { flexBasis: '47%', flexGrow: 1 },
   label: { color: '#111111', fontSize: 12, fontWeight: '800' },
   inputLabel: { color: '#1B1B19', fontSize: 12, fontWeight: '700' },
   cardTitle: { color: '#111111', flexShrink: 1, fontSize: 18, fontWeight: '800', lineHeight: 23 },
@@ -4158,6 +4690,7 @@ const styles = StyleSheet.create({
   axisFooter: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
   axisLabel: { color: '#777771', flexShrink: 1, fontSize: 10, fontWeight: '700' },
   figureInner: { gap: 8 },
+  analysisSubcard: { backgroundColor: '#F7F7F5', borderRadius: 12, gap: 6, padding: 10 },
   figureResult: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '700', lineHeight: 19 },
   figureInterpretation: { backgroundColor: '#F7F7F5', borderRadius: 12, color: '#22221F', flexShrink: 1, fontSize: 12, fontWeight: '600', lineHeight: 18, padding: 10 },
   figureLimitation: { color: '#74746F', flexShrink: 1, fontSize: 11, fontWeight: '600', lineHeight: 16 },

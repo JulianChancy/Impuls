@@ -137,6 +137,22 @@ function checkInFromRow(row) {
   };
 }
 
+function profileFromRow(row) {
+  return {
+    ...defaultData.profile,
+    name: cleanOldDefaultText(row?.name, 'Alex') || defaultData.profile.name,
+    onboarding_completed: row?.onboarding_completed ?? defaultData.profile.onboarding_completed,
+    tutorialFlags: {
+      ...defaultData.profile.tutorialFlags,
+      ...(row?.tutorial_flags || row?.tutorialFlags || {}),
+    },
+    pbs: {
+      ...defaultData.profile.pbs,
+      ...(row?.pbs || {}),
+    },
+  };
+}
+
 function plannedSessionFromRow(row, exercises = []) {
   return {
     id: row.id,
@@ -226,7 +242,7 @@ export async function loadAppDataFromSupabase(userId) {
 
   return {
     ...cloneData(defaultData),
-    profile: { name: cleanOldDefaultText(profiles[0]?.name, 'Alex') || defaultData.profile.name },
+    profile: profileFromRow(profiles[0]),
     programme,
     activeSession: cloneData(defaultData.activeSession),
     sessions: sessions.map((session) => sessionFromRow(session, (sessionExercisesBySession[session.id] || []).map(exerciseFromRow))),
@@ -251,12 +267,29 @@ function groupBy(rows, key) {
 
 export async function saveProfile(userId, profile) {
   requireUserId(userId);
-  return singleOrThrow(
-    supabase.from('profiles').upsert(stripUndefined({
-      user_id: userId,
-      name: profile?.name || defaultData.profile.name,
-    }), { onConflict: 'user_id' })
-  );
+  const fullPayload = stripUndefined({
+    user_id: userId,
+    name: profile?.name || defaultData.profile.name,
+    onboarding_completed: Boolean(profile?.onboarding_completed),
+    tutorial_flags: profile?.tutorialFlags || defaultData.profile.tutorialFlags,
+    pbs: profile?.pbs || defaultData.profile.pbs,
+  });
+
+  try {
+    return await singleOrThrow(
+      supabase.from('profiles').upsert(fullPayload, { onConflict: 'user_id' })
+    );
+  } catch (error) {
+    const schemaMessage = `${error?.message || ''} ${error?.details || ''}`;
+    if (!/onboarding_completed|tutorial_flags|pbs/i.test(schemaMessage)) throw error;
+    console.warn('[SUPABASE SAVE] Profile extended columns missing. Saving name only. Run the profile migration in supabase/schema.sql.', error);
+    return singleOrThrow(
+      supabase.from('profiles').upsert(stripUndefined({
+        user_id: userId,
+        name: profile?.name || defaultData.profile.name,
+      }), { onConflict: 'user_id' })
+    );
+  }
 }
 
 export async function saveProgramme(userId, programme) {
