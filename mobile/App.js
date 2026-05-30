@@ -137,6 +137,16 @@ const pbFields = [
   ['lift_name', 'Main lift name'],
   ['lift_weight', 'Main lift weight'],
 ];
+const derivedPbFields = [
+  { key: 'performance', label: 'Performance score', mode: 'max', manualKey: null },
+  { key: 'height_or_distance', label: 'Jump height / distance', mode: 'max', manualKey: 'jump_height' },
+  { key: 'ft', label: 'FT', mode: 'max', manualKey: 'ft' },
+  { key: 'gct', label: 'GCT', mode: 'min', manualKey: 'gct' },
+  { key: 'rsi', label: 'RSI', mode: 'max', manualKey: 'rsi' },
+  { key: 'sprint_time', label: 'Sprint time', mode: 'min', manualKey: 'sprint_time' },
+  { key: 'bar_velocity', label: 'Bar velocity', mode: 'max', manualKey: 'bar_velocity' },
+  { key: 'weight', label: 'Lift weight', mode: 'max', manualKey: 'lift_weight' },
+];
 
 function mergeProfileForAuthLoad(remoteProfile = {}, localProfile = {}) {
   const localFlags = localProfile.tutorialFlags || {};
@@ -180,6 +190,31 @@ function addDays(dateValue, amount) {
   return isoDate(date);
 }
 
+function isValidDateText(value) {
+  if (!value) return true;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00`);
+  return !Number.isNaN(parsed.getTime()) && isoDate(parsed) === value;
+}
+
+function isDateRangeValid(startDate, endDate) {
+  if (!startDate || !endDate) return true;
+  return new Date(`${endDate}T00:00:00`).getTime() >= new Date(`${startDate}T00:00:00`).getTime();
+}
+
+function formatRangeDate(value) {
+  if (!isValidDateText(value) || !value) return '';
+  return new Date(`${value}T00:00:00`).toLocaleDateString([], { month: 'short', day: '2-digit' });
+}
+
+function dateRangeSummary(startDate, endDate, prefix = '') {
+  if (!startDate && !endDate) return 'date range not set';
+  const start = formatRangeDate(startDate);
+  const end = formatRangeDate(endDate);
+  if (!start || !end) return 'date range not set';
+  return `${prefix}${start} → ${end}`;
+}
+
 function weekDayLabels(startDate) {
   const start = new Date(`${startDate || isoDate()}T00:00:00`);
   return Array.from({ length: 7 }, (_, index) => {
@@ -207,6 +242,12 @@ function pretty(value, digits = 1) {
 function toNumber(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function storedNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function exercisePrescription(exercise) {
@@ -428,6 +469,74 @@ function orderedRows(analysis) {
 
 function metricSeries(analysis, key) {
   return analysis?.metricSeries?.[key] || [];
+}
+
+function metricPointSource(point) {
+  return point?.row?.session?.session_name || point?.row?.checkIn?.performance_type || point?.source || 'stored log';
+}
+
+function fallbackMetricPoints(data, key) {
+  const checkInPoints = (data?.checkIns || []).map((checkIn) => {
+    let value = null;
+    if (key === 'performance') value = storedNumber(checkIn.performance_score);
+    else if (key === 'rsi') {
+      const ft = storedNumber(checkIn.ft);
+      const gct = storedNumber(checkIn.gct);
+      value = ft !== null && gct > 0 ? ft / gct : null;
+    } else value = storedNumber(checkIn[key]);
+    return {
+      id: checkIn.id,
+      date: checkIn.check_in_datetime,
+      value,
+      source: checkIn.performance_type || 'check-in',
+    };
+  });
+
+  const setMetricPoints = (data?.sessions || []).flatMap((session) =>
+    (session.exercises || []).flatMap((exercise) =>
+      (exercise.set_metrics || []).map((setMetric, index) => {
+        const metrics = setMetric.metrics || {};
+        let value = null;
+        if (key === 'performance') value = storedNumber(setMetric.performance_score);
+        else if (key === 'sprint_time') value = storedNumber(metrics.sprint_time ?? metrics.time);
+        else if (key === 'rsi') {
+          const direct = storedNumber(metrics.rsi);
+          const ft = storedNumber(metrics.ft);
+          const gct = storedNumber(metrics.gct);
+          value = direct ?? (ft !== null && gct > 0 ? ft / gct : null);
+        }
+        else value = storedNumber(metrics[key]);
+        return {
+          id: `${session.id}-${exercise.id}-${index}-${key}`,
+          date: session.session_datetime,
+          value,
+          source: [session.session_name, exercise.exercise_name].filter(Boolean).join(' / ') || 'session metric',
+        };
+      })
+    )
+  );
+
+  return [...checkInPoints, ...setMetricPoints].filter((point) => Number.isFinite(point.value));
+}
+
+function bestMetricPoint(points, mode) {
+  const clean = [...points].filter((point) => Number.isFinite(point.value));
+  if (!clean.length) return null;
+  return clean.sort((a, b) => (mode === 'min' ? a.value - b.value : b.value - a.value))[0];
+}
+
+function derivePersonalBests(analysis, data) {
+  return Object.fromEntries(derivedPbFields.map((field) => {
+    const analysisPoints = metricSeries(analysis, field.key);
+    const sourcePoints = analysisPoints.length ? analysisPoints : fallbackMetricPoints(data, field.key);
+    const best = bestMetricPoint(sourcePoints, field.mode);
+    return [
+      field.key,
+      best
+        ? { value: best.value, date: best.date, source: metricPointSource(best) }
+        : { value: null, date: null, source: null },
+    ];
+  }));
 }
 
 function dashboardMetricConfig(key) {
@@ -1261,7 +1370,7 @@ export default function App() {
             {screen === 'profile' && (
               <ProfileScreen
                 data={data}
-                clearAll={clearAll}
+                analysis={analysis}
                 currentUser={currentUser}
                 authEmail={authEmail}
                 authPassword={authPassword}
@@ -2185,19 +2294,20 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
       const macroId = createId('macro');
       const blockId = createId('block');
       const weekId = createId('week');
+      const startDate = isoDate();
       draft.macro_blocks = draft.macro_blocks || [];
       draft.macro_blocks.push({
         id: macroId,
         macro_block_name: '',
-        start_date: isoDate(),
-        end_date: '',
+        start_date: startDate,
+        end_date: addDays(startDate, 42),
         blocks: [
           {
             id: blockId,
             block_name: '',
-            start_date: isoDate(),
+            start_date: startDate,
             end_date: '',
-            weeks: [{ id: weekId, week_name: '', start_date: isoDate(), end_date: '', sessions: [] }],
+            weeks: [{ id: weekId, week_name: '', start_date: startDate, end_date: '', sessions: [] }],
           },
         ],
       });
@@ -2217,10 +2327,10 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
     });
   }
 
-  function updateMacroName(macroId, value) {
+  function updateMacroField(macroId, key, value) {
     commitProgramme((draft) => {
       const targetMacro = draft.macro_blocks.find((item) => item.id === macroId);
-      if (targetMacro) targetMacro.macro_block_name = value;
+      if (targetMacro) targetMacro[key] = value;
     });
   }
 
@@ -2229,10 +2339,11 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
       let selectedMacro = currentMacro(draft);
       if (!selectedMacro) {
         const macroId = createId('macro');
+        const startDate = isoDate();
         draft.macro_blocks = [{
           id: macroId,
           macro_block_name: '',
-          start_date: isoDate(),
+          start_date: startDate,
           end_date: '',
           blocks: [],
         }];
@@ -2241,13 +2352,14 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
       }
       const blockId = createId('block');
       const weekId = createId('week');
+      const startDate = selectedMacro.start_date || isoDate();
       selectedMacro.blocks = selectedMacro.blocks || [];
       selectedMacro.blocks.push({
         id: blockId,
         block_name: '',
-        start_date: isoDate(),
+        start_date: startDate,
         end_date: '',
-        weeks: [{ id: weekId, week_name: '', start_date: isoDate(), end_date: '', sessions: [] }],
+        weeks: [{ id: weekId, week_name: '', start_date: startDate, end_date: '', sessions: [] }],
       });
       draft.selected_block_id = blockId;
       draft.selected_week_id = weekId;
@@ -2266,11 +2378,11 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
     });
   }
 
-  function updateBlockName(blockId, value) {
+  function updateBlockField(blockId, key, value) {
     commitProgramme((draft) => {
       const selectedMacro = currentMacro(draft);
       const targetBlock = selectedMacro?.blocks?.find((item) => item.id === blockId);
-      if (targetBlock) targetBlock.block_name = value;
+      if (targetBlock) targetBlock[key] = value;
     });
   }
 
@@ -2286,13 +2398,30 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
         </View>
         {(programme.macro_blocks || []).map((macroItem) => (
           <View key={macroItem.id} style={styles.programmeEditRow}>
-            <Pressable
-              style={styles.programmeEditMain}
-              onPress={() => selectMacro(macroItem.id)}
-            >
+            <View style={styles.programmeEditMain}>
               <Text style={styles.label}>{programme.selected_macro_id === macroItem.id ? 'Selected Macro' : 'Macro'}</Text>
-              <InlineEdit label="" value={macroItem.macro_block_name} onChangeText={(value) => updateMacroName(macroItem.id, value)} />
-            </Pressable>
+              <InlineEdit label="Macro name" value={macroItem.macro_block_name} onChangeText={(value) => updateMacroField(macroItem.id, 'macro_block_name', value)} />
+              <Text style={styles.muted}>{dateRangeSummary(macroItem.start_date, macroItem.end_date)}</Text>
+              <DateField
+                label="Start date"
+                value={macroItem.start_date || ''}
+                startDate={macroItem.start_date}
+                endDate={macroItem.end_date}
+                fieldKey="start_date"
+                onCommit={(value) => updateMacroField(macroItem.id, 'start_date', value)}
+              />
+              <DateField
+                label="End date"
+                value={macroItem.end_date || ''}
+                startDate={macroItem.start_date}
+                endDate={macroItem.end_date}
+                fieldKey="end_date"
+                onCommit={(value) => updateMacroField(macroItem.id, 'end_date', value)}
+              />
+              <Pressable style={styles.miniButton} onPress={() => selectMacro(macroItem.id)}>
+                <Text style={styles.miniButtonText}>{programme.selected_macro_id === macroItem.id ? 'Selected' : 'Select Macro'}</Text>
+              </Pressable>
+            </View>
             <Pressable style={styles.deleteButton} onPress={() => deleteMacroBlock(macroItem.id)}>
               <Text style={styles.deleteButtonText}>Delete Macro</Text>
             </Pressable>
@@ -2307,14 +2436,30 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
         </View>
         {(macro?.blocks || []).map((blockItem) => (
           <View key={blockItem.id} style={styles.programmeEditRow}>
-            <Pressable
-              style={styles.programmeEditMain}
-              onPress={() => selectBlockAndOpen(blockItem.id)}
-            >
+            <View style={styles.programmeEditMain}>
               <Text style={styles.label}>{programme.selected_block_id === blockItem.id ? 'Selected Block' : 'Block'}</Text>
-              <InlineEdit label="" value={blockItem.block_name} onChangeText={(value) => updateBlockName(blockItem.id, value)} />
-              <Text style={styles.muted}>Tap block to open week calendar and edit sessions.</Text>
-            </Pressable>
+              <InlineEdit label="Block name" value={blockItem.block_name} onChangeText={(value) => updateBlockField(blockItem.id, 'block_name', value)} />
+              <Text style={styles.muted}>{dateRangeSummary(blockItem.start_date, blockItem.end_date, 'Week/phase range: ')}</Text>
+              <DateField
+                label="Start date"
+                value={blockItem.start_date || ''}
+                startDate={blockItem.start_date}
+                endDate={blockItem.end_date}
+                fieldKey="start_date"
+                onCommit={(value) => updateBlockField(blockItem.id, 'start_date', value)}
+              />
+              <DateField
+                label="End date"
+                value={blockItem.end_date || ''}
+                startDate={blockItem.start_date}
+                endDate={blockItem.end_date}
+                fieldKey="end_date"
+                onCommit={(value) => updateBlockField(blockItem.id, 'end_date', value)}
+              />
+              <Pressable style={styles.miniButton} onPress={() => selectBlockAndOpen(blockItem.id)}>
+                <Text style={styles.miniButtonText}>Edit Sessions</Text>
+              </Pressable>
+            </View>
             <Pressable style={styles.deleteButton} onPress={() => deleteTrainingBlock(blockItem.id)}>
               <Text style={styles.deleteButtonText}>Delete Block</Text>
             </Pressable>
@@ -3999,7 +4144,7 @@ function ForecastCard({ title, basis, fallback, insight }) {
 
 function ProfileScreen({
   data,
-  clearAll,
+  analysis,
   currentUser,
   authEmail,
   authPassword,
@@ -4015,20 +4160,12 @@ function ProfileScreen({
   onSignOut,
   onChangePassword,
 }) {
-  const [showDeveloperTools, setShowDeveloperTools] = useState(false);
+  const [showManualPbNotes, setShowManualPbNotes] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const pbs = data.profile?.pbs || {};
-  const preview = JSON.stringify(
-    {
-      profile: data.profile,
-      programme: data.programme,
-      sessions: data.sessions.slice(0, 2),
-      checkIns: data.checkIns.slice(0, 2),
-    },
-    null,
-    2
-  );
+  const derivedPbs = derivePersonalBests(analysis, data);
+  const hasLoggedPb = Object.values(derivedPbs).some((best) => Number.isFinite(best?.value));
   return (
     <View style={styles.screen}>
       <Text style={styles.h1}>Profile</Text>
@@ -4083,13 +4220,27 @@ function ProfileScreen({
 
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Personal Bests</Text>
+        <Text style={styles.bodyText}>PBs are calculated from your stored logs.</Text>
+        <Text style={styles.muted}>Add performance metrics in check-ins or session set metrics to update PBs.</Text>
+        {!hasLoggedPb ? <Text style={styles.figureLimitation}>PBs collecting from stored logs.</Text> : null}
         <View style={styles.profileFieldGrid}>
-          {pbFields.map(([key, label]) => (
-            <View key={key} style={styles.profileFieldCell}>
-              <Input label={label} value={pbs[key] || ''} onChangeText={(value) => updateProfilePb(key, value)} />
-            </View>
+          {derivedPbFields.map((field) => (
+            <PersonalBestItem key={field.key} field={field} best={derivedPbs[field.key]} manualValue={field.manualKey ? pbs[field.manualKey] : ''} />
           ))}
         </View>
+        <Pressable style={styles.chevronRow} onPress={() => setShowManualPbNotes((current) => !current)}>
+          <Text style={styles.chevronText}>Manual PB notes</Text>
+          <Text style={styles.chevron}>{showManualPbNotes ? '⌃' : '⌄'}</Text>
+        </Pressable>
+        {showManualPbNotes ? (
+          <View style={styles.profileFieldGrid}>
+            {pbFields.map(([key, label]) => (
+              <View key={key} style={styles.profileFieldCell}>
+                <Input label={label} value={pbs[key] || ''} onChangeText={(value) => updateProfilePb(key, value)} />
+              </View>
+            ))}
+          </View>
+        ) : null}
       </View>
 
       {currentUser ? (
@@ -4128,26 +4279,24 @@ function ProfileScreen({
         <ActionButton title="Replay onboarding" tone="outline" onPress={replayOnboarding} />
         <ActionButton title="Reset tutorial hints" tone="outline" onPress={resetTutorialHints} />
       </View>
+    </View>
+  );
+}
 
-      <View style={styles.card}>
-        <Pressable style={styles.rowBetween} onPress={() => setShowDeveloperTools((current) => !current)}>
-          <Text style={styles.sectionTitle}>Developer tools</Text>
-          <Text style={styles.chevron}>{showDeveloperTools ? '⌃' : '⌄'}</Text>
-        </Pressable>
-        {showDeveloperTools ? (
-          <>
-            <View style={styles.metricStrip}>
-              <Metric label="Sessions" value={data.sessions.length} />
-              <Metric label="Check-ins" value={data.checkIns.length} />
-              <Metric label="Exercises" value={(data.activeSession.exercises || []).length} />
-            </View>
-            <View style={styles.jsonBox}>
-              <Text style={styles.jsonText}>{preview}</Text>
-            </View>
-            <ActionButton title="Reset Local Data" tone="outline" onPress={clearAll} />
-          </>
-        ) : null}
-      </View>
+function PersonalBestItem({ field, best, manualValue }) {
+  const hasLogged = Number.isFinite(best?.value);
+  const hasManual = manualValue !== undefined && manualValue !== null && String(manualValue).trim() !== '';
+  return (
+    <View style={styles.profilePbItem}>
+      <Text style={styles.currentReadLabel}>{field.label}</Text>
+      <Text style={styles.currentReadValue}>
+        {hasLogged ? pretty(best.value, field.key === 'rsi' ? 2 : 1) : hasManual ? `Manual note: ${manualValue}` : 'collecting'}
+      </Text>
+      {hasLogged ? (
+        <Text style={styles.muted}>{best.date ? dateShort(best.date) : 'Date collecting'}{best.source ? ` / ${best.source}` : ''}</Text>
+      ) : (
+        <Text style={styles.muted}>{hasManual ? 'Manual note only; no logged PB yet.' : 'No stored value yet.'}</Text>
+      )}
     </View>
   );
 }
@@ -4223,6 +4372,45 @@ function Input({ label, value, onChangeText, editable = true }) {
     <View style={styles.inputWrap}>
       <Text style={styles.inputLabel}>{label}</Text>
       <TextInput style={styles.input} value={String(value ?? '')} onChangeText={onChangeText} editable={editable} />
+    </View>
+  );
+}
+
+function DateField({ label, value, startDate, endDate, fieldKey, onCommit }) {
+  const [draft, setDraft] = useState(value || '');
+
+  useEffect(() => {
+    setDraft(value || '');
+  }, [value]);
+
+  function commit() {
+    const trimmed = String(draft || '').trim();
+    if (!isValidDateText(trimmed)) {
+      Alert.alert('Invalid date', 'Use YYYY-MM-DD format.');
+      setDraft(value || '');
+      return;
+    }
+    const nextStart = fieldKey === 'start_date' ? trimmed : startDate;
+    const nextEnd = fieldKey === 'end_date' ? trimmed : endDate;
+    if (!isDateRangeValid(nextStart, nextEnd)) {
+      Alert.alert('Invalid date range', 'End date cannot be before start date.');
+      setDraft(value || '');
+      return;
+    }
+    onCommit(trimmed);
+  }
+
+  return (
+    <View style={styles.inputWrap}>
+      <Text style={styles.inputLabel}>{label}</Text>
+      <TextInput
+        style={styles.input}
+        value={draft}
+        placeholder="YYYY-MM-DD"
+        onChangeText={setDraft}
+        onEndEditing={commit}
+        autoCapitalize="none"
+      />
     </View>
   );
 }
@@ -4557,6 +4745,7 @@ const styles = StyleSheet.create({
   authButtonTextLight: { color: '#FFFFFF' },
   profileFieldGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   profileFieldCell: { flexBasis: '47%', flexGrow: 1 },
+  profilePbItem: { backgroundColor: '#F7F7F5', borderColor: '#E8E8E4', borderRadius: 12, borderWidth: 1, flexBasis: '47%', flexGrow: 1, gap: 5, padding: 12 },
   label: { color: '#111111', fontSize: 12, fontWeight: '800' },
   inputLabel: { color: '#1B1B19', fontSize: 12, fontWeight: '700' },
   cardTitle: { color: '#111111', flexShrink: 1, fontSize: 18, fontWeight: '800', lineHeight: 23 },
