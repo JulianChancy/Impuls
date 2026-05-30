@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "Impuls",
+    "slug": "impuls-local",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.julianchan.impuls.local"
+    },
+    "android": {
+      "package": "com.julianchan.impuls.local",
+      "adaptiveIcon": {
+        "backgroundColor": "#EEF1EA"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
