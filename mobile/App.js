@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -20,6 +20,20 @@ import {
   resetAppData,
   createId,
 } from './src/storage';
+import {
+  getCurrentUser,
+  onAuthStateChange,
+  signIn,
+  signOut,
+  signUp,
+} from './src/auth';
+import {
+  loadAppDataFromSupabase,
+  saveCheckIn as saveCheckInToSupabase,
+  saveCheckInInsight as saveCheckInInsightToSupabase,
+  saveProgramme as saveProgrammeToSupabase,
+  saveSession as saveSessionToSupabase,
+} from './src/database';
 import { Circle, G, Line, Path, Rect, Svg, Text as SvgText } from 'react-native-svg';
 
 function analysisUrlFromEnv() {
@@ -30,6 +44,10 @@ function analysisUrlFromEnv() {
 }
 
 const ANALYSIS_API_URL = analysisUrlFromEnv();
+
+function programmeSignature(programme) {
+  return JSON.stringify(programme || {});
+}
 
 const movementOptions = [
   ['plyometric', 'Plyometric'],
@@ -453,6 +471,10 @@ export default function App() {
   const [analysis, setAnalysis] = useState(null);
   const [analysisError, setAnalysisError] = useState(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
   const [screen, setScreen] = useState('today');
   const [lastSavedCheckInId, setLastSavedCheckInId] = useState(null);
   const [exerciseDraft, setExerciseDraft] = useState(emptyExercise);
@@ -460,14 +482,139 @@ export default function App() {
   const [selectedDashboardMetric, setSelectedDashboardMetric] = useState('performance');
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(isoDate());
   const [selectedPlannedSessionId, setSelectedPlannedSessionId] = useState(null);
+  const hasLoadedInitialDataRef = useRef(false);
+  const lastProgrammeSaveSignatureRef = useRef(null);
+  const latestProgrammeSignatureRef = useRef(null);
+
+  async function loadLocalFallback(reason) {
+    console.log(`[LOCAL FALLBACK] ${reason}`);
+    const localData = await loadAppData();
+    hasLoadedInitialDataRef.current = true;
+    lastProgrammeSaveSignatureRef.current = programmeSignature(localData.programme);
+    latestProgrammeSignatureRef.current = lastProgrammeSaveSignatureRef.current;
+    setData(localData);
+  }
+
+  async function loadDataForUser(user) {
+    if (!user) {
+      await loadLocalFallback('No authenticated user. Loaded local storage.');
+      return;
+    }
+
+    try {
+      const supabaseData = await loadAppDataFromSupabase(user.id);
+      console.log(`[SUPABASE LOAD] Loaded ${supabaseData.checkIns.length} check-ins and ${supabaseData.sessions.length} sessions.`);
+      hasLoadedInitialDataRef.current = true;
+      lastProgrammeSaveSignatureRef.current = programmeSignature(supabaseData.programme);
+      latestProgrammeSignatureRef.current = lastProgrammeSaveSignatureRef.current;
+      setData(supabaseData);
+    } catch (error) {
+      console.error('[SUPABASE LOAD] Failed. Falling back to local storage.', error);
+      await loadLocalFallback('Supabase load failed. Loaded local storage.');
+    }
+  }
 
   useEffect(() => {
-    loadAppData().then(setData);
+    let mounted = true;
+
+    async function bootstrapAuth() {
+      try {
+        const user = await getCurrentUser();
+        if (!mounted) return;
+        setCurrentUser(user);
+        console.log(user ? '[AUTH] Existing user session found' : '[AUTH] No active user session');
+        await loadDataForUser(user);
+      } catch (error) {
+        console.error('[AUTH] Failed to read current user.', error);
+        if (mounted) await loadLocalFallback('Auth check failed. Loaded local storage.');
+      } finally {
+        if (mounted) setAuthLoading(false);
+      }
+    }
+
+    bootstrapAuth();
+
+    const subscription = onAuthStateChange(async (user) => {
+      if (!mounted) return;
+      setCurrentUser(user);
+      console.log(user ? '[AUTH] User signed in' : '[AUTH] User signed out');
+      setAuthLoading(true);
+      try {
+        await loadDataForUser(user);
+      } finally {
+        if (mounted) setAuthLoading(false);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      subscription?.unsubscribe?.();
+    };
   }, []);
 
   useEffect(() => {
-    if (data) saveAppData(data);
-  }, [data]);
+    if (data) {
+      saveAppData(data);
+      if (!currentUser) console.log('[LOCAL FALLBACK] Data saved locally.');
+    }
+  }, [data, currentUser]);
+
+  useEffect(() => {
+    const nextSignature = programmeSignature(data?.programme);
+    const hasLoadedInitialData = hasLoadedInitialDataRef.current;
+    const programmeChanged = nextSignature !== lastProgrammeSaveSignatureRef.current;
+    const suppressReasons = [];
+
+    if (!currentUser?.id) suppressReasons.push('no authenticated user');
+    if (!data?.programme) suppressReasons.push('no programme data');
+    if (authLoading) suppressReasons.push('auth loading');
+    if (!hasLoadedInitialData) suppressReasons.push('initial data not loaded');
+    if (!programmeChanged) suppressReasons.push('programme unchanged');
+
+    console.log('[SUPABASE SAVE] Programme autosave check', {
+      currentUserId: currentUser?.id || null,
+      hasLoadedInitialData,
+      authLoading,
+      hasProgramme: Boolean(data?.programme),
+      programmeChanged,
+      suppressed: suppressReasons.length > 0,
+      suppressReasons,
+    });
+
+    if (suppressReasons.length > 0) return undefined;
+
+    latestProgrammeSignatureRef.current = nextSignature;
+
+    const timer = setTimeout(() => {
+      console.log('[SUPABASE SAVE] Programme save started', {
+        currentUserId: currentUser.id,
+        programme: data.programme,
+      });
+      saveProgrammeToSupabase(currentUser.id, data.programme)
+        .then((result) => {
+          if (latestProgrammeSignatureRef.current === nextSignature) {
+            lastProgrammeSaveSignatureRef.current = nextSignature;
+          }
+          console.log('[SUPABASE SAVE] Programme saved', {
+            currentUserId: currentUser.id,
+            result,
+          });
+        })
+        .catch((error) => {
+          console.error('[SUPABASE SAVE] Programme save failed', {
+            currentUserId: currentUser.id,
+            error,
+            message: error?.message,
+            code: error?.code,
+            details: error?.details,
+            hint: error?.hint,
+            stack: error?.stack,
+          });
+        });
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [authLoading, currentUser?.id, data?.programme]);
 
   useEffect(() => {
     if (!data) return undefined;
@@ -510,19 +657,28 @@ export default function App() {
     if (!data || !review?.checkInId || !lastSavedCheckInId || review.checkInId !== lastSavedCheckInId) return;
     const exists = (data.checkInInsightHistory || []).some((item) => item.checkInId === review.checkInId);
     if (exists) return;
+    const historyEntry = {
+      ...review,
+      savedAt: new Date().toISOString(),
+    };
     setData((current) => ({
       ...current,
       checkInInsightHistory: [
-        {
-          ...review,
-          savedAt: new Date().toISOString(),
-        },
+        historyEntry,
         ...(current.checkInInsightHistory || []),
       ],
     }));
-  }, [analysis?.checkInReview?.checkInId, data, lastSavedCheckInId]);
+    if (currentUser) {
+      saveCheckInInsightToSupabase(currentUser.id, historyEntry)
+        .then(() => console.log('[SUPABASE SAVE] Check-in insight saved'))
+        .catch((error) => {
+          console.error('[SUPABASE SAVE] Check-in insight failed. Local copy preserved.', error);
+          console.log('[LOCAL FALLBACK] Check-in insight remains in local storage.');
+        });
+    }
+  }, [analysis?.checkInReview?.checkInId, currentUser, data, lastSavedCheckInId]);
 
-  if (!data) {
+  if (!data || authLoading) {
     return (
       <SafeAreaView style={styles.safe}>
         <Text style={styles.loading}>Loading Impuls...</Text>
@@ -596,6 +752,14 @@ export default function App() {
     };
     setLastSavedCheckInId(checkIn.id);
     setData((current) => ({ ...current, checkIns: [checkIn, ...current.checkIns] }));
+    if (currentUser) {
+      saveCheckInToSupabase(currentUser.id, checkIn)
+        .then(() => console.log('[SUPABASE SAVE] Check-in saved'))
+        .catch((error) => {
+          console.error('[SUPABASE SAVE] Check-in failed. Local copy preserved.', error);
+          console.log('[LOCAL FALLBACK] Check-in remains in local storage.');
+        });
+    }
     setScreen('checkinReview');
   }
 
@@ -610,6 +774,14 @@ export default function App() {
       sessions: [session, ...current.sessions],
       activeSession: { ...current.activeSession, id: createId('draft'), exercises: [] },
     }));
+    if (currentUser) {
+      saveSessionToSupabase(currentUser.id, session)
+        .then(() => console.log('[SUPABASE SAVE] Session saved'))
+        .catch((error) => {
+          console.error('[SUPABASE SAVE] Session failed. Local copy preserved.', error);
+          console.log('[LOCAL FALLBACK] Session remains in local storage.');
+        });
+    }
     setScreen('review');
   }
 
@@ -626,6 +798,45 @@ export default function App() {
       { text: 'Cancel', style: 'cancel' },
       { text: 'Reset', style: 'destructive', onPress: async () => setData(await resetAppData()) },
     ]);
+  }
+
+  async function handleSignUp() {
+    try {
+      setAuthLoading(true);
+      await signUp(authEmail.trim(), authPassword);
+      console.log('[AUTH] Sign up submitted');
+    } catch (error) {
+      console.error('[AUTH] Sign up failed.', error);
+      Alert.alert('Sign up failed', error.message || 'Could not sign up with Supabase.');
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleSignIn() {
+    try {
+      setAuthLoading(true);
+      await signIn(authEmail.trim(), authPassword);
+      console.log('[AUTH] Sign in submitted');
+    } catch (error) {
+      console.error('[AUTH] Sign in failed.', error);
+      Alert.alert('Sign in failed', error.message || 'Could not sign in with Supabase.');
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleSignOut() {
+    try {
+      setAuthLoading(true);
+      await signOut();
+      console.log('[AUTH] Sign out submitted');
+    } catch (error) {
+      console.error('[AUTH] Sign out failed.', error);
+      Alert.alert('Sign out failed', error.message || 'Could not sign out.');
+    } finally {
+      setAuthLoading(false);
+    }
   }
 
   return (
@@ -711,7 +922,19 @@ export default function App() {
               />
             )}
             {screen === 'profile' && (
-              <StorageScreen data={data} clearAll={clearAll} />
+              <StorageScreen
+                data={data}
+                clearAll={clearAll}
+                currentUser={currentUser}
+                authEmail={authEmail}
+                authPassword={authPassword}
+                authLoading={authLoading}
+                setAuthEmail={setAuthEmail}
+                setAuthPassword={setAuthPassword}
+                onSignUp={handleSignUp}
+                onSignIn={handleSignIn}
+                onSignOut={handleSignOut}
+              />
             )}
           </ScrollView>
           <BottomNav screen={screen} setScreen={setScreen} />
@@ -3152,7 +3375,19 @@ function ForecastCard({ title, basis, fallback, insight }) {
   );
 }
 
-function StorageScreen({ data, clearAll }) {
+function StorageScreen({
+  data,
+  clearAll,
+  currentUser,
+  authEmail,
+  authPassword,
+  authLoading,
+  setAuthEmail,
+  setAuthPassword,
+  onSignUp,
+  onSignIn,
+  onSignOut,
+}) {
   const preview = JSON.stringify(
     {
       programme: data.programme,
@@ -3165,6 +3400,53 @@ function StorageScreen({ data, clearAll }) {
   return (
     <View style={styles.screen}>
       <Text style={styles.h1}>Storage</Text>
+      <View style={styles.authCard}>
+        <View style={styles.rowBetween}>
+          <View style={styles.flex}>
+            <Text style={styles.sectionTitle}>Developer Supabase Auth</Text>
+            <Text style={styles.muted}>
+              {currentUser ? `Signed in as ${currentUser.email || currentUser.id}` : 'Not signed in. Local storage is active.'}
+            </Text>
+          </View>
+          <View style={[styles.authStatus, currentUser && styles.authStatusActive]}>
+            <Text style={[styles.authStatusText, currentUser && styles.authStatusTextActive]}>
+              {currentUser ? 'Supabase' : 'Local'}
+            </Text>
+          </View>
+        </View>
+        {!currentUser ? (
+          <>
+            <TextInput
+              autoCapitalize="none"
+              keyboardType="email-address"
+              placeholder="Email"
+              style={styles.input}
+              value={authEmail}
+              onChangeText={setAuthEmail}
+            />
+            <TextInput
+              placeholder="Password"
+              secureTextEntry
+              style={styles.input}
+              value={authPassword}
+              onChangeText={setAuthPassword}
+            />
+            <View style={styles.authActions}>
+              <Pressable style={styles.authButton} onPress={onSignUp} disabled={authLoading}>
+                <Text style={styles.authButtonText}>Sign Up</Text>
+              </Pressable>
+              <Pressable style={[styles.authButton, styles.authButtonDark]} onPress={onSignIn} disabled={authLoading}>
+                <Text style={[styles.authButtonText, styles.authButtonTextLight]}>Sign In</Text>
+              </Pressable>
+            </View>
+          </>
+        ) : (
+          <Pressable style={styles.authButton} onPress={onSignOut} disabled={authLoading}>
+            <Text style={styles.authButtonText}>Sign Out</Text>
+          </Pressable>
+        )}
+        <Text style={styles.axisLabel}>Temporary developer UI. Authenticated check-ins, completed sessions, and check-in insights also save to Supabase.</Text>
+      </View>
       <View style={styles.metricStrip}>
         <Metric label="Sessions" value={data.sessions.length} />
         <Metric label="Check-ins" value={data.checkIns.length} />
@@ -3562,6 +3844,16 @@ const styles = StyleSheet.create({
   gaugeFill: { height: 8, backgroundColor: '#5ED369', borderRadius: 8 },
   panelAttached: { backgroundColor: '#FFFFFF', borderRadius: 8, marginTop: -18, padding: 16, shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 12 },
   card: { backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderRadius: 16, borderWidth: 1, padding: 16, gap: 12 },
+  authCard: { backgroundColor: '#FFFFFF', borderColor: '#DCEBDD', borderRadius: 16, borderWidth: 1, gap: 12, padding: 16 },
+  authStatus: { backgroundColor: '#F1F1ED', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
+  authStatusActive: { backgroundColor: '#E8F5EA' },
+  authStatusText: { color: '#5E5E58', fontSize: 11, fontWeight: '900' },
+  authStatusTextActive: { color: '#188131' },
+  authActions: { flexDirection: 'row', gap: 8 },
+  authButton: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#CFCFCA', borderRadius: 8, borderWidth: 1, flex: 1, minHeight: 42, justifyContent: 'center', paddingHorizontal: 12 },
+  authButtonDark: { backgroundColor: '#111111', borderColor: '#111111' },
+  authButtonText: { color: '#111111', fontWeight: '900' },
+  authButtonTextLight: { color: '#FFFFFF' },
   label: { color: '#111111', fontSize: 12, fontWeight: '800' },
   inputLabel: { color: '#1B1B19', fontSize: 12, fontWeight: '700' },
   cardTitle: { color: '#111111', flexShrink: 1, fontSize: 18, fontWeight: '800', lineHeight: 23 },

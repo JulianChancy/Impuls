@@ -1,4 +1,4 @@
-import { supabase } from './supabaseClient';
+import { requireSupabase, supabase } from './supabaseClient';
 import { cloneData, defaultData } from './storage';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -16,6 +16,7 @@ function stripUndefined(row) {
 }
 
 function requireUserId(userId) {
+  requireSupabase();
   if (!userId) throw new Error('Supabase database calls require a userId.');
 }
 
@@ -33,6 +34,13 @@ async function manyOrThrow(query) {
   const { data, error } = await query;
   if (error) throw error;
   return data || [];
+}
+
+async function deleteUserRowsNotIn(table, userId, ids) {
+  let query = supabase.from(table).delete().eq('user_id', userId);
+  if (ids.length) query = query.not('id', 'in', `(${ids.join(',')})`);
+  const { error } = await query;
+  if (error) throw error;
 }
 
 function exerciseRow(userId, parentKey, parentId, exercise, position = 0) {
@@ -254,6 +262,13 @@ export async function saveProgramme(userId, programme) {
   const macroIdMap = {};
   const blockIdMap = {};
   const weekIdMap = {};
+  const savedIds = {
+    macroBlocks: [],
+    trainingBlocks: [],
+    trainingWeeks: [],
+    plannedSessions: [],
+    plannedExercises: [],
+  };
 
   for (const [macroIndex, macro] of (programme.macro_blocks || []).entries()) {
     const macroRow = await singleOrThrow(
@@ -268,6 +283,7 @@ export async function saveProgramme(userId, programme) {
       }), 'programme_id,position')
     );
     macroIdMap[macro.id] = macroRow.id;
+    savedIds.macroBlocks.push(macroRow.id);
 
     for (const [blockIndex, block] of (macro.blocks || []).entries()) {
       const blockRow = await singleOrThrow(
@@ -282,6 +298,7 @@ export async function saveProgramme(userId, programme) {
         }), 'macro_block_id,position')
       );
       blockIdMap[block.id] = blockRow.id;
+      savedIds.trainingBlocks.push(blockRow.id);
 
       for (const [weekIndex, week] of (block.weeks || []).entries()) {
         const weekRow = await singleOrThrow(
@@ -296,9 +313,10 @@ export async function saveProgramme(userId, programme) {
           }), 'block_id,position')
         );
         weekIdMap[week.id] = weekRow.id;
+        savedIds.trainingWeeks.push(weekRow.id);
 
         for (const [sessionIndex, session] of (week.sessions || []).entries()) {
-          await savePlannedSession(userId, weekRow.id, { ...session, position: session.position ?? sessionIndex });
+          await savePlannedSession(userId, weekRow.id, { ...session, position: session.position ?? sessionIndex }, savedIds);
         }
       }
     }
@@ -310,10 +328,16 @@ export async function saveProgramme(userId, programme) {
     selected_week_id: weekIdMap[programme.selected_week_id] || uuidOrNull(programme.selected_week_id),
   }).eq('id', programmeRow.id).eq('user_id', userId);
 
+  await deleteUserRowsNotIn('planned_exercises', userId, savedIds.plannedExercises);
+  await deleteUserRowsNotIn('planned_sessions', userId, savedIds.plannedSessions);
+  await deleteUserRowsNotIn('training_weeks', userId, savedIds.trainingWeeks);
+  await deleteUserRowsNotIn('training_blocks', userId, savedIds.trainingBlocks);
+  await deleteUserRowsNotIn('macro_blocks', userId, savedIds.macroBlocks);
+
   return programmeRow;
 }
 
-export async function savePlannedSession(userId, weekId, session) {
+export async function savePlannedSession(userId, weekId, session, savedIds) {
   requireUserId(userId);
   const sessionRow = await singleOrThrow(
     upsertRow('planned_sessions', stripUndefined({
@@ -329,11 +353,13 @@ export async function savePlannedSession(userId, weekId, session) {
       position: session.position ?? 0,
     }), 'week_id,position')
   );
+  savedIds?.plannedSessions?.push(sessionRow.id);
 
   for (const [index, exercise] of (session.exercises || []).entries()) {
-    await singleOrThrow(
+    const exerciseRowResult = await singleOrThrow(
       upsertRow('planned_exercises', exerciseRow(userId, 'planned_session_id', sessionRow.id, exercise, index), 'planned_session_id,position')
     );
+    savedIds?.plannedExercises?.push(exerciseRowResult.id);
   }
 
   return sessionRow;
