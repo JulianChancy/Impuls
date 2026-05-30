@@ -138,6 +138,30 @@ const pbFields = [
   ['lift_weight', 'Main lift weight'],
 ];
 
+function mergeProfileForAuthLoad(remoteProfile = {}, localProfile = {}) {
+  const localFlags = localProfile.tutorialFlags || {};
+  const remoteFlags = remoteProfile.tutorialFlags || {};
+  const localPbs = localProfile.pbs || {};
+  const remotePbs = remoteProfile.pbs || {};
+  const pbs = { ...localPbs };
+
+  Object.entries(remotePbs).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      pbs[key] = value;
+    }
+  });
+
+  return {
+    ...remoteProfile,
+    name: String(remoteProfile.name || '').trim() || localProfile.name || '',
+    onboarding_completed: Boolean(remoteProfile.onboarding_completed || localProfile.onboarding_completed),
+    tutorialFlags: Object.fromEntries(
+      Object.keys(emptyTutorialFlags).map((key) => [key, Boolean(localFlags[key] || remoteFlags[key])])
+    ),
+    pbs,
+  };
+}
+
 function todayLabel() {
   return new Date().toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' });
 }
@@ -613,6 +637,13 @@ export default function App() {
   const hasLoadedInitialDataRef = useRef(false);
   const lastProgrammeSaveSignatureRef = useRef(null);
   const latestProgrammeSignatureRef = useRef(null);
+  const latestDataRef = useRef(null);
+  const onboardingProfileSaveUserRef = useRef(null);
+  const justCompletedOnboardingProfileRef = useRef(null);
+
+  useEffect(() => {
+    latestDataRef.current = data;
+  }, [data]);
 
   async function loadLocalFallback(reason) {
     console.log(`[LOCAL FALLBACK] ${reason}`);
@@ -620,6 +651,7 @@ export default function App() {
     hasLoadedInitialDataRef.current = true;
     lastProgrammeSaveSignatureRef.current = programmeSignature(localData.programme);
     latestProgrammeSignatureRef.current = lastProgrammeSaveSignatureRef.current;
+    latestDataRef.current = localData;
     setData(localData);
   }
 
@@ -630,12 +662,18 @@ export default function App() {
     }
 
     try {
+      const localSnapshot = latestDataRef.current || await loadAppData().catch(() => null);
       const supabaseData = await loadAppDataFromSupabase(user.id);
+      const localProfile = justCompletedOnboardingProfileRef.current || localSnapshot?.profile;
+      const nextData = localProfile?.onboarding_completed
+        ? { ...supabaseData, profile: mergeProfileForAuthLoad(supabaseData.profile, localProfile) }
+        : supabaseData;
       console.log(`[SUPABASE LOAD] Loaded ${supabaseData.checkIns.length} check-ins and ${supabaseData.sessions.length} sessions.`);
       hasLoadedInitialDataRef.current = true;
-      lastProgrammeSaveSignatureRef.current = programmeSignature(supabaseData.programme);
+      lastProgrammeSaveSignatureRef.current = programmeSignature(nextData.programme);
       latestProgrammeSignatureRef.current = lastProgrammeSaveSignatureRef.current;
-      setData(supabaseData);
+      latestDataRef.current = nextData;
+      setData(nextData);
     } catch (error) {
       console.error('[SUPABASE LOAD] Failed. Falling back to local storage.', error);
       await loadLocalFallback('Supabase load failed. Loaded local storage.');
@@ -889,9 +927,40 @@ export default function App() {
     updateProfile({ onboarding_completed: false });
   }
 
-  function completeOnboarding(targetScreen) {
-    updateProfile({ onboarding_completed: true });
-    setScreen(targetScreen);
+  async function completeOnboarding(nextProfile = {}, nextScreen = 'today') {
+    const baseProfile = data.profile || {};
+    const profile = {
+      ...baseProfile,
+      ...nextProfile,
+      onboarding_completed: true,
+      tutorialFlags: {
+        ...emptyTutorialFlags,
+        ...(baseProfile.tutorialFlags || {}),
+        ...(nextProfile.tutorialFlags || {}),
+      },
+      pbs: {
+        ...(baseProfile.pbs || {}),
+        ...(nextProfile.pbs || {}),
+      },
+    };
+    const nextData = { ...data, profile };
+    justCompletedOnboardingProfileRef.current = profile;
+    latestDataRef.current = nextData;
+    setData(nextData);
+    setScreen(nextScreen);
+
+    const saveUser = currentUser || onboardingProfileSaveUserRef.current;
+    if (saveUser?.id) {
+      try {
+        await saveProfileToSupabase(saveUser.id, profile);
+        console.log('[SUPABASE SAVE] Onboarding profile saved');
+      } catch (error) {
+        console.error('[SUPABASE SAVE] Onboarding profile save failed. Local profile preserved.', error);
+        console.log('[LOCAL FALLBACK] Onboarding profile remains in local storage.');
+      } finally {
+        onboardingProfileSaveUserRef.current = null;
+      }
+    }
   }
 
   function addExercise() {
@@ -976,9 +1045,17 @@ export default function App() {
   async function handleSignUp() {
     try {
       setAuthLoading(true);
-      await signUp(authEmail.trim(), authPassword);
+      const result = await signUp(authEmail.trim(), authPassword);
+      const user = result?.session?.user || result?.user || null;
       console.log('[AUTH] Sign up submitted');
-      return true;
+      if (result?.session?.user) {
+        setCurrentUser(user);
+        onboardingProfileSaveUserRef.current = user;
+        await completeOnboarding({ name: data.profile?.name || '' }, 'today');
+        return true;
+      }
+      Alert.alert('Account created', 'Check your email to confirm your account. You can continue locally for now.');
+      return false;
     } catch (error) {
       console.error('[AUTH] Sign up failed.', error);
       Alert.alert('Sign up failed', error.message || 'Could not sign up with Supabase.');
@@ -991,8 +1068,13 @@ export default function App() {
   async function handleSignIn() {
     try {
       setAuthLoading(true);
-      await signIn(authEmail.trim(), authPassword);
+      const result = await signIn(authEmail.trim(), authPassword);
+      const user = result?.session?.user || result?.user;
+      if (!user) throw new Error('Signed in, but Supabase did not return a user session.');
+      setCurrentUser(user);
+      onboardingProfileSaveUserRef.current = user;
       console.log('[AUTH] Sign in submitted');
+      await completeOnboarding({ name: data.profile?.name || '' }, 'today');
       return true;
     } catch (error) {
       console.error('[AUTH] Sign in failed.', error);
@@ -1257,74 +1339,48 @@ function OnboardingScreen({
   onSignIn,
   onComplete,
 }) {
-  const [step, setStep] = useState(1);
   const name = profile?.name || '';
-
-  async function submitAuth(action) {
-    const ok = await action();
-    if (ok) setStep(2);
-  }
 
   return (
     <View style={styles.onboardingScreen}>
       <Text style={styles.h1}>Welcome to Impuls</Text>
       <Text style={styles.screenSubtitle}>Impuls connects what you did, how you felt, and how you performed.</Text>
 
-      <View style={styles.onboardingSteps}>
-        {[1, 2, 3].map((item) => (
-          <View key={item} style={[styles.onboardingStepDot, step === item && styles.onboardingStepDotActive]} />
-        ))}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Account setup</Text>
+        <Input label="Name" value={name} onChangeText={updateProfileName} />
+        <TextInput
+          autoCapitalize="none"
+          keyboardType="email-address"
+          placeholder="Email"
+          style={styles.input}
+          value={authEmail}
+          onChangeText={setAuthEmail}
+        />
+        <TextInput
+          placeholder="Password"
+          secureTextEntry
+          style={styles.input}
+          value={authPassword}
+          onChangeText={setAuthPassword}
+        />
+        <View style={styles.authActions}>
+          <Pressable style={styles.authButton} onPress={onSignUp} disabled={authLoading}>
+            <Text style={styles.authButtonText}>Create Account</Text>
+          </Pressable>
+          <Pressable style={[styles.authButton, styles.authButtonDark]} onPress={onSignIn} disabled={authLoading}>
+            <Text style={[styles.authButtonText, styles.authButtonTextLight]}>Sign In</Text>
+          </Pressable>
+        </View>
+        <ActionButton title="Continue Locally" tone="outline" onPress={() => onComplete({ name }, 'today')} />
       </View>
 
-      {step === 1 ? (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Account setup</Text>
-          <Input label="Name" value={name} onChangeText={updateProfileName} />
-          <TextInput
-            autoCapitalize="none"
-            keyboardType="email-address"
-            placeholder="Email"
-            style={styles.input}
-            value={authEmail}
-            onChangeText={setAuthEmail}
-          />
-          <TextInput
-            placeholder="Password"
-            secureTextEntry
-            style={styles.input}
-            value={authPassword}
-            onChangeText={setAuthPassword}
-          />
-          <View style={styles.authActions}>
-            <Pressable style={styles.authButton} onPress={() => submitAuth(onSignUp)} disabled={authLoading}>
-              <Text style={styles.authButtonText}>Create Account</Text>
-            </Pressable>
-            <Pressable style={[styles.authButton, styles.authButtonDark]} onPress={() => submitAuth(onSignIn)} disabled={authLoading}>
-              <Text style={[styles.authButtonText, styles.authButtonTextLight]}>Sign In</Text>
-            </Pressable>
-          </View>
-          <ActionButton title="Continue Locally" tone="outline" onPress={() => setStep(2)} />
-        </View>
-      ) : null}
-
-      {step === 2 ? (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>How Impuls works</Text>
-          <OnboardingInfoCard title="Programme or log training" body="Capture sessions, exercises, sets, reps, contacts, intent, and intensity." />
-          <OnboardingInfoCard title="Check in with recovery, pain, and performance" body="Log the response state that belongs to the training you did." />
-          <OnboardingInfoCard title="Learn your response patterns over time" body="Repeated session + check-in pairs become evidence for trends and relationships." />
-          <ActionButton title="Next" tone="black" onPress={() => setStep(3)} />
-        </View>
-      ) : null}
-
-      {step === 3 ? (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Quick start</Text>
-          <ActionButton title="Start with Programme" tone="black" onPress={() => onComplete('calendar')} />
-          <ActionButton title="Start with Check-in" tone="outline" onPress={() => onComplete('checkin')} />
-          <ActionButton title="Go to Today" tone="outline" onPress={() => onComplete('today')} />
-        </View>
-      ) : null}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>How Impuls works</Text>
+        <OnboardingInfoCard title="Programme or log training" body="Capture sessions, exercises, sets, reps, contacts, intent, and intensity." />
+        <OnboardingInfoCard title="Check in with recovery, pain, and performance" body="Log the response state that belongs to the training you did." />
+        <OnboardingInfoCard title="Learn your response patterns over time" body="Repeated session + check-in pairs become evidence for trends and relationships." />
+      </View>
     </View>
   );
 }
