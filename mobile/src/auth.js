@@ -22,9 +22,13 @@ export async function getCurrentUser() {
     console.log('[LOCAL FALLBACK] Supabase auth not configured.');
     return null;
   }
-  const { data, error } = await supabase.auth.getUser();
+  const { data, error } = await supabase.auth.getSession();
   if (error) throw error;
-  return data.user;
+  if (!data.session) {
+    console.log('[AUTH] No Supabase session found.');
+    return null;
+  }
+  return data.session.user;
 }
 
 export function onAuthStateChange(callback) {

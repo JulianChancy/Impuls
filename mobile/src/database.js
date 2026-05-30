@@ -99,6 +99,19 @@ function sessionFromRow(row, exercises = []) {
   };
 }
 
+function cleanOldDefaultText(value, oldValue) {
+  return value === oldValue ? '' : (value || '');
+}
+
+function isOldDefaultPlannedSession(row) {
+  return [
+    ['Lower Body Power', '2026-05-21'],
+    ['Upper Body Strength', '2026-05-22'],
+    ['Speed', '2026-05-23'],
+    ['Lower Body Strength', '2026-05-24'],
+  ].some(([name, date]) => row.session_name === name && row.date === date);
+}
+
 function checkInFromRow(row) {
   return {
     id: row.id,
@@ -174,7 +187,7 @@ export async function loadAppDataFromSupabase(userId) {
 
   const programme = {
     id: programmeRow.id,
-    calendar_name: programmeRow.calendar_name || defaultData.programme.calendar_name,
+    calendar_name: cleanOldDefaultText(programmeRow.calendar_name, 'Off-Season 2024') || defaultData.programme.calendar_name,
     selected_macro_id: programmeRow.selected_macro_id,
     selected_block_id: programmeRow.selected_block_id,
     selected_week_id: programmeRow.selected_week_id,
@@ -184,26 +197,28 @@ export async function loadAppDataFromSupabase(userId) {
       .filter((macro) => macro.programme_id === programmeRow.id)
       .map((macro) => ({
         id: macro.id,
-        macro_block_name: macro.macro_block_name || '',
+        macro_block_name: cleanOldDefaultText(macro.macro_block_name, 'Off-Season 2024'),
         start_date: macro.start_date || '',
         end_date: macro.end_date || '',
         position: macro.position ?? 0,
         blocks: (blocksByMacro[macro.id] || []).map((block) => ({
           id: block.id,
-          block_name: block.block_name || '',
+          block_name: cleanOldDefaultText(block.block_name, 'Strength Phase 1'),
           start_date: block.start_date || '',
           end_date: block.end_date || '',
           position: block.position ?? 0,
           weeks: (weeksByBlock[block.id] || []).map((week) => ({
             id: week.id,
-            week_name: week.week_name || '',
+            week_name: cleanOldDefaultText(week.week_name, '20 - 26 May'),
             start_date: week.start_date || '',
             end_date: week.end_date || '',
             position: week.position ?? 0,
-            sessions: (plannedSessionsByWeek[week.id] || []).map((session) => plannedSessionFromRow(
-              session,
-              (plannedExercisesBySession[session.id] || []).map(exerciseFromRow)
-            )),
+            sessions: (plannedSessionsByWeek[week.id] || [])
+              .filter((session) => !isOldDefaultPlannedSession(session))
+              .map((session) => plannedSessionFromRow(
+                session,
+                (plannedExercisesBySession[session.id] || []).map(exerciseFromRow)
+              )),
           })),
         })),
       })),
@@ -211,7 +226,7 @@ export async function loadAppDataFromSupabase(userId) {
 
   return {
     ...cloneData(defaultData),
-    profile: { name: profiles[0]?.name || defaultData.profile.name },
+    profile: { name: cleanOldDefaultText(profiles[0]?.name, 'Alex') || defaultData.profile.name },
     programme,
     activeSession: cloneData(defaultData.activeSession),
     sessions: sessions.map((session) => sessionFromRow(session, (sessionExercisesBySession[session.id] || []).map(exerciseFromRow))),

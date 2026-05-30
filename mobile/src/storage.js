@@ -5,227 +5,51 @@ export const STORAGE_KEY = 'impuls-local-json-v3';
 export const emptyExercise = {
   id: 'exercise_draft',
   movement_type: 'plyometric',
-  exercise_name: 'Approach jumps',
-  contacts: 18,
-  reps: 6,
-  duration_minutes: 20,
-  intensity_value: 60,
+  exercise_name: '',
+  contacts: '',
+  reps: '',
+  sets: '',
+  duration_minutes: '',
+  intensity_value: '',
   intensity_unit: '%',
-  intent_percent: 90,
-  rom: 'full',
+  intent_percent: '',
+  rom: '',
 };
 
-const sampleSessions = [
-  {
-    id: 'sample_session_1',
-    session_name: 'Jump Reintroduction',
-    session_datetime: '2026-05-16T10:00:00.000Z',
-    exercises: [
-      { id: 'sample_ex_1', movement_type: 'plyometric', exercise_name: 'Approach jumps', contacts: 12, intent_percent: 78 },
-      { id: 'sample_ex_2', movement_type: 'strength', exercise_name: 'Half squat', reps: 5, intensity_value: 110, intensity_unit: 'kg', rom: 'half' },
-    ],
-  },
-  {
-    id: 'sample_session_2',
-    session_name: 'Acceleration Exposure',
-    session_datetime: '2026-05-18T10:00:00.000Z',
-    exercises: [
-      { id: 'sample_ex_3', movement_type: 'skill', exercise_name: 'Acceleration runs', duration_minutes: 22, intent_percent: 80 },
-    ],
-  },
-  {
-    id: 'sample_session_3',
-    session_name: 'Reactive Plyo Day',
-    session_datetime: '2026-05-20T10:00:00.000Z',
-    exercises: [
-      { id: 'sample_ex_4', movement_type: 'plyometric', exercise_name: 'Depth jumps', contacts: 16, intent_percent: 92 },
-      { id: 'sample_ex_5', movement_type: 'power_ballistic', exercise_name: 'Jump squat', reps: 8, intensity_value: 30, intensity_unit: 'kg', intent_percent: 88 },
-    ],
-  },
-  {
-    id: 'sample_session_4',
-    session_name: 'Lower Body Power',
-    session_datetime: '2026-05-21T10:00:00.000Z',
-    exercises: [
-      { id: 'sample_ex_6', movement_type: 'plyometric', exercise_name: 'Approach jumps', contacts: 18, intent_percent: 100 },
-      { id: 'sample_ex_7', movement_type: 'strength', exercise_name: 'Quarter squat', reps: 4, intensity_value: 145, intensity_unit: 'kg', rom: 'partial' },
-    ],
-  },
-];
-
-const sampleCheckIns = [
-  {
-    id: 'sample_checkin_1',
-    check_in_datetime: '2026-05-16T10:00:00.000Z',
-    linked_session_id: 'sample_session_1',
-    pain_score: 4,
-    pain_location: 'Left Achilles',
-    freshness_score: 5,
-    soreness_score: 5,
-    performance_score: 5.4,
-    performance_type: 'jumping',
-    gct: 0.34,
-    ft: 0.71,
-    height_or_distance: 30,
-    unit: 'in',
-  },
-  {
-    id: 'sample_checkin_2',
-    check_in_datetime: '2026-05-18T10:00:00.000Z',
-    linked_session_id: 'sample_session_2',
-    pain_score: 3,
-    pain_location: 'Left Achilles',
-    freshness_score: 6,
-    soreness_score: 4,
-    performance_score: 6.2,
-    performance_type: 'running_sprinting',
-    sprint_time: 4.12,
-    distance: 30,
-    unit: 'm',
-  },
-  {
-    id: 'sample_checkin_3',
-    check_in_datetime: '2026-05-20T10:00:00.000Z',
-    linked_session_id: 'sample_session_3',
-    pain_score: 2,
-    pain_location: 'Left Achilles',
-    freshness_score: 8,
-    soreness_score: 3,
-    performance_score: 8.1,
-    performance_type: 'jumping',
-    gct: 0.28,
-    ft: 0.82,
-    height_or_distance: 38,
-    unit: 'in',
-  },
-  {
-    id: 'sample_checkin_4',
-    check_in_datetime: '2026-05-21T10:00:00.000Z',
-    linked_session_id: 'sample_session_4',
-    pain_score: 3,
-    pain_location: 'Left Achilles',
-    freshness_score: 7,
-    soreness_score: 4,
-    performance_score: 7.2,
-    performance_type: 'jumping',
-    gct: 0.3,
-    ft: 0.78,
-    height_or_distance: 36,
-    unit: 'in',
-  },
-];
-
 export const defaultData = {
-  version: 3,
+  version: 4,
   profile: {
-    name: 'Alex',
+    name: '',
   },
   programme: {
-    calendar_name: 'Off-Season 2024',
-    selected_macro_id: 'macro_1',
-    selected_block_id: 'block_1',
-    selected_week_id: 'week_1',
+    calendar_name: '',
+    selected_macro_id: null,
+    selected_block_id: null,
+    selected_week_id: null,
     copied_session: null,
     day_notes: {},
-    macro_blocks: [
-      {
-        id: 'macro_1',
-        macro_block_name: 'Off-Season 2024',
-        start_date: '2026-05-20',
-        end_date: '2026-08-20',
-        blocks: [
-          {
-            id: 'block_1',
-            block_name: 'Strength Phase 1',
-            start_date: '2026-05-20',
-            end_date: '2026-06-16',
-            weeks: [
-              {
-                id: 'week_1',
-                week_name: '20 - 26 May',
-                start_date: '2026-05-20',
-                end_date: '2026-05-26',
-                sessions: [
-                  {
-                    id: 'planned_1',
-                    date: '2026-05-21',
-                    session_name: 'Lower Body Power',
-                    focus: 'Plyometrics + Strength',
-                    duration: '60-75 min',
-                    completed: true,
-                    exercises: [
-                      {
-                        id: 'planned_exercise_1',
-                        movement_type: 'plyometric',
-                        exercise_name: 'Approach jumps',
-                        contacts: 18,
-                        intent_percent: 100,
-                      },
-                    ],
-                  },
-                  {
-                    id: 'planned_2',
-                    date: '2026-05-22',
-                    session_name: 'Upper Body Strength',
-                    focus: 'Strength',
-                    duration: '45-60 min',
-                    completed: false,
-                    exercises: [],
-                  },
-                  {
-                    id: 'planned_3',
-                    date: '2026-05-23',
-                    session_name: 'Speed',
-                    focus: 'Sprints + Skills',
-                    duration: '40-55 min',
-                    completed: false,
-                    exercises: [],
-                  },
-                  {
-                    id: 'planned_4',
-                    date: '2026-05-24',
-                    session_name: 'Lower Body Strength',
-                    focus: 'Strength',
-                    duration: '60 min',
-                    completed: false,
-                    exercises: [],
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      },
-    ],
+    macro_blocks: [],
   },
   activeSession: {
     id: 'session_draft',
-    session_name: 'Lower Body Power',
+    session_name: '',
     session_datetime: new Date().toISOString(),
-    exercises: [
-      {
-        id: 'exercise_1',
-        movement_type: 'plyometric',
-        exercise_name: 'Approach jumps',
-        contacts: 18,
-        intent_percent: 100,
-      },
-    ],
+    exercises: [],
   },
   checkInDraft: {
-    pain_score: 3,
-    pain_location: 'Left Achilles',
-    freshness_score: 7,
-    soreness_score: 4,
-    performance_score: 6,
+    pain_score: 0,
+    pain_location: '',
+    freshness_score: 0,
+    soreness_score: 0,
+    performance_score: 0,
     performance_type: 'jumping',
-    gct: 0.3,
-    ft: 0.78,
-    height_or_distance: 36,
-    unit: 'in',
+    gct: '',
+    ft: '',
+    height_or_distance: '',
+    unit: '',
   },
-  sessions: sampleSessions,
-  checkIns: sampleCheckIns,
+  sessions: [],
+  checkIns: [],
   checkInInsightHistory: [],
 };
 
@@ -233,17 +57,41 @@ export function cloneData(data) {
   return JSON.parse(JSON.stringify(data));
 }
 
+function cleanOldProgrammeName(value, oldValue) {
+  return value === oldValue ? '' : (value || '');
+}
+
 function migrateProgramme(programme = {}) {
   const fallback = cloneData(defaultData.programme);
   if (Array.isArray(programme.macro_blocks) && programme.macro_blocks.length > 0) {
-    const selectedMacro = programme.selected_macro_id || programme.macro_blocks[0].id;
-    const macro = programme.macro_blocks.find((item) => item.id === selectedMacro) || programme.macro_blocks[0];
-    const selectedBlock = programme.selected_block_id || macro.blocks?.[0]?.id;
+    const macroBlocks = programme.macro_blocks.map((macro) => ({
+      ...macro,
+      macro_block_name: cleanOldProgrammeName(macro.macro_block_name, 'Off-Season 2024'),
+      blocks: (macro.blocks || []).map((block) => ({
+        ...block,
+        block_name: cleanOldProgrammeName(block.block_name, 'Strength Phase 1'),
+        weeks: (block.weeks || []).map((week) => ({
+          ...week,
+          week_name: cleanOldProgrammeName(week.week_name, '20 - 26 May'),
+          sessions: (week.sessions || [])
+            .filter((session) => !['planned_1', 'planned_2', 'planned_3', 'planned_4'].includes(String(session.id || '')))
+            .map((session) => ({
+              ...session,
+              exercises: Array.isArray(session.exercises) ? session.exercises : [],
+            })),
+        })),
+      })),
+    }));
+    const selectedMacro = programme.selected_macro_id || macroBlocks[0].id;
+    const macro = macroBlocks.find((item) => item.id === selectedMacro) || macroBlocks[0];
+    const selectedBlock = programme.selected_block_id || macro.blocks?.[0]?.id || null;
     const block = macro.blocks?.find((item) => item.id === selectedBlock) || macro.blocks?.[0];
-    const selectedWeek = programme.selected_week_id || block?.weeks?.[0]?.id;
+    const selectedWeek = programme.selected_week_id || block?.weeks?.[0]?.id || null;
     return {
       ...fallback,
       ...programme,
+      calendar_name: cleanOldProgrammeName(programme.calendar_name, 'Off-Season 2024'),
+      macro_blocks: macroBlocks,
       selected_macro_id: selectedMacro,
       selected_block_id: selectedBlock,
       selected_week_id: selectedWeek,
@@ -252,17 +100,37 @@ function migrateProgramme(programme = {}) {
     };
   }
 
-  const legacySessions = Array.isArray(programme.planned_sessions) ? programme.planned_sessions : fallback.macro_blocks[0].blocks[0].weeks[0].sessions;
-  const migrated = cloneData(fallback);
-  migrated.calendar_name = programme.calendar_name || fallback.calendar_name;
-  migrated.macro_blocks[0].macro_block_name = programme.macro_block_name || fallback.macro_blocks[0].macro_block_name;
-  migrated.macro_blocks[0].blocks[0].block_name = programme.block_name || fallback.macro_blocks[0].blocks[0].block_name;
-  migrated.macro_blocks[0].blocks[0].weeks[0].week_name = programme.week_name || fallback.macro_blocks[0].blocks[0].weeks[0].week_name;
-  migrated.macro_blocks[0].blocks[0].weeks[0].sessions = legacySessions.map((session) => ({
-    ...session,
-    exercises: Array.isArray(session.exercises) ? session.exercises : [],
-  }));
-  return migrated;
+  return {
+    ...fallback,
+    calendar_name: cleanOldProgrammeName(programme.calendar_name, 'Off-Season 2024'),
+    copied_session: programme.copied_session || null,
+    day_notes: programme.day_notes || {},
+  };
+}
+
+function migrateProfile(profile = {}, version) {
+  if (version < 4 && profile.name === 'Alex') return { name: '' };
+  return { ...defaultData.profile, ...profile };
+}
+
+function migrateActiveSession(activeSession = {}, version) {
+  if (version < 4 && activeSession.session_name === 'Lower Body Power') {
+    return cloneData(defaultData.activeSession);
+  }
+  return {
+    ...defaultData.activeSession,
+    ...activeSession,
+    exercises: Array.isArray(activeSession.exercises)
+      ? activeSession.exercises.filter((exercise) => exercise.exercise_name !== 'Approach jumps' || exercise.id !== 'exercise_1')
+      : [],
+  };
+}
+
+function migrateCheckInDraft(checkInDraft = {}, version) {
+  if (version < 4 && checkInDraft.pain_location === 'Left Achilles') {
+    return cloneData(defaultData.checkInDraft);
+  }
+  return { ...defaultData.checkInDraft, ...checkInDraft };
 }
 
 export async function loadAppData() {
@@ -273,14 +141,17 @@ export async function loadAppData() {
 
   try {
     const parsed = JSON.parse(raw);
+    const version = Number(parsed.version || 0);
     return {
       ...cloneData(defaultData),
       ...parsed,
+      version: defaultData.version,
+      profile: migrateProfile(parsed.profile, version),
       programme: migrateProgramme(parsed.programme),
-      activeSession: { ...defaultData.activeSession, ...(parsed.activeSession || {}) },
-      checkInDraft: { ...defaultData.checkInDraft, ...(parsed.checkInDraft || {}) },
-      sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
-      checkIns: Array.isArray(parsed.checkIns) ? parsed.checkIns : [],
+      activeSession: migrateActiveSession(parsed.activeSession, version),
+      checkInDraft: migrateCheckInDraft(parsed.checkInDraft, version),
+      sessions: Array.isArray(parsed.sessions) ? parsed.sessions.filter((session) => !String(session.id || '').startsWith('sample_session_')) : [],
+      checkIns: Array.isArray(parsed.checkIns) ? parsed.checkIns.filter((checkIn) => !String(checkIn.id || '').startsWith('sample_checkin_')) : [],
       checkInInsightHistory: Array.isArray(parsed.checkInInsightHistory) ? parsed.checkInInsightHistory : [],
     };
   } catch {

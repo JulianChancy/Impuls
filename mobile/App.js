@@ -31,16 +31,32 @@ import {
   loadAppDataFromSupabase,
   saveCheckIn as saveCheckInToSupabase,
   saveCheckInInsight as saveCheckInInsightToSupabase,
+  saveProfile as saveProfileToSupabase,
   saveProgramme as saveProgrammeToSupabase,
   saveSession as saveSessionToSupabase,
 } from './src/database';
 import { Circle, G, Line, Path, Rect, Svg, Text as SvgText } from 'react-native-svg';
 
 function analysisUrlFromEnv() {
-  const rawUrl = process.env.EXPO_PUBLIC_ANALYSIS_API_URL || process.env.EXPO_PUBLIC_ANALYSIS_API_BASE_URL;
   const fallbackUrl = 'https://impuls-chl1.onrender.com';
-  const cleanedUrl = String(rawUrl || fallbackUrl).trim().replace(/\/+$/, '');
-  return cleanedUrl.endsWith('/analyze') ? cleanedUrl : `${cleanedUrl}/analyze`;
+  const isHttpsPage = typeof window !== 'undefined' && window.location?.protocol === 'https:';
+  const candidates = [
+    process.env.EXPO_PUBLIC_ANALYSIS_API_URL,
+    process.env.EXPO_PUBLIC_ANALYSIS_API_BASE_URL,
+    fallbackUrl,
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const cleanedUrl = String(candidate).trim().replace(/\/+$/, '');
+    if (!cleanedUrl) continue;
+    if (isHttpsPage && cleanedUrl.startsWith('http://')) {
+      console.warn('[LOCAL FALLBACK] Ignoring insecure analysis API URL on HTTPS page.', cleanedUrl);
+      continue;
+    }
+    return cleanedUrl.endsWith('/analyze') ? cleanedUrl : `${cleanedUrl}/analyze`;
+  }
+
+  return `${fallbackUrl}/analyze`;
 }
 
 const ANALYSIS_API_URL = analysisUrlFromEnv();
@@ -126,6 +142,13 @@ function weekDayLabels(startDate) {
   });
 }
 
+function visibleWeekStart(week, selectedDate) {
+  const selected = selectedDate || isoDate();
+  if (!week?.start_date) return selected;
+  const endDate = week.end_date || addDays(week.start_date, 6);
+  return dateInBounds(selected, { start: week.start_date, end: endDate }) ? week.start_date : selected;
+}
+
 function pretty(value, digits = 1) {
   return Number.isFinite(value) ? value.toFixed(digits) : '-';
 }
@@ -147,21 +170,69 @@ function exercisePrescription(exercise) {
 }
 
 function currentMacro(programme) {
-  return programme.macro_blocks.find((macro) => macro.id === programme.selected_macro_id) || programme.macro_blocks[0];
+  const macros = programme?.macro_blocks || [];
+  return macros.find((macro) => macro.id === programme?.selected_macro_id) || macros[0] || null;
 }
 
 function currentBlock(programme) {
   const macro = currentMacro(programme);
-  return macro?.blocks?.find((block) => block.id === programme.selected_block_id) || macro?.blocks?.[0];
+  return macro?.blocks?.find((block) => block.id === programme?.selected_block_id) || macro?.blocks?.[0] || null;
 }
 
 function currentWeek(programme) {
   const block = currentBlock(programme);
-  return block?.weeks?.find((week) => week.id === programme.selected_week_id) || block?.weeks?.[0];
+  return block?.weeks?.find((week) => week.id === programme?.selected_week_id) || block?.weeks?.[0] || null;
 }
 
 function currentPlannedSessions(programme) {
   return currentWeek(programme)?.sessions || [];
+}
+
+function ensureProgrammeWeek(programme, dateValue = isoDate()) {
+  programme.macro_blocks = programme.macro_blocks || [];
+  let macro = currentMacro(programme);
+  if (!macro) {
+    macro = {
+      id: createId('macro'),
+      macro_block_name: '',
+      start_date: dateValue,
+      end_date: '',
+      blocks: [],
+    };
+    programme.macro_blocks.push(macro);
+    programme.selected_macro_id = macro.id;
+  }
+
+  macro.blocks = macro.blocks || [];
+  let block = currentBlock(programme);
+  if (!block || !macro.blocks.some((item) => item.id === block.id)) {
+    block = {
+      id: createId('block'),
+      block_name: '',
+      start_date: dateValue,
+      end_date: '',
+      weeks: [],
+    };
+    macro.blocks.push(block);
+    programme.selected_block_id = block.id;
+  }
+
+  block.weeks = block.weeks || [];
+  let week = currentWeek(programme);
+  if (!week || !block.weeks.some((item) => item.id === week.id)) {
+    week = {
+      id: createId('week'),
+      week_name: '',
+      start_date: dateValue,
+      end_date: '',
+      sessions: [],
+    };
+    block.weeks.push(week);
+    programme.selected_week_id = week.id;
+  }
+
+  week.sessions = week.sessions || [];
+  return week;
 }
 
 function plannedSessionsInCurrentBlock(programme) {
@@ -265,7 +336,7 @@ function todayPlannedSession(programme) {
   return blockSessions.find((session) => session.date === today) || sessions[0] || blockSessions[0] || {
     id: 'empty_plan',
     session_name: 'No session planned',
-    focus: 'Create one in Edit Programme',
+    focus: 'Create one in Programme',
     duration: '',
     exercises: [],
   };
@@ -721,6 +792,22 @@ export default function App() {
     }));
   }
 
+  function updateProfileName(value) {
+    const nextProfile = { ...(data.profile || {}), name: value };
+    setData((current) => ({
+      ...current,
+      profile: { ...(current.profile || {}), name: value },
+    }));
+    if (currentUser) {
+      saveProfileToSupabase(currentUser.id, nextProfile)
+        .then(() => console.log('[SUPABASE SAVE] Profile saved'))
+        .catch((error) => {
+          console.error('[SUPABASE SAVE] Profile save failed. Local copy preserved.', error);
+          console.log('[LOCAL FALLBACK] Profile name remains in local storage.');
+        });
+    }
+  }
+
   function addExercise() {
     const exercise = {
       ...exerciseDraft,
@@ -931,6 +1018,7 @@ export default function App() {
                 authLoading={authLoading}
                 setAuthEmail={setAuthEmail}
                 setAuthPassword={setAuthPassword}
+                updateProfileName={updateProfileName}
                 onSignUp={handleSignUp}
                 onSignIn={handleSignIn}
                 onSignOut={handleSignOut}
@@ -947,9 +1035,10 @@ export default function App() {
 function TodayScreen({ data, analysis, setScreen, startTodayTraining }) {
   const planned = todayPlannedSession(data.programme);
   const last = analysis.strongest;
+  const displayName = String(data.profile?.name || '').trim();
   return (
     <View style={styles.screen}>
-      <Text style={styles.h1}>Hello, {data.profile.name}</Text>
+      <Text style={styles.h1}>{displayName ? `Hello, ${displayName}` : 'Hello'}</Text>
       <Text style={styles.date}>{todayLabel()}</Text>
 
       <View style={styles.heroCard}>
@@ -963,7 +1052,7 @@ function TodayScreen({ data, analysis, setScreen, startTodayTraining }) {
         <View style={styles.rowBetween}>
           <View>
             <Text style={styles.cardTitle}>{planned.session_name}</Text>
-            <Text style={styles.muted}>{planned.focus}</Text>
+            {planned.focus ? <Text style={styles.muted}>{planned.focus}</Text> : null}
           </View>
         </View>
       </View>
@@ -973,7 +1062,6 @@ function TodayScreen({ data, analysis, setScreen, startTodayTraining }) {
         <Text style={styles.bodyText}>
           {last ? `${last.finding} Relationship strength: ${last.strength} (${pretty(last.r, 2)}).` : 'Add more logs to unlock relationship insights.'}
         </Text>
-        <Text style={styles.microText}>Yesterday</Text>
       </View>
 
       <View style={styles.twoCol}>
@@ -1540,7 +1628,6 @@ function ReviewScreen({ analysis, setScreen }) {
       <Text style={styles.label}>Session Load</Text>
       <View style={styles.rowBetween}>
         <Text style={styles.bigGreen}>{pretty(load, 1)}</Text>
-        <View style={styles.loadPill}><Text style={styles.loadText}>High</Text></View>
       </View>
       <Text style={styles.positive}>{loadChange >= 0 ? '+' : ''}{Math.round(loadChange)}% vs recent average</Text>
       <View style={styles.card}>
@@ -1564,7 +1651,7 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
   const week = currentWeek(programme);
   const blockSessions = plannedSessionsInCurrentBlock(programme);
   const selectedDaySessions = plannedSessionsOnDate(programme, selectedDate);
-  const weekDays = weekDayLabels(week?.start_date);
+  const weekDays = weekDayLabels(visibleWeekStart(week, selectedDate));
   const [expandedMetricExerciseId, setExpandedMetricExerciseId] = useState(null);
 
   function commitProgramme(updater) {
@@ -1617,8 +1704,8 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
       <Header title="Programme" onBack={() => setScreen('today')} />
       <View style={styles.calendarTitleRow}>
         <View>
-          <Text style={styles.label}>{macro?.macro_block_name || 'Macro Block'}</Text>
-          <Text style={styles.h1}>{block?.block_name || 'Training Block'}</Text>
+          <Text style={styles.label}>{macro?.macro_block_name || 'No macro cycle selected'}</Text>
+          <Text style={styles.h1}>{block?.block_name || 'No training block'}</Text>
         </View>
         <Pressable style={styles.editProgrammeButton} onPress={() => setScreen('editCalendar')}>
           <Text style={styles.editProgrammeText}>Edit</Text>
@@ -1626,7 +1713,7 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
       </View>
       <View style={styles.weekNav}>
         <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveWeek(-1)}><Text style={styles.chevron}>‹</Text></Pressable>
-        <Text style={styles.sectionTitle}>{week?.week_name || 'No Week'}</Text>
+        <Text style={styles.sectionTitle}>{week?.week_name || 'Today'}</Text>
         <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveWeek(1)}><Text style={styles.chevron}>›</Text></Pressable>
       </View>
       <View style={styles.weekGrid}>
@@ -1647,8 +1734,8 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
         <Text style={styles.sectionTitle}>Training Programme</Text>
         {selectedDaySessions.length === 0 ? (
           <View style={styles.emptyDay}>
-            <Text style={styles.bodyText}>No session planned for this date in the selected block.</Text>
-            <ActionButton title="Create Session" tone="outline" onPress={() => setScreen('editBlockCalendar')} />
+            <Text style={styles.bodyText}>No session planned for this date.</Text>
+            <ActionButton title={week ? 'Create Session' : 'Create Programme'} tone="outline" onPress={() => setScreen(week ? 'editBlockCalendar' : 'editCalendar')} />
           </View>
         ) : (
           selectedDaySessions.map((session) => {
@@ -1667,7 +1754,7 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
                         <View style={styles.exerciseBulletRow}>
                           <View style={styles.exerciseNameWithOrder}>
                             <View style={styles.orderBadge}><Text style={styles.orderBadgeText}>{exercise.order || index + 1}</Text></View>
-                            <Text style={styles.exerciseNameText}>{exercise.exercise_name || 'Unnamed exercise'}</Text>
+                            <Text style={styles.exerciseNameText}>{exercise.exercise_name || ''}</Text>
                           </View>
                           <Text style={styles.muted}>{exercise.movement_type.replace('_', ' ')}</Text>
                         </View>
@@ -1722,7 +1809,8 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
 
   function selectMacro(macroId) {
     commitProgramme((draft) => {
-      const selectedMacro = draft.macro_blocks.find((item) => item.id === macroId) || draft.macro_blocks[0];
+      const selectedMacro = (draft.macro_blocks || []).find((item) => item.id === macroId) || draft.macro_blocks?.[0];
+      if (!selectedMacro) return;
       draft.selected_macro_id = selectedMacro.id;
       draft.selected_block_id = selectedMacro.blocks[0]?.id;
       draft.selected_week_id = selectedMacro.blocks[0]?.weeks[0]?.id;
@@ -1733,7 +1821,9 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
     let openingDate = isoDate();
     commitProgramme((draft) => {
       const selectedMacro = currentMacro(draft);
-      const selectedBlock = selectedMacro.blocks.find((item) => item.id === blockId) || selectedMacro.blocks[0];
+      if (!selectedMacro) return;
+      const selectedBlock = selectedMacro.blocks?.find((item) => item.id === blockId) || selectedMacro.blocks?.[0];
+      if (!selectedBlock) return;
       const firstWeek = selectedBlock.weeks[0];
       const firstSessionWeek = (selectedBlock.weeks || []).find((week) => (week.sessions || []).length > 0);
       const firstSession = firstSessionWeek?.sessions?.[0];
@@ -1750,18 +1840,19 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
       const macroId = createId('macro');
       const blockId = createId('block');
       const weekId = createId('week');
+      draft.macro_blocks = draft.macro_blocks || [];
       draft.macro_blocks.push({
         id: macroId,
-        macro_block_name: `Macro Block ${draft.macro_blocks.length + 1}`,
+        macro_block_name: '',
         start_date: isoDate(),
         end_date: '',
         blocks: [
           {
             id: blockId,
-            block_name: 'New Training Block',
+            block_name: '',
             start_date: isoDate(),
             end_date: '',
-            weeks: [{ id: weekId, week_name: 'Week 1', start_date: isoDate(), end_date: '', sessions: [] }],
+            weeks: [{ id: weekId, week_name: '', start_date: isoDate(), end_date: '', sessions: [] }],
           },
         ],
       });
@@ -1773,12 +1864,11 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
 
   function deleteMacroBlock(macroId) {
     commitProgramme((draft) => {
-      if ((draft.macro_blocks || []).length <= 1) return;
       draft.macro_blocks = draft.macro_blocks.filter((item) => item.id !== macroId);
       const nextMacro = draft.macro_blocks[0];
-      draft.selected_macro_id = nextMacro.id;
-      draft.selected_block_id = nextMacro.blocks[0]?.id;
-      draft.selected_week_id = nextMacro.blocks[0]?.weeks[0]?.id;
+      draft.selected_macro_id = nextMacro?.id || null;
+      draft.selected_block_id = nextMacro?.blocks?.[0]?.id || null;
+      draft.selected_week_id = nextMacro?.blocks?.[0]?.weeks?.[0]?.id || null;
     });
   }
 
@@ -1791,15 +1881,28 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
 
   function addTrainingBlock() {
     commitProgramme((draft) => {
-      const selectedMacro = currentMacro(draft);
+      let selectedMacro = currentMacro(draft);
+      if (!selectedMacro) {
+        const macroId = createId('macro');
+        draft.macro_blocks = [{
+          id: macroId,
+          macro_block_name: '',
+          start_date: isoDate(),
+          end_date: '',
+          blocks: [],
+        }];
+        draft.selected_macro_id = macroId;
+        selectedMacro = draft.macro_blocks[0];
+      }
       const blockId = createId('block');
       const weekId = createId('week');
+      selectedMacro.blocks = selectedMacro.blocks || [];
       selectedMacro.blocks.push({
         id: blockId,
-        block_name: `Training Block ${selectedMacro.blocks.length + 1}`,
+        block_name: '',
         start_date: isoDate(),
         end_date: '',
-        weeks: [{ id: weekId, week_name: 'Week 1', start_date: isoDate(), end_date: '', sessions: [] }],
+        weeks: [{ id: weekId, week_name: '', start_date: isoDate(), end_date: '', sessions: [] }],
       });
       draft.selected_block_id = blockId;
       draft.selected_week_id = weekId;
@@ -1809,11 +1912,11 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
   function deleteTrainingBlock(blockId) {
     commitProgramme((draft) => {
       const selectedMacro = currentMacro(draft);
-      if ((selectedMacro.blocks || []).length <= 1) return;
+      if (!selectedMacro) return;
       selectedMacro.blocks = selectedMacro.blocks.filter((item) => item.id !== blockId);
       if (draft.selected_block_id === blockId) {
-        draft.selected_block_id = selectedMacro.blocks[0]?.id;
-        draft.selected_week_id = selectedMacro.blocks[0]?.weeks[0]?.id;
+        draft.selected_block_id = selectedMacro.blocks[0]?.id || null;
+        draft.selected_week_id = selectedMacro.blocks[0]?.weeks?.[0]?.id || null;
       }
     });
   }
@@ -1821,7 +1924,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
   function updateBlockName(blockId, value) {
     commitProgramme((draft) => {
       const selectedMacro = currentMacro(draft);
-      const targetBlock = selectedMacro.blocks.find((item) => item.id === blockId);
+      const targetBlock = selectedMacro?.blocks?.find((item) => item.id === blockId);
       if (targetBlock) targetBlock.block_name = value;
     });
   }
@@ -1836,7 +1939,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
           <Text style={styles.sectionTitle}>Macro Cycles</Text>
           <Pressable style={styles.smallPill} onPress={addMacroBlock}><Text style={styles.smallPillText}>+ Macro</Text></Pressable>
         </View>
-        {programme.macro_blocks.map((macroItem) => (
+        {(programme.macro_blocks || []).map((macroItem) => (
           <View key={macroItem.id} style={styles.programmeEditRow}>
             <Pressable
               style={styles.programmeEditMain}
@@ -1854,7 +1957,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
 
       <View style={styles.calendarPanel}>
         <View style={styles.rowBetween}>
-          <Text style={styles.sectionTitle}>Blocks in {macro?.macro_block_name || 'Macro'}</Text>
+          <Text style={styles.sectionTitle}>Training Blocks</Text>
           <Pressable style={styles.smallPill} onPress={addTrainingBlock}><Text style={styles.smallPillText}>+ Block</Text></Pressable>
         </View>
         {(macro?.blocks || []).map((blockItem) => (
@@ -1878,7 +1981,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
 }
 
 function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate, setSelectedPlannedSessionId, setScreen }) {
-  const [newSession, setNewSession] = useState({ session_name: 'Lower Body Power', focus: 'Plyometrics + Strength', duration: '60 min', date: selectedDate || isoDate() });
+  const [newSession, setNewSession] = useState({ session_name: '', focus: '', duration: '', date: selectedDate || isoDate() });
   const programme = data.programme;
   const macro = currentMacro(programme);
   const block = currentBlock(programme);
@@ -1886,7 +1989,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   const sessions = currentPlannedSessions(programme);
   const sessionsForSelectedDate = sessions.filter((session) => session.date === selectedDate);
   const weekSessions = [...sessions].sort((a, b) => String(a.date).localeCompare(String(b.date)));
-  const editDays = weekDayLabels(week?.start_date);
+  const editDays = weekDayLabels(visibleWeekStart(week, selectedDate));
 
   function commitProgramme(updater) {
     setData((current) => {
@@ -1912,11 +2015,15 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   function addWeek() {
     const startDate = isoDate();
     commitProgramme((draft) => {
-      const selectedBlock = currentBlock(draft);
+      let selectedBlock = currentBlock(draft);
+      if (!selectedBlock) {
+        ensureProgrammeWeek(draft, startDate);
+        selectedBlock = currentBlock(draft);
+      }
       const weekId = createId('week');
       selectedBlock.weeks.push({
         id: weekId,
-        week_name: `Week ${selectedBlock.weeks.length + 1}`,
+        week_name: '',
         start_date: startDate,
         end_date: '',
         sessions: [],
@@ -1931,6 +2038,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
     let nextDate = selectedDate;
     commitProgramme((draft) => {
       const selectedBlock = currentBlock(draft);
+      if (!selectedBlock) return;
       if ((selectedBlock.weeks || []).length <= 1) return;
       const currentIndex = selectedBlock.weeks.findIndex((item) => item.id === draft.selected_week_id);
       selectedBlock.weeks = selectedBlock.weeks.filter((item) => item.id !== draft.selected_week_id);
@@ -1945,7 +2053,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   function updatePlannedSession(sessionId, key, value) {
     commitProgramme((draft) => {
       const selectedWeek = currentWeek(draft);
-      const session = selectedWeek.sessions.find((item) => item.id === sessionId);
+      const session = selectedWeek?.sessions?.find((item) => item.id === sessionId);
       if (session) session[key] = value;
     });
   }
@@ -1954,12 +2062,13 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
     let createdId;
     commitProgramme((draft) => {
       createdId = createId('planned');
-      currentWeek(draft).sessions.push({
+      const targetWeek = ensureProgrammeWeek(draft, newSession.date || selectedDate);
+      targetWeek.sessions.push({
         id: createdId,
         date: newSession.date || selectedDate,
-        session_name: newSession.session_name || 'New Session',
-        focus: newSession.focus || 'Open focus',
-        duration: newSession.duration || '60 min',
+        session_name: newSession.session_name || '',
+        focus: newSession.focus || '',
+        duration: newSession.duration || '',
         completed: false,
         exercises: [],
       });
@@ -1978,7 +2087,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   function pasteSession() {
     if (!programme.copied_session) return;
     commitProgramme((draft) => {
-      currentWeek(draft).sessions.push({
+      ensureProgrammeWeek(draft, newSession.date || selectedDate).sessions.push({
         ...draft.copied_session,
         id: createId('planned'),
         date: newSession.date || selectedDate,
@@ -1989,10 +2098,10 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
 
   function duplicateSession(session) {
     commitProgramme((draft) => {
-      currentWeek(draft).sessions.push({
+      ensureProgrammeWeek(draft, session.date || selectedDate).sessions.push({
         ...session,
         id: createId('planned'),
-        session_name: `${session.session_name} Copy`,
+        session_name: session.session_name,
         completed: false,
       });
     });
@@ -2001,6 +2110,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   function deletePlannedSession(sessionId) {
     commitProgramme((draft) => {
       const selectedWeek = currentWeek(draft);
+      if (!selectedWeek) return;
       selectedWeek.sessions = selectedWeek.sessions.filter((session) => session.id !== sessionId);
     });
   }
@@ -2018,9 +2128,9 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
 
   return (
     <View style={styles.screen}>
-      <Header title={block?.block_name || 'Block Calendar'} onBack={() => setScreen('editCalendar')} />
+      <Header title={block?.block_name || 'Edit Training Block'} onBack={() => setScreen('editCalendar')} />
       <View style={styles.rowBetween}>
-        <Text style={styles.label}>{macro?.macro_block_name} / {block?.block_name}</Text>
+        <Text style={styles.label}>{[macro?.macro_block_name, block?.block_name].filter(Boolean).join(' / ') || 'No block named yet'}</Text>
         <View style={styles.inlineActions}>
           <Pressable style={styles.smallPill} onPress={addWeek}><Text style={styles.smallPillText}>+ Week</Text></Pressable>
           <Pressable style={styles.smallPill} onPress={deleteSelectedWeek}><Text style={styles.smallPillText}>Delete Week</Text></Pressable>
@@ -2028,7 +2138,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
       </View>
       <View style={styles.weekNav}>
         <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveWeek(-1)}><Text style={styles.chevron}>‹</Text></Pressable>
-        <Text style={styles.sectionTitle}>{week?.week_name || 'No Week'}</Text>
+        <Text style={styles.sectionTitle}>{week?.week_name || 'Today'}</Text>
         <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveWeek(1)}><Text style={styles.chevron}>›</Text></Pressable>
       </View>
       <View style={styles.weekGrid}>
@@ -3384,6 +3494,7 @@ function StorageScreen({
   authLoading,
   setAuthEmail,
   setAuthPassword,
+  updateProfileName,
   onSignUp,
   onSignIn,
   onSignOut,
@@ -3400,6 +3511,10 @@ function StorageScreen({
   return (
     <View style={styles.screen}>
       <Text style={styles.h1}>Storage</Text>
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Profile</Text>
+        <Input label="Name" value={data.profile?.name || ''} onChangeText={updateProfileName} />
+      </View>
       <View style={styles.authCard}>
         <View style={styles.rowBetween}>
           <View style={styles.flex}>
@@ -3569,7 +3684,7 @@ function MetricInputs({ metricType, metrics, onChangeMetric }) {
     return (
       <View style={styles.twoCol}>
         <Input label="Height / Distance" value={metrics.height_or_distance || ''} onChangeText={(value) => onChangeMetric('height_or_distance', value)} />
-        <Input label="Unit" value={metrics.unit || 'in'} onChangeText={(value) => onChangeMetric('unit', value)} />
+        <Input label="Unit" value={metrics.unit || ''} onChangeText={(value) => onChangeMetric('unit', value)} />
       </View>
     );
   }
