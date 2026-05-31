@@ -1,7 +1,10 @@
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.logic import analyze_app_data
+try:
+    from backend.logic import analyze_app_data
+except ModuleNotFoundError:
+    from logic import analyze_app_data
 
 app = FastAPI(title="Impuls Analysis Backend")
 
@@ -12,6 +15,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/")
+def root():
+    return {"ok": True, "service": "Impuls Analysis Backend"}
+
+
+@app.head("/")
+def root_head():
+    return Response(status_code=200)
 
 
 @app.get("/health")
