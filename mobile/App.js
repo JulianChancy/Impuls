@@ -181,7 +181,11 @@ function shortDate(value) {
 }
 
 function isoDate(value = new Date()) {
-  return new Date(value).toISOString().slice(0, 10);
+  const date = new Date(value);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function addDays(dateValue, amount) {
@@ -2184,7 +2188,12 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
   const monthDays = monthCalendarDays(selectedDate);
   const yearMonths = monthsInYear(selectedDate);
   const todayIso = isoDate();
+  const todayTitle = new Date(`${todayIso}T00:00:00`).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
   const [expandedMetricExerciseId, setExpandedMetricExerciseId] = useState(null);
+
+  useEffect(() => {
+    setSelectedDate(isoDate());
+  }, [setSelectedDate]);
 
   function commitProgramme(updater) {
     setData((current) => {
@@ -2281,6 +2290,7 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
         <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveCalendar(-1)}><Text style={styles.chevron}>‹</Text></Pressable>
         <View style={styles.calendarHeadingWrap}>
           <Text style={styles.sectionTitle}>{calendarHeading()}</Text>
+          <Text style={styles.calendarTodayTitle}>Today: {todayTitle}</Text>
         </View>
         <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveCalendar(1)}><Text style={styles.chevron}>›</Text></Pressable>
       </View>
@@ -5237,6 +5247,7 @@ const styles = StyleSheet.create({
   weekNav: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 },
   weekArrow: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, height: 42, justifyContent: 'center', width: 48 },
   calendarHeadingWrap: { alignItems: 'center', flex: 1, gap: 2, paddingHorizontal: 8 },
+  calendarTodayTitle: { color: '#111111', fontSize: 12, fontWeight: '800' },
   calendarModeTabs: { backgroundColor: '#E6E6E1', borderRadius: 12, flexDirection: 'row', gap: 4, padding: 4 },
   calendarModeTab: { alignItems: 'center', borderRadius: 9, flex: 1, paddingVertical: 9 },
   calendarModeTabActive: { backgroundColor: '#111111' },
@@ -5249,13 +5260,13 @@ const styles = StyleSheet.create({
   rangePreviewRow: {flexDirection: 'row', gap: 10,},
   rangePreviewItem: {backgroundColor: '#F7F7F5',borderColor: '#E8E8E4',borderRadius: 10,borderWidth: 1,flex: 1,gap: 4,padding: 10,},
   rangePreviewValue: {color: '#111111',fontSize: 14,fontWeight: '900',},
-  rangeCalendarGrid: {flexDirection: 'row',flexWrap: 'wrap',gap: 4,},
-  rangeDayCell: {alignItems: 'center',borderRadius: 8,height: 36,justifyContent: 'center',width: '13.15%',},
-  rangeDayOutside: {opacity: 0.35,},
+  rangeCalendarGrid: {flexDirection: 'row',flexWrap: 'wrap',},
+  rangeDayCell: {alignItems: 'center',borderRadius: 8,height: 36,justifyContent: 'center',width: '14.2857%',},
+  rangeDayOutside: {opacity: 0.7,},
   rangeDayInRange: {backgroundColor: '#DFF3E3',},
   rangeDaySelected: {backgroundColor: '#2FA044',},
   rangeDayText: {color: '#111111',fontSize: 11, fontWeight: '900',},
-  rangeDayTextOutside: {color: '#777771',},
+  rangeDayTextOutside: {color: '#111111',},
   rangeDayTextSelected: {color: '#FFFFFF',},
   programmeLabel: {
   color: '#111111',
@@ -5286,11 +5297,11 @@ const styles = StyleSheet.create({
   dayDot: { backgroundColor: 'transparent', borderRadius: 4, height: 6, marginTop: 4, width: 6 },
   dayDotFilled: { backgroundColor: '#111111', borderColor: '#111111' },
   monthCalendar: { backgroundColor: '#FFFFFF', borderColor: '#ECECE8', borderRadius: 12, borderWidth: 1, gap: 8, padding: 8 },
-  monthWeekHeader: { flexDirection: 'row', gap: 4 },
+  monthWeekHeader: { flexDirection: 'row' },
   monthWeekHeaderText: { color: '#474742', flex: 1, fontSize: 9, fontWeight: '900', textAlign: 'center' },
-  monthGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
-  monthDayCell: { alignItems: 'center', borderRadius: 9, height: 40, justifyContent: 'center', width: '13.15%' },
-  monthDayOutside: { opacity: 0.82 },
+  monthGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  monthDayCell: { alignItems: 'center', borderRadius: 9, height: 40, justifyContent: 'center', width: '14.2857%' },
+  monthDayOutside: { opacity: 0.72 },
   monthDayOutsideText: { color: '#111111' },
   yearGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   monthCell: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E6E6E2', borderRadius: 12, borderWidth: 1, gap: 5, justifyContent: 'center', minHeight: 54, width: '30.8%' },
