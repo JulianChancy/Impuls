@@ -2744,6 +2744,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
 
 function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate, setSelectedPlannedSessionId, setScreen }) {
   const [newSession, setNewSession] = useState({ session_name: '', focus: '', duration: '', date: selectedDate || isoDate() });
+  const [templateWeekday, setTemplateWeekday] = useState('1');
   const programme = data.programme;
   const macro = currentMacro(programme);
   const block = currentBlock(programme);
@@ -2759,6 +2760,55 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
       updater(nextProgramme);
       return { ...current, programme: nextProgramme };
     });
+  }
+
+  function resolveBlockRange(targetBlock) {
+    const weekStarts = (targetBlock?.weeks || []).map((item) => item.start_date).filter(Boolean).sort();
+    const weekEnds = (targetBlock?.weeks || []).map((item) => item.end_date).filter(Boolean).sort();
+    const start = targetBlock?.start_date || weekStarts[0] || isoDate();
+    const endCandidate = targetBlock?.end_date || weekEnds[weekEnds.length - 1] || addDays(start, 27);
+    const end = isDateRangeValid(start, endCandidate) ? endCandidate : start;
+    return { start, end };
+  }
+
+  function weekForDate(targetBlock, dateValue) {
+    const stamp = new Date(`${dateValue}T00:00:00`).getTime();
+    return (targetBlock?.weeks || []).find((item) => {
+      const start = item.start_date || dateValue;
+      const end = item.end_date || addDays(start, 6);
+      const startStamp = new Date(`${start}T00:00:00`).getTime();
+      const endStamp = new Date(`${end}T23:59:59`).getTime();
+      return stamp >= startStamp && stamp <= endStamp;
+    });
+  }
+
+  function ensureWeekForDate(targetBlock, dateValue) {
+    let targetWeek = weekForDate(targetBlock, dateValue);
+    if (targetWeek) return targetWeek;
+    const start = startOfWeekIso(dateValue);
+    targetWeek = {
+      id: createId('week'),
+      week_name: '',
+      start_date: start,
+      end_date: addDays(start, 6),
+      sessions: [],
+    };
+    targetBlock.weeks = targetBlock.weeks || [];
+    targetBlock.weeks.push(targetWeek);
+    targetBlock.weeks.sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
+    return targetWeek;
+  }
+
+  function sessionTemplateFromDraft(dateValue) {
+    return {
+      id: createId('planned'),
+      date: dateValue,
+      session_name: (newSession.session_name || '').trim(),
+      focus: (newSession.focus || '').trim(),
+      duration: (newSession.duration || '').trim(),
+      completed: false,
+      exercises: [],
+    };
   }
 
   function moveWeek(direction) {
@@ -2827,23 +2877,80 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   }
 
   function addPlannedSession() {
+    const dateValue = (newSession.date || selectedDate || '').trim();
+    if (!isValidDateText(dateValue)) {
+      Alert.alert('Invalid date', 'Use a valid calendar date.');
+      return;
+    }
+    if (!(newSession.session_name || '').trim()) {
+      Alert.alert('Session name required', 'Name the session before adding it.');
+      return;
+    }
     let createdId;
     commitProgramme((draft) => {
-      createdId = createId('planned');
-      const targetWeek = ensureProgrammeWeek(draft, newSession.date || selectedDate);
-      targetWeek.sessions.push({
-        id: createdId,
-        date: newSession.date || selectedDate,
-        session_name: newSession.session_name || '',
-        focus: newSession.focus || '',
-        duration: newSession.duration || '',
-        completed: false,
-        exercises: [],
-      });
+      let targetBlock = currentBlock(draft);
+      if (!targetBlock) {
+        ensureProgrammeWeek(draft, dateValue);
+        targetBlock = currentBlock(draft);
+      }
+      if (!targetBlock) return;
+      const targetWeek = ensureWeekForDate(targetBlock, dateValue);
+      const nextSession = sessionTemplateFromDraft(dateValue);
+      createdId = nextSession.id;
+      targetWeek.sessions.push(nextSession);
     });
     setNewSession({ session_name: '', focus: '', duration: '', date: selectedDate });
+    if (!createdId) return;
     setSelectedPlannedSessionId(createdId);
     setScreen('editPlannedSession');
+  }
+
+  function applyTemplateToWeekday() {
+    const sessionName = (newSession.session_name || '').trim();
+    if (!sessionName) {
+      Alert.alert('Session name required', 'Name the session template before applying it.');
+      return;
+    }
+    let created = 0;
+    let skipped = 0;
+    let nextSelectedWeekId = null;
+    commitProgramme((draft) => {
+      let targetBlock = currentBlock(draft);
+      if (!targetBlock) {
+        ensureProgrammeWeek(draft, selectedDate || isoDate());
+        targetBlock = currentBlock(draft);
+      }
+      if (!targetBlock) return;
+      const bounds = resolveBlockRange(targetBlock);
+      const weekday = Number(templateWeekday);
+      for (let date = bounds.start; date <= bounds.end; date = addDays(date, 1)) {
+        const jsWeekday = new Date(`${date}T00:00:00`).getDay();
+        const mondayFirstWeekday = jsWeekday === 0 ? 7 : jsWeekday;
+        if (mondayFirstWeekday !== weekday) continue;
+        const targetWeek = ensureWeekForDate(targetBlock, date);
+        const exists = (targetWeek.sessions || []).some(
+          (session) => session.date === date && String(session.session_name || '').trim().toLowerCase() === sessionName.toLowerCase()
+        );
+        if (exists) {
+          skipped += 1;
+          continue;
+        }
+        targetWeek.sessions = targetWeek.sessions || [];
+        targetWeek.sessions.push(sessionTemplateFromDraft(date));
+        if (!nextSelectedWeekId) nextSelectedWeekId = targetWeek.id;
+        created += 1;
+      }
+      if (nextSelectedWeekId) draft.selected_week_id = nextSelectedWeekId;
+    });
+    Alert.alert('Template applied', `${created} session${created === 1 ? '' : 's'} added.${skipped ? ` ${skipped} skipped (already existed).` : ''}`);
+  }
+
+  function applyTemplateToSpecificDate() {
+    if (!(newSession.session_name || '').trim()) {
+      Alert.alert('Session name required', 'Name the session before applying to a specific date.');
+      return;
+    }
+    addPlannedSession();
   }
 
   function copySession(session) {
@@ -2959,7 +3066,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
         </View>
       ))}
       <View style={styles.calendarPanel}>
-        <Text style={styles.sectionTitle}>{sessionsForSelectedDate.length ? 'Create Another Session' : 'Create New Session'}</Text>
+        <Text style={styles.sectionTitle}>Session Template</Text>
         <Input label="Session Name" value={newSession.session_name} onChangeText={(value) => setNewSession((current) => ({ ...current, session_name: value }))} />
         <View style={styles.twoCol}>
           <Input label="Date" value={newSession.date || selectedDate} onChangeText={(value) => setNewSession((current) => ({ ...current, date: value }))} />
@@ -2968,8 +3075,31 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
         <View style={styles.twoCol}>
           <Input label="Focus" value={newSession.focus} onChangeText={(value) => setNewSession((current) => ({ ...current, focus: value }))} />
         </View>
+        <Text style={styles.label}>Apply to weekday in block range</Text>
+        <View style={styles.chipWrap}>
+          {[
+            ['1', 'Mon'],
+            ['2', 'Tue'],
+            ['3', 'Wed'],
+            ['4', 'Thu'],
+            ['5', 'Fri'],
+            ['6', 'Sat'],
+            ['7', 'Sun'],
+          ].map(([id, label]) => (
+            <Pressable key={id} style={[styles.chip, templateWeekday === id && styles.chipActive]} onPress={() => setTemplateWeekday(id)}>
+              <Text style={[styles.chipText, templateWeekday === id && styles.chipTextActive]}>{label}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={styles.calendarMetaText}>
+          Applying across: {dateRangeSummary(block?.start_date, block?.end_date)}
+        </Text>
         <View style={styles.twoCol}>
-          <ActionButton title="Add Session" tone="black" onPress={addPlannedSession} />
+          <ActionButton title="Apply To Weekday" tone="black" onPress={applyTemplateToWeekday} />
+          <ActionButton title="Add On Date" tone="outline" onPress={applyTemplateToSpecificDate} />
+        </View>
+        <View style={styles.twoCol}>
+          <ActionButton title="Use Selected Day" tone="outline" onPress={() => setNewSession((current) => ({ ...current, date: selectedDate }))} />
           <ActionButton title={programme.copied_session ? 'Paste Copied' : 'Nothing Copied'} tone="outline" onPress={pasteSession} />
         </View>
       </View>
