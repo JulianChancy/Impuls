@@ -268,10 +268,6 @@ function isValidDateText(value) {
   return !Number.isNaN(parsed.getTime()) && isoDate(parsed) === value;
 }
 
-function validateDateInput(value) {
-  return isValidDateText(String(value || '').trim());
-}
-
 function isDateRangeValid(startDate, endDate) {
   if (!startDate || !endDate) return true;
   return new Date(`${endDate}T00:00:00`).getTime() >= new Date(`${startDate}T00:00:00`).getTime();
@@ -283,11 +279,13 @@ function formatRangeDate(value) {
 }
 
 function dateRangeSummary(startDate, endDate, prefix = '') {
-  if (!startDate && !endDate) return 'date range not set';
+  if (!startDate && !endDate) return `${prefix}${formatRangeDate(isoDate())}`;
   const start = formatRangeDate(startDate);
   const end = formatRangeDate(endDate);
-  if (!start || !end) return 'date range not set';
-  return `${prefix}${start} → ${end}`;
+  if (start && end) return `${prefix}${start} – ${end}`;
+  if (start) return `${prefix}Starts ${start}`;
+  if (end) return `${prefix}Ends ${end}`;
+  return `${prefix}${formatRangeDate(isoDate())}`;
 }
 
 function weekDayLabels(startDate) {
@@ -308,6 +306,13 @@ function visibleWeekStart(week, selectedDate) {
   if (!week?.start_date) return selected;
   const endDate = week.end_date || addDays(week.start_date, 6);
   return dateInBounds(selected, { start: week.start_date, end: endDate }) ? week.start_date : selected;
+}
+
+function defaultNextWeekRange(block) {
+  const weeks = [...(block?.weeks || [])].sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
+  const lastWeek = weeks[weeks.length - 1];
+  const start = lastWeek ? addDays(lastWeek.end_date || addDays(lastWeek.start_date || isoDate(), 6), 1) : block?.start_date || isoDate();
+  return { start, end: addDays(start, 6) };
 }
 
 function pretty(value, digits = 1) {
@@ -2178,6 +2183,7 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
   const weekDays = weekDayLabels(startOfWeekIso(selectedDate));
   const monthDays = monthCalendarDays(selectedDate);
   const yearMonths = monthsInYear(selectedDate);
+  const todayIso = isoDate();
   const [expandedMetricExerciseId, setExpandedMetricExerciseId] = useState(null);
 
   function commitProgramme(updater) {
@@ -2317,10 +2323,11 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
           <View style={styles.monthGrid}>
             {monthDays.map((day) => {
               const active = selectedDate === day.iso;
+              const isToday = todayIso === day.iso;
               return (
                 <Pressable
                   key={day.iso}
-                  style={[styles.monthDayCell, day.outsideMonth && styles.monthDayOutside, active && styles.activeDay]}
+                  style={[styles.monthDayCell, day.outsideMonth && styles.monthDayOutside, isToday && styles.todayDay, active && styles.activeDay]}
                   onPress={() => selectCalendarDate(day.iso)}
                 >
                   <Text style={[styles.dayText, day.outsideMonth && styles.monthDayOutsideText, active && styles.activeDayText]}>{day.day}</Text>
@@ -2334,8 +2341,9 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
         <View style={styles.weekGrid}>
           {weekDays.map((day) => {
             const active = selectedDate === day.iso;
+            const isToday = todayIso === day.iso;
             return (
-              <Pressable key={day.iso} style={[styles.dayCell, active && styles.activeDay]} onPress={() => selectCalendarDate(day.iso)}>
+              <Pressable key={day.iso} style={[styles.dayCell, isToday && styles.todayDay, active && styles.activeDay]} onPress={() => selectCalendarDate(day.iso)}>
                 <Text style={[styles.dayText, active && styles.activeDayText]}>{day.label}</Text>
                 <Text style={[styles.dayText, active && styles.activeDayText]}>{day.day}</Text>
                 <View style={[styles.dayDot, hasSessionOnDate(day.iso) && styles.dayDotFilled]} />
@@ -2357,10 +2365,10 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
             return (
               <View key={session.id} style={styles.todayTrainingCard}>
                 <Text style={styles.cardTitle}>{session.session_name}</Text>
-                <Text style={styles.muted}>{session.week_name ? `${session.week_name} / ` : ''}{session.focus} / {session.duration}</Text>
+                <Text style={styles.calendarMetaText}>{session.week_name ? `${session.week_name} / ` : ''}{session.focus} / {session.duration}</Text>
                 <Text style={styles.label}>Exercises</Text>
                 {(session.exercises || []).length === 0 ? (
-                  <Text style={styles.muted}>No exercises added yet.</Text>
+                  <Text style={styles.calendarMetaText}>No exercises added yet.</Text>
                 ) : (
                   (session.exercises || []).map((exercise, index) => {
                     const exerciseMetricKey = `${session.id}:${exercise.id}`;
@@ -2371,7 +2379,7 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
                             <View style={styles.orderBadge}><Text style={styles.orderBadgeText}>{exercise.order || index + 1}</Text></View>
                             <Text style={styles.exerciseNameText}>{exercise.exercise_name || ''}</Text>
                           </View>
-                          <Text style={styles.muted}>{exercise.movement_type.replace('_', ' ')}</Text>
+                          <Text style={styles.calendarMetaText}>{exercise.movement_type.replace('_', ' ')}</Text>
                         </View>
                         <Text style={styles.exercisePrescription}>{exercisePrescription(exercise)}</Text>
                         <MetricToggle
@@ -2413,6 +2421,8 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
 function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, setScreen }) {
   const programme = data.programme;
   const macro = currentMacro(programme);
+  const [editingItem, setEditingItem] = useState(null);
+  const [editDraft, setEditDraft] = useState(null);
 
   function commitProgramme(updater) {
     setData((current) => {
@@ -2427,8 +2437,18 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
       const selectedMacro = (draft.macro_blocks || []).find((item) => item.id === macroId) || draft.macro_blocks?.[0];
       if (!selectedMacro) return;
       draft.selected_macro_id = selectedMacro.id;
-      draft.selected_block_id = selectedMacro.blocks[0]?.id;
-      draft.selected_week_id = selectedMacro.blocks[0]?.weeks[0]?.id;
+      draft.selected_block_id = selectedMacro.blocks?.[0]?.id || null;
+      draft.selected_week_id = selectedMacro.blocks?.[0]?.weeks?.[0]?.id || null;
+    });
+  }
+
+  function selectBlock(blockId) {
+    commitProgramme((draft) => {
+      const selectedMacro = currentMacro(draft);
+      const selectedBlock = selectedMacro?.blocks?.find((item) => item.id === blockId) || selectedMacro?.blocks?.[0];
+      if (!selectedBlock) return;
+      draft.selected_block_id = selectedBlock.id;
+      draft.selected_week_id = selectedBlock.weeks?.[0]?.id || null;
     });
   }
 
@@ -2468,7 +2488,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
             block_name: '',
             start_date: startDate,
             end_date: '',
-            weeks: [{ id: weekId, week_name: '', start_date: startDate, end_date: '', sessions: [] }],
+            weeks: [{ id: weekId, week_name: '', start_date: startDate, end_date: addDays(startDate, 6), sessions: [] }],
           },
         ],
       });
@@ -2485,13 +2505,6 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
       draft.selected_macro_id = nextMacro?.id || null;
       draft.selected_block_id = nextMacro?.blocks?.[0]?.id || null;
       draft.selected_week_id = nextMacro?.blocks?.[0]?.weeks?.[0]?.id || null;
-    });
-  }
-
-  function updateMacroField(macroId, key, value) {
-    commitProgramme((draft) => {
-      const targetMacro = draft.macro_blocks.find((item) => item.id === macroId);
-      if (targetMacro) targetMacro[key] = value;
     });
   }
 
@@ -2520,7 +2533,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
         block_name: '',
         start_date: startDate,
         end_date: '',
-        weeks: [{ id: weekId, week_name: '', start_date: startDate, end_date: '', sessions: [] }],
+        weeks: [{ id: weekId, week_name: '', start_date: startDate, end_date: addDays(startDate, 6), sessions: [] }],
       });
       draft.selected_block_id = blockId;
       draft.selected_week_id = weekId;
@@ -2539,12 +2552,70 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
     });
   }
 
-  function updateBlockField(blockId, key, value) {
-    commitProgramme((draft) => {
-      const selectedMacro = currentMacro(draft);
-      const targetBlock = selectedMacro?.blocks?.find((item) => item.id === blockId);
-      if (targetBlock) targetBlock[key] = value;
+  function beginMacroEdit(macroItem) {
+    setEditingItem({ type: 'macro', id: macroItem.id });
+    setEditDraft({
+      name: macroItem.macro_block_name || '',
+      startDate: macroItem.start_date || '',
+      endDate: macroItem.end_date || '',
     });
+  }
+
+  function beginBlockEdit(blockItem) {
+    setEditingItem({ type: 'block', id: blockItem.id });
+    setEditDraft({
+      name: blockItem.block_name || '',
+      startDate: blockItem.start_date || '',
+      endDate: blockItem.end_date || '',
+    });
+  }
+
+  function cancelEdit() {
+    setEditingItem(null);
+    setEditDraft(null);
+  }
+
+  function saveEdit() {
+    if (!editingItem || !editDraft) return;
+    commitProgramme((draft) => {
+      if (editingItem.type === 'macro') {
+        const targetMacro = (draft.macro_blocks || []).find((item) => item.id === editingItem.id);
+        if (!targetMacro) return;
+        targetMacro.macro_block_name = editDraft.name;
+        targetMacro.start_date = editDraft.startDate;
+        targetMacro.end_date = editDraft.endDate;
+        return;
+      }
+      const selectedMacro = currentMacro(draft);
+      const targetBlock = selectedMacro?.blocks?.find((item) => item.id === editingItem.id);
+      if (!targetBlock) return;
+      targetBlock.block_name = editDraft.name;
+      targetBlock.start_date = editDraft.startDate;
+      targetBlock.end_date = editDraft.endDate;
+    });
+    cancelEdit();
+  }
+
+  function renderEditPanel(type, title) {
+    if (!editingItem || editingItem.type !== type || !editDraft) return null;
+    return (
+      <View style={styles.programmeFocusedPanel}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        <Input
+          label={type === 'macro' ? 'Macro name' : 'Block name'}
+          value={editDraft.name}
+          onChangeText={(value) => setEditDraft((current) => ({ ...current, name: value }))}
+        />
+        <View style={styles.programmeActions}>
+          <Pressable style={[styles.miniButton, styles.miniButtonDark]} onPress={saveEdit}>
+            <Text style={[styles.miniButtonText, styles.miniButtonTextLight]}>Save</Text>
+          </Pressable>
+          <Pressable style={styles.miniButton} onPress={cancelEdit}>
+            <Text style={styles.miniButtonText}>Cancel</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
   }
 
   return (
@@ -2561,27 +2632,17 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
           <View key={macroItem.id} style={styles.programmeEditRow}>
             <View style={styles.programmeEditMain}>
               <Text style={styles.label}>{programme.selected_macro_id === macroItem.id ? 'Selected Macro' : 'Macro'}</Text>
-              <InlineEdit label="Macro name" value={macroItem.macro_block_name} onChangeText={(value) => updateMacroField(macroItem.id, 'macro_block_name', value)} />
-              <Text style={styles.muted}>{dateRangeSummary(macroItem.start_date, macroItem.end_date)}</Text>
-              <DateField
-                label="Start date"
-                value={macroItem.start_date || ''}
-                startDate={macroItem.start_date}
-                endDate={macroItem.end_date}
-                fieldKey="start_date"
-                onCommit={(value) => updateMacroField(macroItem.id, 'start_date', value)}
-              />
-              <DateField
-                label="End date"
-                value={macroItem.end_date || ''}
-                startDate={macroItem.start_date}
-                endDate={macroItem.end_date}
-                fieldKey="end_date"
-                onCommit={(value) => updateMacroField(macroItem.id, 'end_date', value)}
-              />
-              <Pressable style={styles.miniButton} onPress={() => selectMacro(macroItem.id)}>
-                <Text style={styles.miniButtonText}>{programme.selected_macro_id === macroItem.id ? 'Selected' : 'Select Macro'}</Text>
-              </Pressable>
+              <Text style={styles.cardTitle}>{macroItem.macro_block_name || 'Untitled macro cycle'}</Text>
+              <Text style={styles.rangeSummaryText}>{dateRangeSummary(macroItem.start_date, macroItem.end_date)}</Text>
+              <View style={styles.programmeActions}>
+                <Pressable style={styles.miniButton} onPress={() => selectMacro(macroItem.id)}>
+                  <Text style={styles.miniButtonText}>{programme.selected_macro_id === macroItem.id ? 'Selected' : 'Select'}</Text>
+                </Pressable>
+                <Pressable style={styles.miniButton} onPress={() => beginMacroEdit(macroItem)}>
+                  <Text style={styles.miniButtonText}>Edit</Text>
+                </Pressable>
+              </View>
+              {editingItem?.type === 'macro' && editingItem.id === macroItem.id ? renderEditPanel('macro', 'Edit Macro Cycle') : null}
             </View>
             <Pressable style={styles.deleteButton} onPress={() => deleteMacroBlock(macroItem.id)}>
               <Text style={styles.deleteButtonText}>Delete Macro</Text>
@@ -2599,27 +2660,20 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
           <View key={blockItem.id} style={styles.programmeEditRow}>
             <View style={styles.programmeEditMain}>
               <Text style={styles.label}>{programme.selected_block_id === blockItem.id ? 'Selected Block' : 'Block'}</Text>
-              <InlineEdit label="Block name" value={blockItem.block_name} onChangeText={(value) => updateBlockField(blockItem.id, 'block_name', value)} />
-              <Text style={styles.muted}>{dateRangeSummary(blockItem.start_date, blockItem.end_date, 'Week/phase range: ')}</Text>
-              <DateField
-                label="Start date"
-                value={blockItem.start_date || ''}
-                startDate={blockItem.start_date}
-                endDate={blockItem.end_date}
-                fieldKey="start_date"
-                onCommit={(value) => updateBlockField(blockItem.id, 'start_date', value)}
-              />
-              <DateField
-                label="End date"
-                value={blockItem.end_date || ''}
-                startDate={blockItem.start_date}
-                endDate={blockItem.end_date}
-                fieldKey="end_date"
-                onCommit={(value) => updateBlockField(blockItem.id, 'end_date', value)}
-              />
-              <Pressable style={styles.miniButton} onPress={() => selectBlockAndOpen(blockItem.id)}>
-                <Text style={styles.miniButtonText}>Edit Sessions</Text>
+              <Text style={styles.cardTitle}>{blockItem.block_name || 'Untitled training block'}</Text>
+              <Text style={styles.rangeSummaryText}>{dateRangeSummary(blockItem.start_date, blockItem.end_date, 'Week/phase range: ')}</Text>
+              <View style={styles.programmeActions}>
+                <Pressable style={styles.miniButton} onPress={() => selectBlock(blockItem.id)}>
+                  <Text style={styles.miniButtonText}>{programme.selected_block_id === blockItem.id ? 'Selected' : 'Select'}</Text>
+                </Pressable>
+                <Pressable style={styles.miniButton} onPress={() => selectBlockAndOpen(blockItem.id)}>
+                  <Text style={styles.miniButtonText}>Edit Sessions</Text>
+                </Pressable>
+              </View>
+              <Pressable style={styles.miniButton} onPress={() => beginBlockEdit(blockItem)}>
+                <Text style={styles.miniButtonText}>Edit</Text>
               </Pressable>
+              {editingItem?.type === 'block' && editingItem.id === blockItem.id ? renderEditPanel('block', 'Edit Training Block') : null}
             </View>
             <Pressable style={styles.deleteButton} onPress={() => deleteTrainingBlock(blockItem.id)}>
               <Text style={styles.deleteButtonText}>Delete Block</Text>
@@ -2669,25 +2723,26 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   }
 
   function addWeek() {
-    const startDate = isoDate();
+    let nextRange = { start: isoDate(), end: addDays(isoDate(), 6) };
     commitProgramme((draft) => {
       let selectedBlock = currentBlock(draft);
       if (!selectedBlock) {
-        ensureProgrammeWeek(draft, startDate);
+        ensureProgrammeWeek(draft, nextRange.start);
         selectedBlock = currentBlock(draft);
       }
+      nextRange = defaultNextWeekRange(selectedBlock);
       const weekId = createId('week');
       selectedBlock.weeks.push({
         id: weekId,
         week_name: '',
-        start_date: startDate,
-        end_date: '',
+        start_date: nextRange.start,
+        end_date: nextRange.end,
         sessions: [],
       });
       draft.selected_week_id = weekId;
     });
-    setSelectedDate(startDate);
-    setNewSession((current) => ({ ...current, date: startDate }));
+    setSelectedDate(nextRange.start);
+    setNewSession((current) => ({ ...current, date: nextRange.start }));
   }
 
   function deleteSelectedWeek() {
@@ -4542,69 +4597,6 @@ function Input({ label, value, onChangeText, editable = true }) {
   );
 }
 
-function DateField({ label, value, startDate, endDate, fieldKey, onCommit }) {
-  const [draft, setDraft] = useState(value || '');
-
-  useEffect(() => {
-    setDraft(value || '');
-  }, [value]);
-
-  function commitDate(nextDate, options = {}) {
-    const trimmed = String(nextDate || '').trim();
-    if (!validateDateInput(trimmed)) {
-      if (options.showAlert) Alert.alert('Invalid date', 'Use YYYY-MM-DD format.');
-      setDraft(value || '');
-      return false;
-    }
-    const nextStart = fieldKey === 'start_date' ? trimmed : startDate;
-    const nextEnd = fieldKey === 'end_date' ? trimmed : endDate;
-    if (!isDateRangeValid(nextStart, nextEnd)) {
-      Alert.alert('Invalid date range', 'End date cannot be before start date.');
-      setDraft(value || '');
-      return false;
-    }
-    onCommit(trimmed);
-    return true;
-  }
-
-  function handleChange(nextValue) {
-    const nextDraft = String(nextValue || '');
-    setDraft(nextDraft);
-    const trimmed = nextDraft.trim();
-    if (trimmed === '') {
-      onCommit('');
-      return;
-    }
-    if (trimmed.length === 10 && validateDateInput(trimmed)) {
-      commitDate(trimmed);
-    }
-  }
-
-  function handleEndEditing() {
-    const trimmed = String(draft || '').trim();
-    if (trimmed === '') {
-      onCommit('');
-      return;
-    }
-    if (trimmed !== value) commitDate(trimmed, { showAlert: true });
-  }
-
-  return (
-    <View style={styles.inputWrap}>
-      <Text style={styles.inputLabel}>{label}</Text>
-      <TextInput
-        style={styles.input}
-        value={draft}
-        placeholder="YYYY-MM-DD"
-        onChangeText={handleChange}
-        onEndEditing={handleEndEditing}
-        autoCapitalize="none"
-        keyboardType="numbers-and-punctuation"
-      />
-    </View>
-  );
-}
-
 function SetMetricFields({ exercise, onChangeSetMetric }) {
   const rows = Array.from({ length: exerciseSetCount(exercise) }, (_, index) => setMetricDraft(exercise, index));
 
@@ -5071,25 +5063,26 @@ const styles = StyleSheet.create({
   weekNav: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 },
   weekArrow: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, height: 42, justifyContent: 'center', width: 48 },
   calendarHeadingWrap: { alignItems: 'center', flex: 1, gap: 2, paddingHorizontal: 8 },
-  calendarModeTabs: { backgroundColor: '#ECECE8', borderRadius: 12, flexDirection: 'row', gap: 4, padding: 4 },
+  calendarModeTabs: { backgroundColor: '#E6E6E1', borderRadius: 12, flexDirection: 'row', gap: 4, padding: 4 },
   calendarModeTab: { alignItems: 'center', borderRadius: 9, flex: 1, paddingVertical: 9 },
   calendarModeTabActive: { backgroundColor: '#111111' },
-  calendarModeTabText: { color: '#555550', fontSize: 12, fontWeight: '900' },
+  calendarModeTabText: { color: '#242421', fontSize: 12, fontWeight: '900' },
   calendarModeTabTextActive: { color: '#FFFFFF' },
   weekGrid: { flexDirection: 'row', gap: 5 },
-  dayCell: { flex: 1, minHeight: 48, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  dayCell: { flex: 1, minHeight: 50, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   activeDay: { backgroundColor: '#2FA044' },
-  dayText: { color: '#111111', fontSize: 10, fontWeight: '800', textAlign: 'center' },
+  todayDay: { backgroundColor: '#E8F0FF', borderColor: '#2F6FDB', borderWidth: 1 },
+  dayText: { color: '#111111', fontSize: 11, fontWeight: '900', textAlign: 'center' },
   activeDayText: { color: '#FFFFFF' },
-  dayDot: { backgroundColor: '#C8C8C2', borderRadius: 3, height: 5, marginTop: 4, width: 5 },
-  dayDotFilled: { backgroundColor: '#111111' },
+  dayDot: { backgroundColor: 'transparent', borderRadius: 4, height: 6, marginTop: 4, width: 6 },
+  dayDotFilled: { backgroundColor: '#111111', borderColor: '#111111' },
   monthCalendar: { backgroundColor: '#FFFFFF', borderColor: '#ECECE8', borderRadius: 12, borderWidth: 1, gap: 8, padding: 8 },
   monthWeekHeader: { flexDirection: 'row', gap: 4 },
-  monthWeekHeaderText: { color: '#777771', flex: 1, fontSize: 9, fontWeight: '900', textAlign: 'center' },
+  monthWeekHeaderText: { color: '#474742', flex: 1, fontSize: 9, fontWeight: '900', textAlign: 'center' },
   monthGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
-  monthDayCell: { alignItems: 'center', borderRadius: 8, height: 38, justifyContent: 'center', width: '13.15%' },
-  monthDayOutside: { opacity: 0.38 },
-  monthDayOutsideText: { color: '#8A8A84' },
+  monthDayCell: { alignItems: 'center', borderRadius: 9, height: 40, justifyContent: 'center', width: '13.15%' },
+  monthDayOutside: { opacity: 0.82 },
+  monthDayOutsideText: { color: '#111111' },
   yearGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   monthCell: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E6E6E2', borderRadius: 12, borderWidth: 1, gap: 5, justifyContent: 'center', minHeight: 54, width: '30.8%' },
   monthCellActive: { backgroundColor: '#2FA044', borderColor: '#2FA044' },
@@ -5114,21 +5107,12 @@ const styles = StyleSheet.create({
   programmeEditMain: { gap: 10 },
   programmeActions: { flexDirection: 'row', gap: 8 },
   miniButton: { backgroundColor: '#EFEFEC', borderRadius: 8, flex: 1, alignItems: 'center', paddingVertical: 9 },
+  miniButtonDark: { backgroundColor: '#111111' },
   miniButtonText: { color: '#111111', fontSize: 12, fontWeight: '900' },
-  dateFieldWrap: { gap: 6 },
-  dateChipButton: { alignItems: 'center', backgroundColor: '#F7F7F5', borderColor: '#DADAD5', borderRadius: 10, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 42, paddingHorizontal: 12 },
-  dateChipText: { color: '#111111', fontSize: 13, fontWeight: '800' },
-  dateChipPlaceholder: { color: '#777771' },
-  dateChipIcon: { color: '#777771', fontSize: 13, fontWeight: '900' },
-  miniCalendarPicker: { backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 14, borderWidth: 1, gap: 8, padding: 10 },
-  miniCalendarHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
-  miniCalendarArrow: { alignItems: 'center', backgroundColor: '#F7F7F5', borderRadius: 8, height: 34, justifyContent: 'center', width: 38 },
-  miniCalendarTitle: { color: '#111111', fontSize: 13, fontWeight: '900' },
-  miniCalendarGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
-  miniCalendarDay: { alignItems: 'center', borderRadius: 8, height: 32, justifyContent: 'center', width: '13.15%' },
-  miniCalendarFooter: { flexDirection: 'row', gap: 8, justifyContent: 'flex-end' },
-  miniCalendarFooterButton: { backgroundColor: '#F1F1ED', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
-  miniCalendarFooterText: { color: '#111111', fontSize: 11, fontWeight: '900' },
+  miniButtonTextLight: { color: '#FFFFFF' },
+  programmeFocusedPanel: { backgroundColor: '#F7F7F5', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 12, padding: 12 },
+  rangeSummaryText: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '800', lineHeight: 18 },
+  calendarMetaText: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '700', lineHeight: 18 },
   weekSessionRow: { alignItems: 'center', backgroundColor: '#F7F7F5', borderRadius: 8, flexDirection: 'row', gap: 10, padding: 10 },
   weekSessionDate: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E3E3DE', borderRadius: 8, borderWidth: 1, height: 50, justifyContent: 'center', width: 48 },
   weekSessionDay: { color: '#72726C', fontSize: 10, fontWeight: '900' },
