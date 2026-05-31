@@ -190,6 +190,73 @@ function addDays(dateValue, amount) {
   return isoDate(date);
 }
 
+function dateFromIso(dateValue) {
+  return new Date(`${dateValue || isoDate()}T00:00:00`);
+}
+
+function addMonths(dateValue, amount) {
+  const date = dateFromIso(dateValue);
+  date.setMonth(date.getMonth() + amount);
+  return isoDate(date);
+}
+
+function addYears(dateValue, amount) {
+  const date = dateFromIso(dateValue);
+  date.setFullYear(date.getFullYear() + amount);
+  return isoDate(date);
+}
+
+function startOfWeekIso(dateValue) {
+  const date = dateFromIso(dateValue);
+  const day = date.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  date.setDate(date.getDate() + mondayOffset);
+  return isoDate(date);
+}
+
+function monthStartIso(dateValue) {
+  const date = dateFromIso(dateValue);
+  date.setDate(1);
+  return isoDate(date);
+}
+
+function monthLabel(dateValue) {
+  return dateFromIso(dateValue).toLocaleDateString([], { month: 'long', year: 'numeric' });
+}
+
+function yearLabel(dateValue) {
+  return String(dateFromIso(dateValue).getFullYear());
+}
+
+function monthCalendarDays(dateValue) {
+  const firstOfMonth = dateFromIso(monthStartIso(dateValue));
+  const firstDay = firstOfMonth.getDay();
+  const mondayOffset = firstDay === 0 ? -6 : 1 - firstDay;
+  const gridStart = new Date(firstOfMonth);
+  gridStart.setDate(firstOfMonth.getDate() + mondayOffset);
+  const currentMonth = firstOfMonth.getMonth();
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(gridStart);
+    date.setDate(gridStart.getDate() + index);
+    return {
+      iso: isoDate(date),
+      day: date.getDate(),
+      outsideMonth: date.getMonth() !== currentMonth,
+    };
+  });
+}
+
+function monthsInYear(dateValue) {
+  const year = dateFromIso(dateValue).getFullYear();
+  return Array.from({ length: 12 }, (_, index) => {
+    const date = new Date(year, index, 1);
+    return {
+      iso: isoDate(date),
+      label: date.toLocaleDateString([], { month: 'short' }),
+    };
+  });
+}
+
 function isValidDateText(value) {
   if (!value) return true;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -2099,7 +2166,10 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
   const week = currentWeek(programme);
   const blockSessions = plannedSessionsInCurrentBlock(programme);
   const selectedDaySessions = plannedSessionsOnDate(programme, selectedDate);
-  const weekDays = weekDayLabels(visibleWeekStart(week, selectedDate));
+  const [calendarMode, setCalendarMode] = useState('week');
+  const weekDays = weekDayLabels(startOfWeekIso(selectedDate));
+  const monthDays = monthCalendarDays(selectedDate);
+  const yearMonths = monthsInYear(selectedDate);
   const [expandedMetricExerciseId, setExpandedMetricExerciseId] = useState(null);
 
   function commitProgramme(updater) {
@@ -2110,15 +2180,47 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
     });
   }
 
-  function moveWeek(direction) {
-    const weeks = block?.weeks || [];
-    const currentIndex = weeks.findIndex((item) => item.id === week?.id);
-    const nextWeek = weeks[currentIndex + direction];
-    if (!nextWeek) return;
-    commitProgramme((draft) => {
-      draft.selected_week_id = nextWeek.id;
+  function selectCalendarDate(date) {
+    const matchingWeek = (block?.weeks || []).find((item) => {
+      const start = item.start_date || date;
+      const end = item.end_date || addDays(start, 6);
+      return dateInBounds(date, { start, end });
     });
-    setSelectedDate(nextWeek.start_date || selectedDate);
+    if (matchingWeek) {
+      commitProgramme((draft) => {
+        draft.selected_week_id = matchingWeek.id;
+      });
+    }
+    setSelectedDate(date);
+  }
+
+  function moveCalendar(direction) {
+    const nextDate =
+      calendarMode === 'year'
+        ? addYears(selectedDate, direction)
+        : calendarMode === 'month'
+          ? addMonths(selectedDate, direction)
+          : addDays(selectedDate, direction * 7);
+    selectCalendarDate(nextDate);
+  }
+
+  function cycleCalendarMode() {
+    setCalendarMode((current) => (current === 'week' ? 'month' : current === 'month' ? 'year' : 'week'));
+  }
+
+  function calendarHeading() {
+    if (calendarMode === 'year') return yearLabel(selectedDate);
+    if (calendarMode === 'month') return monthLabel(selectedDate);
+    return week?.week_name || dateRangeSummary(startOfWeekIso(selectedDate), addDays(startOfWeekIso(selectedDate), 6));
+  }
+
+  function hasSessionOnDate(date) {
+    return blockSessions.some((session) => session.date === date);
+  }
+
+  function selectMonth(monthIso) {
+    selectCalendarDate(monthIso);
+    setCalendarMode('month');
   }
 
   function updatePlannedExercise(sessionId, exerciseId, key, value) {
@@ -2166,23 +2268,68 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
         </Pressable>
       </View>
       <View style={styles.weekNav}>
-        <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveWeek(-1)}><Text style={styles.chevron}>‹</Text></Pressable>
-        <Text style={styles.sectionTitle}>{week?.week_name || 'Today'}</Text>
-        <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveWeek(1)}><Text style={styles.chevron}>›</Text></Pressable>
+        <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveCalendar(-1)}><Text style={styles.chevron}>‹</Text></Pressable>
+        <View style={styles.calendarHeadingWrap}>
+          <Text style={styles.sectionTitle}>{calendarHeading()}</Text>
+          <Text style={styles.muted}>{calendarMode === 'week' ? 'Week view' : calendarMode === 'month' ? 'Month view' : 'Year view'}</Text>
+        </View>
+        <View style={styles.calendarNavActions}>
+          <Pressable style={styles.calendarExpandButton} hitSlop={8} onPress={cycleCalendarMode}>
+            <Text style={styles.calendarExpandIcon}>▦</Text>
+          </Pressable>
+          <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveCalendar(1)}><Text style={styles.chevron}>›</Text></Pressable>
+        </View>
       </View>
-      <View style={styles.weekGrid}>
-        {weekDays.map((day) => {
-          const hasSession = blockSessions.some((session) => session.date === day.iso);
-          const active = selectedDate === day.iso;
-          return (
-            <Pressable key={day.iso} style={[styles.dayCell, active && styles.activeDay]} onPress={() => setSelectedDate(day.iso)}>
-              <Text style={[styles.dayText, active && styles.activeDayText]}>{day.label}</Text>
-              <Text style={[styles.dayText, active && styles.activeDayText]}>{day.day}</Text>
-              <View style={[styles.dayDot, hasSession && styles.dayDotFilled]} />
-            </Pressable>
-          );
-        })}
-      </View>
+      {calendarMode === 'year' ? (
+        <View style={styles.yearGrid}>
+          {yearMonths.map((month) => {
+            const active = month.iso.slice(0, 7) === selectedDate.slice(0, 7);
+            const monthHasSession = blockSessions.some((session) => String(session.date || '').slice(0, 7) === month.iso.slice(0, 7));
+            return (
+              <Pressable key={month.iso} style={[styles.monthCell, active && styles.monthCellActive]} onPress={() => selectMonth(month.iso)}>
+                <Text style={[styles.monthCellText, active && styles.activeDayText]}>{month.label}</Text>
+                <View style={[styles.dayDot, monthHasSession && styles.dayDotFilled]} />
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : calendarMode === 'month' ? (
+        <View style={styles.monthCalendar}>
+          <View style={styles.monthWeekHeader}>
+            {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label) => (
+              <Text key={label} style={styles.monthWeekHeaderText}>{label}</Text>
+            ))}
+          </View>
+          <View style={styles.monthGrid}>
+            {monthDays.map((day) => {
+              const active = selectedDate === day.iso;
+              return (
+                <Pressable
+                  key={day.iso}
+                  style={[styles.monthDayCell, day.outsideMonth && styles.monthDayOutside, active && styles.activeDay]}
+                  onPress={() => selectCalendarDate(day.iso)}
+                >
+                  <Text style={[styles.dayText, day.outsideMonth && styles.monthDayOutsideText, active && styles.activeDayText]}>{day.day}</Text>
+                  <View style={[styles.dayDot, hasSessionOnDate(day.iso) && styles.dayDotFilled]} />
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      ) : (
+        <View style={styles.weekGrid}>
+          {weekDays.map((day) => {
+            const active = selectedDate === day.iso;
+            return (
+              <Pressable key={day.iso} style={[styles.dayCell, active && styles.activeDay]} onPress={() => selectCalendarDate(day.iso)}>
+                <Text style={[styles.dayText, active && styles.activeDayText]}>{day.label}</Text>
+                <Text style={[styles.dayText, active && styles.activeDayText]}>{day.day}</Text>
+                <View style={[styles.dayDot, hasSessionOnDate(day.iso) && styles.dayDotFilled]} />
+              </Pressable>
+            );
+          })}
+        </View>
+      )}
       <View style={styles.card}>
         <Text style={styles.label}>Selected Day ({selectedDate})</Text>
         <Text style={styles.sectionTitle}>Training Programme</Text>
@@ -2493,7 +2640,12 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
     const weeks = block?.weeks || [];
     const currentIndex = weeks.findIndex((item) => item.id === week?.id);
     const nextWeek = weeks[currentIndex + direction];
-    if (!nextWeek) return;
+    if (!nextWeek) {
+      const nextDate = addDays(selectedDate, direction * 7);
+      setSelectedDate(nextDate);
+      setNewSession((current) => ({ ...current, date: nextDate }));
+      return;
+    }
     commitProgramme((draft) => {
       draft.selected_week_id = nextWeek.id;
     });
@@ -4377,40 +4529,87 @@ function Input({ label, value, onChangeText, editable = true }) {
 }
 
 function DateField({ label, value, startDate, endDate, fieldKey, onCommit }) {
-  const [draft, setDraft] = useState(value || '');
+  const [open, setOpen] = useState(false);
+  const [viewDate, setViewDate] = useState(value || startDate || endDate || isoDate());
 
   useEffect(() => {
-    setDraft(value || '');
+    if (value) setViewDate(value);
   }, [value]);
 
-  function commit() {
-    const trimmed = String(draft || '').trim();
-    if (!isValidDateText(trimmed)) {
-      Alert.alert('Invalid date', 'Use YYYY-MM-DD format.');
-      setDraft(value || '');
-      return;
-    }
-    const nextStart = fieldKey === 'start_date' ? trimmed : startDate;
-    const nextEnd = fieldKey === 'end_date' ? trimmed : endDate;
+  function commitDate(nextDate) {
+    const nextStart = fieldKey === 'start_date' ? nextDate : startDate;
+    const nextEnd = fieldKey === 'end_date' ? nextDate : endDate;
     if (!isDateRangeValid(nextStart, nextEnd)) {
       Alert.alert('Invalid date range', 'End date cannot be before start date.');
-      setDraft(value || '');
       return;
     }
-    onCommit(trimmed);
+    onCommit(nextDate);
+    if (nextDate) setViewDate(nextDate);
+    setOpen(false);
   }
 
   return (
-    <View style={styles.inputWrap}>
+    <View style={styles.dateFieldWrap}>
       <Text style={styles.inputLabel}>{label}</Text>
-      <TextInput
-        style={styles.input}
-        value={draft}
-        placeholder="YYYY-MM-DD"
-        onChangeText={setDraft}
-        onEndEditing={commit}
-        autoCapitalize="none"
-      />
+      <Pressable style={styles.dateChipButton} onPress={() => setOpen((current) => !current)}>
+        <Text style={[styles.dateChipText, !value && styles.dateChipPlaceholder]}>
+          {value ? formatRangeDate(value) : 'Select date'}
+        </Text>
+        <Text style={styles.dateChipIcon}>⌄</Text>
+      </Pressable>
+      {open ? (
+        <MiniCalendarPicker
+          value={value || viewDate}
+          viewDate={viewDate}
+          onChangeViewDate={setViewDate}
+          onSelect={commitDate}
+          onClear={() => commitDate('')}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+function MiniCalendarPicker({ value, viewDate, onChangeViewDate, onSelect, onClear }) {
+  const days = monthCalendarDays(viewDate);
+  return (
+    <View style={styles.miniCalendarPicker}>
+      <View style={styles.miniCalendarHeader}>
+        <Pressable style={styles.miniCalendarArrow} onPress={() => onChangeViewDate(addMonths(viewDate, -1))}>
+          <Text style={styles.chevron}>‹</Text>
+        </Pressable>
+        <Text style={styles.miniCalendarTitle}>{monthLabel(viewDate)}</Text>
+        <Pressable style={styles.miniCalendarArrow} onPress={() => onChangeViewDate(addMonths(viewDate, 1))}>
+          <Text style={styles.chevron}>›</Text>
+        </Pressable>
+      </View>
+      <View style={styles.monthWeekHeader}>
+        {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((label, index) => (
+          <Text key={`${label}-${index}`} style={styles.monthWeekHeaderText}>{label}</Text>
+        ))}
+      </View>
+      <View style={styles.miniCalendarGrid}>
+        {days.map((day) => {
+          const active = day.iso === value;
+          return (
+            <Pressable
+              key={day.iso}
+              style={[styles.miniCalendarDay, day.outsideMonth && styles.monthDayOutside, active && styles.activeDay]}
+              onPress={() => onSelect(day.iso)}
+            >
+              <Text style={[styles.dayText, day.outsideMonth && styles.monthDayOutsideText, active && styles.activeDayText]}>{day.day}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      <View style={styles.miniCalendarFooter}>
+        <Pressable style={styles.miniCalendarFooterButton} onPress={() => onSelect(isoDate())}>
+          <Text style={styles.miniCalendarFooterText}>Today</Text>
+        </Pressable>
+        <Pressable style={styles.miniCalendarFooterButton} onPress={onClear}>
+          <Text style={styles.miniCalendarFooterText}>Clear</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -4880,6 +5079,10 @@ const styles = StyleSheet.create({
   inlineValue: { minWidth: 170, textAlign: 'right', color: '#111111', fontWeight: '700' },
   weekNav: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 },
   weekArrow: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, height: 42, justifyContent: 'center', width: 48 },
+  calendarHeadingWrap: { alignItems: 'center', flex: 1, gap: 2, paddingHorizontal: 8 },
+  calendarNavActions: { alignItems: 'center', flexDirection: 'row', gap: 8 },
+  calendarExpandButton: { alignItems: 'center', backgroundColor: '#F1F1ED', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, height: 36, justifyContent: 'center', width: 36 },
+  calendarExpandIcon: { color: '#111111', fontSize: 15, fontWeight: '900' },
   weekGrid: { flexDirection: 'row', gap: 5 },
   dayCell: { flex: 1, minHeight: 48, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   activeDay: { backgroundColor: '#2FA044' },
@@ -4887,6 +5090,17 @@ const styles = StyleSheet.create({
   activeDayText: { color: '#FFFFFF' },
   dayDot: { backgroundColor: '#C8C8C2', borderRadius: 3, height: 5, marginTop: 4, width: 5 },
   dayDotFilled: { backgroundColor: '#111111' },
+  monthCalendar: { backgroundColor: '#FFFFFF', borderColor: '#ECECE8', borderRadius: 12, borderWidth: 1, gap: 8, padding: 8 },
+  monthWeekHeader: { flexDirection: 'row', gap: 4 },
+  monthWeekHeaderText: { color: '#777771', flex: 1, fontSize: 9, fontWeight: '900', textAlign: 'center' },
+  monthGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  monthDayCell: { alignItems: 'center', borderRadius: 8, height: 38, justifyContent: 'center', width: '13.15%' },
+  monthDayOutside: { opacity: 0.38 },
+  monthDayOutsideText: { color: '#8A8A84' },
+  yearGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  monthCell: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E6E6E2', borderRadius: 12, borderWidth: 1, gap: 5, justifyContent: 'center', minHeight: 54, width: '30.8%' },
+  monthCellActive: { backgroundColor: '#2FA044', borderColor: '#2FA044' },
+  monthCellText: { color: '#111111', fontSize: 12, fontWeight: '900' },
   programmeRow: { backgroundColor: '#FFFFFF', borderBottomColor: '#E6E6E2', borderBottomWidth: 1, paddingVertical: 13, flexDirection: 'row', justifyContent: 'space-between' },
   emptyDay: { gap: 12 },
   todayTrainingCard: { borderTopColor: '#E8E8E4', borderTopWidth: 1, gap: 8, paddingTop: 12 },
@@ -4908,6 +5122,20 @@ const styles = StyleSheet.create({
   programmeActions: { flexDirection: 'row', gap: 8 },
   miniButton: { backgroundColor: '#EFEFEC', borderRadius: 8, flex: 1, alignItems: 'center', paddingVertical: 9 },
   miniButtonText: { color: '#111111', fontSize: 12, fontWeight: '900' },
+  dateFieldWrap: { gap: 6 },
+  dateChipButton: { alignItems: 'center', backgroundColor: '#F7F7F5', borderColor: '#DADAD5', borderRadius: 10, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 42, paddingHorizontal: 12 },
+  dateChipText: { color: '#111111', fontSize: 13, fontWeight: '800' },
+  dateChipPlaceholder: { color: '#777771' },
+  dateChipIcon: { color: '#777771', fontSize: 13, fontWeight: '900' },
+  miniCalendarPicker: { backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 14, borderWidth: 1, gap: 8, padding: 10 },
+  miniCalendarHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
+  miniCalendarArrow: { alignItems: 'center', backgroundColor: '#F7F7F5', borderRadius: 8, height: 34, justifyContent: 'center', width: 38 },
+  miniCalendarTitle: { color: '#111111', fontSize: 13, fontWeight: '900' },
+  miniCalendarGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  miniCalendarDay: { alignItems: 'center', borderRadius: 8, height: 32, justifyContent: 'center', width: '13.15%' },
+  miniCalendarFooter: { flexDirection: 'row', gap: 8, justifyContent: 'flex-end' },
+  miniCalendarFooterButton: { backgroundColor: '#F1F1ED', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
+  miniCalendarFooterText: { color: '#111111', fontSize: 11, fontWeight: '900' },
   weekSessionRow: { alignItems: 'center', backgroundColor: '#F7F7F5', borderRadius: 8, flexDirection: 'row', gap: 10, padding: 10 },
   weekSessionDate: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E3E3DE', borderRadius: 8, borderWidth: 1, height: 50, justifyContent: 'center', width: 48 },
   weekSessionDay: { color: '#72726C', fontSize: 10, fontWeight: '900' },
