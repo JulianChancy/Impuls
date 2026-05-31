@@ -1,7 +1,22 @@
+-- Impuls Supabase destructive reset + schema
+-- WARNING: This drops existing Impuls app tables in public schema, including stored sessions/check-ins/programmes.
+-- Use this only for an early/prototype Supabase project where old tables have incompatible bigint ids.
+-- If you already have important production data, do not run this. Migrate the data first.
+
+drop table if exists public.check_in_insight_history cascade;
+drop table if exists public.check_ins cascade;
+drop table if exists public.session_exercises cascade;
+drop table if exists public.sessions cascade;
+drop table if exists public.planned_exercises cascade;
+drop table if exists public.planned_sessions cascade;
+drop table if exists public.training_weeks cascade;
+drop table if exists public.training_blocks cascade;
+drop table if exists public.macro_blocks cascade;
+drop table if exists public.programmes cascade;
+drop table if exists public.profiles cascade;
+
 -- Impuls Supabase schema
 -- This schema adds multi-user persistence while keeping the app's current JSON-to-logic.py analysis flow intact.
--- If this fails with uuid/bigint foreign key errors, your Supabase project has old prototype tables.
--- Run supabase/reset_impuls_schema.sql instead if you are safe to delete existing Impuls rows.
 
 create extension if not exists pgcrypto;
 
@@ -28,10 +43,6 @@ create table if not exists public.profiles (
   constraint profiles_user_id_key unique (user_id)
 );
 
--- Existing projects can run these safely to add the Profile/onboarding fields:
-alter table if exists public.profiles add column if not exists onboarding_completed boolean not null default false;
-alter table if exists public.profiles add column if not exists tutorial_flags jsonb not null default '{}'::jsonb;
-alter table if exists public.profiles add column if not exists pbs jsonb not null default '{}'::jsonb;
 comment on column public.profiles.tutorial_flags is 'Dismissed contextual tutorial hints keyed by app area.';
 comment on column public.profiles.pbs is 'Flexible personal-best fields; jsonb keeps sport-specific PBs editable without changing training tables.';
 

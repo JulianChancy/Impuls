@@ -16,9 +16,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 try:
-    import logic as logic
+    import backend.logic as logic
 except ImportError:
-    import logic
+    import backend.logic as logic
 
 
 OUTPUT_DIR = "visual_outputs"

@@ -2880,7 +2880,8 @@ def app_build_trend_insight(metric_key, points):
     elif state == "stable":
         statement = f"{meta['label']} remained broadly stable across {count} observations."
     else:
-        statement = f"{meta['label']} showed a {state} trend across {count} observations."
+        article = "an" if state == "increasing" else "a"
+        statement = f"{meta['label']} showed {article} {state} trend across {count} observations."
     if state == "collecting":
         interpretation = f"{meta['label']} state cannot yet be interpreted because the stored series is too short."
     elif state == "stable":
@@ -2892,6 +2893,183 @@ def app_build_trend_insight(metric_key, points):
         interpretation = f"{meta['label']} is {state}; this is currently {'favourable' if favourable else 'unfavourable'} context for this metric state."
     limitation = "Needs at least two stored observations before a trend can be estimated." if count < 2 else ("Small sample; treat as exploratory. Trend reflects stored logs only." if count < 6 else "Trend reflects stored logs only.")
     return {"metricKey": metric_key, "label": meta["label"], "state": state, "status": app_confidence_label(count), "statement": statement, "evidenceStatement": statement, "interpretation": interpretation, "limitation": limitation, "stats": stats}
+
+
+PERFORMANCE_OUTPUT_METRICS = ["performance", "height_or_distance", "ft", "gct", "rsi", "sprint_time", "bar_velocity", "weight"]
+JUMP_PROFILE_METRICS = ["height_or_distance", "ft", "gct", "rsi"]
+SPRINT_PROFILE_METRICS = ["sprint_time"]
+LIFT_PROFILE_METRICS = ["weight", "bar_velocity"]
+
+
+def app_metric_observation_count(metric_series, key):
+    return len(metric_series.get(key) or [])
+
+
+def app_available_metrics(metric_series, keys, minimum=2):
+    return [key for key in keys if app_metric_observation_count(metric_series, key) >= minimum]
+
+
+def app_profile_evidence_items(metric_series, trend_insights, keys):
+    items = []
+    for key in keys:
+        insight = trend_insights.get(key) or {}
+        stats = insight.get("stats") or app_metric_stats(metric_series.get(key) or [])
+        items.append({
+            "key": key,
+            "label": app_format_metric_name(key),
+            "n": stats.get("count", 0),
+            "mean": stats.get("avg"),
+            "sd": stats.get("sd"),
+            "slope": stats.get("trend"),
+            "state": insight.get("state") or app_trend_state(stats.get("trend"), stats.get("count", 0)),
+            "status": insight.get("status") or app_confidence_label(stats.get("count", 0)),
+            "evidenceStatement": insight.get("evidenceStatement") or f"{app_format_metric_name(key)} trend is collecting.",
+            "interpretation": insight.get("interpretation") or f"{app_format_metric_name(key)} interpretation is collecting.",
+        })
+    return items
+
+
+def app_build_performance_profile(profile_id, label, keys, metric_series, trend_insights, collecting_copy, required_all=None, required_any=None):
+    evidence_items = app_profile_evidence_items(metric_series, trend_insights, keys)
+    available = [item for item in evidence_items if item.get("n", 0) >= 2]
+    total_observations = sum(item.get("n", 0) for item in evidence_items)
+    status = app_confidence_label(max([item.get("n", 0) for item in evidence_items] or [0]))
+    required_all = required_all or []
+    required_any = required_any or []
+    has_required_all = all(app_metric_observation_count(metric_series, key) >= 2 for key in required_all)
+    has_required_any = True if not required_any else any(app_metric_observation_count(metric_series, key) >= 2 for key in required_any)
+
+    if not available or not has_required_all or not has_required_any:
+        return {
+            "id": profile_id,
+            "label": label,
+            "metrics": keys,
+            "availableMetrics": [],
+            "status": "Collecting",
+            "evidenceItems": evidence_items,
+            "interpretation": collecting_copy,
+            "limitation": collecting_copy,
+        }
+
+    state_parts = [
+        f"{item['label']} {item['state']} across {item['n']} observations"
+        for item in available[:3]
+    ]
+    interpretation = f"{label} used {total_observations} stored metric observations. " + "; ".join(state_parts) + "."
+    limitation = "Small sample; treat profile interpretation as exploratory." if status != "More stable" else "Profile interpretation reflects stored logs only."
+
+    return {
+        "id": profile_id,
+        "label": label,
+        "metrics": keys,
+        "availableMetrics": [item["key"] for item in available],
+        "status": status,
+        "evidenceItems": evidence_items,
+        "interpretation": interpretation,
+        "limitation": limitation,
+    }
+
+
+def app_strongest_performance_metric(metric_series, trend_insights):
+    candidates = []
+    for key in PERFORMANCE_OUTPUT_METRICS:
+        insight = trend_insights.get(key) or {}
+        stats = insight.get("stats") or app_metric_stats(metric_series.get(key) or [])
+        trend = stats.get("trend")
+        count = stats.get("count", 0)
+        if count >= 2 and _finite(trend):
+            candidates.append((abs(trend), key, insight, stats))
+    if not candidates:
+        return None
+    _, key, insight, stats = sorted(candidates, key=lambda item: item[0], reverse=True)[0]
+    label = app_format_metric_name(key)
+    state = insight.get("state") or app_trend_state(stats.get("trend"), stats.get("count", 0))
+    return {
+        "key": key,
+        "label": label,
+        "state": state,
+        "n": stats.get("count", 0),
+        "slope": stats.get("trend"),
+        "status": insight.get("status") or app_confidence_label(stats.get("count", 0)),
+        "reason": insight.get("evidenceStatement") or f"{label} trend is collecting.",
+    }
+
+
+def app_build_performance_metric_analysis(metric_series, trend_insights):
+    metric_trends = {key: trend_insights.get(key) for key in PERFORMANCE_OUTPUT_METRICS if key in trend_insights}
+    jump_profile = app_build_performance_profile(
+        "jump",
+        "Jump profile",
+        JUMP_PROFILE_METRICS,
+        metric_series,
+        trend_insights,
+        "Jump profile needs height/distance plus FT/GCT or RSI before combined interpretation is available.",
+        required_all=["height_or_distance"],
+        required_any=["ft", "gct", "rsi"],
+    )
+    sprint_profile = app_build_performance_profile(
+        "sprint",
+        "Sprint profile",
+        SPRINT_PROFILE_METRICS,
+        metric_series,
+        trend_insights,
+        "Sprint/lift profile is collecting.",
+        required_all=["sprint_time"],
+    )
+    lift_profile = app_build_performance_profile(
+        "lift",
+        "Lift profile",
+        LIFT_PROFILE_METRICS,
+        metric_series,
+        trend_insights,
+        "Sprint/lift profile is collecting.",
+        required_all=["weight", "bar_velocity"],
+    )
+    strongest = app_strongest_performance_metric(metric_series, trend_insights)
+    available_output_metrics = app_available_metrics(metric_series, PERFORMANCE_OUTPUT_METRICS, 2)
+    observation_total = sum(app_metric_observation_count(metric_series, key) for key in PERFORMANCE_OUTPUT_METRICS)
+
+    if not available_output_metrics:
+        evidence_summary = "Performance metric analysis is collecting."
+        combined_interpretation = "Performance metric analysis needs at least two observations from performance score, jump, sprint, or lift metrics before output patterns can be interpreted."
+    else:
+        labels = ", ".join(app_format_metric_name(key) for key in available_output_metrics[:4])
+        remaining = len(available_output_metrics) - 4
+        suffix = f", plus {remaining} more" if remaining > 0 else ""
+        evidence_summary = f"Performance metric analysis used {observation_total} stored output metric observations across {len(available_output_metrics)} available metrics: {labels}{suffix}."
+        combined_interpretation = strongest["reason"] if strongest else "Performance metric analysis is collecting."
+        if strongest:
+            combined_interpretation += f" This makes {strongest['label'].lower()} the clearest current performance output signal in the stored logs."
+
+    return {
+        "evidenceSummary": evidence_summary,
+        "combinedInterpretation": combined_interpretation,
+        "jumpProfile": jump_profile,
+        "sprintProfile": sprint_profile,
+        "liftProfile": lift_profile,
+        "strongestPerformanceMetric": strongest,
+        "visualSuggestions": {
+            "jump": {
+                "type": "multi_line",
+                "metrics": JUMP_PROFILE_METRICS,
+                "availableMetrics": jump_profile.get("availableMetrics", []),
+                "emptyState": "Jump profile needs height/distance plus FT/GCT or RSI before combined interpretation is available.",
+            },
+            "sprint": {
+                "type": "time_series",
+                "metrics": SPRINT_PROFILE_METRICS,
+                "availableMetrics": sprint_profile.get("availableMetrics", []),
+                "emptyState": "Sprint/lift profile is collecting.",
+            },
+            "lift": {
+                "type": "multi_line",
+                "metrics": LIFT_PROFILE_METRICS,
+                "availableMetrics": lift_profile.get("availableMetrics", []),
+                "emptyState": "Sprint/lift profile is collecting.",
+            },
+        },
+        "metricTrends": metric_trends,
+    }
 
 
 def app_aligned_pairs(rows, x_key, y_key):
@@ -3579,6 +3757,7 @@ def analyze_app_data(data):
     metric_stats = {key: app_metric_stats(points) for key, points in metric_series.items()}
     trend_insights = {key: app_build_trend_insight(key, points) for key, points in metric_series.items()}
     change_insights = {key: app_build_change_insight(key, points) for key, points in metric_series.items()}
+    performance_metric_analysis = app_build_performance_metric_analysis(metric_series, trend_insights)
     relationships = []
     for rel_id, title, category, x_key, y_key, x_label, y_label, color in APP_RELATIONSHIP_SPECS:
         points = app_aligned_pairs(ordered, x_key, y_key)
@@ -3628,6 +3807,7 @@ def analyze_app_data(data):
         "metricStats": metric_stats,
         "trendInsights": trend_insights,
         "changeInsights": change_insights,
+        "performanceMetricAnalysis": performance_metric_analysis,
         "adaptationInsight": adaptation_insight,
         "likelyResponseInsight": likely_response_insight,
         "loadDetailInsights": {"movementMix": app_build_movement_mix_insight(sessions), "maxIntent": app_build_max_intent_insight(sessions)},

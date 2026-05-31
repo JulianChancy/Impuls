@@ -14,9 +14,9 @@ import json
 from pprint import pprint
 
 try:
-    import logic as logic
+    import backend.logic as logic
 except ImportError:
-    import logic
+    import backend.logic as logic
 
 
 # ----------------------------

@@ -1,38 +1,37 @@
-import os
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-try:
-    from .logic import analyze_app_data
-except ImportError:
-    from logic import analyze_app_data
+from backend.logic import analyze_app_data
 
 app = FastAPI(title="Impuls Analysis Backend")
 
-cors_origins = [
-    origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "*").split(",")
-    if origin.strip()
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=False,
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.get("/")
-def root():
-    return {"ok": True, "service": "Impuls Analysis Backend"}
-
-
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.head("/health")
+def health_head():
+    return Response(status_code=200)
+
+
+@app.get("/ping")
+def ping():
+    return {"ok": True}
+
+
+@app.head("/ping")
+def ping_head():
+    return Response(status_code=200)
 
 
 @app.post("/analyze")
