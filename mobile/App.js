@@ -2423,6 +2423,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
   const macro = currentMacro(programme);
   const [editingItem, setEditingItem] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
+  const [rangePickerOpen, setRangePickerOpen] = useState(false);
 
   function commitProgramme(updater) {
     setData((current) => {
@@ -2573,10 +2574,20 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
   function cancelEdit() {
     setEditingItem(null);
     setEditDraft(null);
+    setRangePickerOpen(false);
   }
 
   function saveEdit() {
     if (!editingItem || !editDraft) return;
+    if (!editDraft.startDate || !editDraft.endDate) {
+      Alert.alert('Date range required', 'Select both a start date and an end date.');
+      return;
+    }
+
+    if (!isDateRangeValid(editDraft.startDate, editDraft.endDate)) {
+      Alert.alert('Invalid date range', 'End date cannot be before start date.');
+      return;
+    }
     commitProgramme((draft) => {
       if (editingItem.type === 'macro') {
         const targetMacro = (draft.macro_blocks || []).find((item) => item.id === editingItem.id);
@@ -2598,14 +2609,50 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
 
   function renderEditPanel(type, title) {
     if (!editingItem || editingItem.type !== type || !editDraft) return null;
+
     return (
       <View style={styles.programmeFocusedPanel}>
         <Text style={styles.sectionTitle}>{title}</Text>
+
         <Input
           label={type === 'macro' ? 'Macro name' : 'Block name'}
           value={editDraft.name}
           onChangeText={(value) => setEditDraft((current) => ({ ...current, name: value }))}
         />
+
+        <View style={styles.rangeSelectorBox}>
+          <Text style={styles.inputLabel}>Date range</Text>
+          <Text style={styles.rangeSummaryText}>
+            {dateRangeSummary(editDraft.startDate, editDraft.endDate)}
+          </Text>
+
+          <Pressable
+            style={styles.dateRangeButton}
+            onPress={() => setRangePickerOpen((current) => !current)}
+          >
+            <Text style={styles.dateRangeButtonText}>
+              {rangePickerOpen ? 'Close calendar' : 'Select date range'}
+            </Text>
+          </Pressable>
+        </View>
+
+        {rangePickerOpen ? (
+          <DateRangePickerCard
+            title="Select range"
+            startDate={editDraft.startDate}
+            endDate={editDraft.endDate}
+            onSave={(startDate, endDate) => {
+              setEditDraft((current) => ({
+                ...current,
+                startDate,
+                endDate,
+              }));
+              setRangePickerOpen(false);
+            }}
+            onCancel={() => setRangePickerOpen(false)}
+          />
+        ) : null}
+
         <View style={styles.programmeActions}>
           <Pressable style={[styles.miniButton, styles.miniButtonDark]} onPress={saveEdit}>
             <Text style={[styles.miniButtonText, styles.miniButtonTextLight]}>Save</Text>
@@ -2631,7 +2678,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
         {(programme.macro_blocks || []).map((macroItem) => (
           <View key={macroItem.id} style={styles.programmeEditRow}>
             <View style={styles.programmeEditMain}>
-              <Text style={styles.label}>{programme.selected_macro_id === macroItem.id ? 'Selected Macro' : 'Macro'}</Text>
+              <Text style={styles.programmeLabel}>{programme.selected_macro_id === macroItem.id ? 'Selected Macro' : 'Macro'}</Text>
               <Text style={styles.cardTitle}>{macroItem.macro_block_name || 'Untitled macro cycle'}</Text>
               <Text style={styles.rangeSummaryText}>{dateRangeSummary(macroItem.start_date, macroItem.end_date)}</Text>
               <View style={styles.programmeActions}>
@@ -2659,7 +2706,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
         {(macro?.blocks || []).map((blockItem) => (
           <View key={blockItem.id} style={styles.programmeEditRow}>
             <View style={styles.programmeEditMain}>
-              <Text style={styles.label}>{programme.selected_block_id === blockItem.id ? 'Selected Block' : 'Block'}</Text>
+              <Text style={styles.programmeLabel}>{programme.selected_block_id === blockItem.id ? 'Selected Block' : 'Block'}</Text>
               <Text style={styles.cardTitle}>{blockItem.block_name || 'Untitled training block'}</Text>
               <Text style={styles.rangeSummaryText}>{dateRangeSummary(blockItem.start_date, blockItem.end_date, 'Week/phase range: ')}</Text>
               <View style={styles.programmeActions}>
@@ -4596,6 +4643,133 @@ function Input({ label, value, onChangeText, editable = true }) {
     </View>
   );
 }
+function DateRangePickerCard({ title, startDate, endDate, onSave, onCancel }) {
+  const [visibleMonth, setVisibleMonth] = useState(startDate || endDate || isoDate());
+  const [draftStart, setDraftStart] = useState(startDate || '');
+  const [draftEnd, setDraftEnd] = useState(endDate || '');
+
+  const days = monthCalendarDays(visibleMonth);
+
+  function dateTime(value) {
+    return new Date(`${value}T00:00:00`).getTime();
+  }
+
+  function isInSelectedRange(dayIso) {
+    if (!draftStart || !draftEnd) return false;
+    const time = dateTime(dayIso);
+    return time >= dateTime(draftStart) && time <= dateTime(draftEnd);
+  }
+
+  function selectDate(dayIso) {
+    if (!draftStart || (draftStart && draftEnd)) {
+      setDraftStart(dayIso);
+      setDraftEnd('');
+      return;
+    }
+
+    if (dateTime(dayIso) < dateTime(draftStart)) {
+      setDraftStart(dayIso);
+      setDraftEnd('');
+      return;
+    }
+
+    setDraftEnd(dayIso);
+  }
+
+  function saveRange() {
+    if (!draftStart || !draftEnd) {
+      Alert.alert('Date range required', 'Select a start date and an end date.');
+      return;
+    }
+
+    if (!isDateRangeValid(draftStart, draftEnd)) {
+      Alert.alert('Invalid date range', 'End date cannot be before start date.');
+      return;
+    }
+
+    onSave(draftStart, draftEnd);
+  }
+
+  return (
+    <View style={styles.dateRangePickerCard}>
+      <View style={styles.rowBetween}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        <Pressable style={styles.miniButton} onPress={() => {
+          setDraftStart('');
+          setDraftEnd('');
+        }}>
+          <Text style={styles.miniButtonText}>Clear</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.rangePreviewRow}>
+        <View style={styles.rangePreviewItem}>
+          <Text style={styles.inputLabel}>Start</Text>
+          <Text style={styles.rangePreviewValue}>{draftStart ? formatRangeDate(draftStart) : 'Select'}</Text>
+        </View>
+        <View style={styles.rangePreviewItem}>
+          <Text style={styles.inputLabel}>End</Text>
+          <Text style={styles.rangePreviewValue}>{draftEnd ? formatRangeDate(draftEnd) : 'Select'}</Text>
+        </View>
+      </View>
+
+      <View style={styles.miniCalendarHeader}>
+        <Pressable style={styles.miniCalendarArrow} onPress={() => setVisibleMonth((current) => addMonths(current, -1))}>
+          <Text style={styles.chevron}>‹</Text>
+        </Pressable>
+        <Text style={styles.miniCalendarTitle}>{monthLabel(visibleMonth)}</Text>
+        <Pressable style={styles.miniCalendarArrow} onPress={() => setVisibleMonth((current) => addMonths(current, 1))}>
+          <Text style={styles.chevron}>›</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.monthWeekHeader}>
+        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label) => (
+          <Text key={label} style={styles.monthWeekHeaderText}>{label}</Text>
+        ))}
+      </View>
+
+      <View style={styles.rangeCalendarGrid}>
+        {days.map((day) => {
+          const isStart = draftStart === day.iso;
+          const isEnd = draftEnd === day.iso;
+          const inRange = isInSelectedRange(day.iso);
+          const selected = isStart || isEnd;
+
+          return (
+            <Pressable
+              key={day.iso}
+              style={[
+                styles.rangeDayCell,
+                day.outsideMonth && styles.rangeDayOutside,
+                inRange && styles.rangeDayInRange,
+                selected && styles.rangeDaySelected,
+              ]}
+              onPress={() => selectDate(day.iso)}
+            >
+              <Text style={[
+                styles.rangeDayText,
+                day.outsideMonth && styles.rangeDayTextOutside,
+                selected && styles.rangeDayTextSelected,
+              ]}>
+                {day.day}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      <View style={styles.programmeActions}>
+        <Pressable style={styles.miniButton} onPress={onCancel}>
+          <Text style={styles.miniButtonText}>Cancel</Text>
+        </Pressable>
+        <Pressable style={[styles.miniButton, styles.miniButtonDark]} onPress={saveRange}>
+          <Text style={[styles.miniButtonText, styles.miniButtonTextLight]}>Use Range</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
 
 function SetMetricFields({ exercise, onChangeSetMetric }) {
   const rows = Array.from({ length: exerciseSetCount(exercise) }, (_, index) => setMetricDraft(exercise, index));
@@ -5068,6 +5242,41 @@ const styles = StyleSheet.create({
   calendarModeTabActive: { backgroundColor: '#111111' },
   calendarModeTabText: { color: '#242421', fontSize: 12, fontWeight: '900' },
   calendarModeTabTextActive: { color: '#FFFFFF' },
+  rangeSelectorBox: {backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 12, borderWidth: 1,gap: 8,padding: 12,},
+  dateRangeButton: {alignItems: 'center',backgroundColor: '#111111', borderRadius: 10, paddingVertical: 10,},
+  dateRangeButtonText: {color: '#FFFFFF', fontSize: 12,fontWeight: '900',},
+  dateRangePickerCard: {backgroundColor: '#FFFFFF', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 12,padding: 12,},
+  rangePreviewRow: {flexDirection: 'row', gap: 10,},
+  rangePreviewItem: {backgroundColor: '#F7F7F5',borderColor: '#E8E8E4',borderRadius: 10,borderWidth: 1,flex: 1,gap: 4,padding: 10,},
+  rangePreviewValue: {color: '#111111',fontSize: 14,fontWeight: '900',},
+  rangeCalendarGrid: {flexDirection: 'row',flexWrap: 'wrap',gap: 4,},
+  rangeDayCell: {alignItems: 'center',borderRadius: 8,height: 36,justifyContent: 'center',width: '13.15%',},
+  rangeDayOutside: {opacity: 0.35,},
+  rangeDayInRange: {backgroundColor: '#DFF3E3',},
+  rangeDaySelected: {backgroundColor: '#2FA044',},
+  rangeDayText: {color: '#111111',fontSize: 11, fontWeight: '900',},
+  rangeDayTextOutside: {color: '#777771',},
+  rangeDayTextSelected: {color: '#FFFFFF',},
+  programmeLabel: {
+  color: '#111111',
+  fontSize: 11,
+  fontWeight: '900',
+  letterSpacing: 0.4,
+  textTransform: 'uppercase',
+  },
+
+  rangeSummaryText: {
+    color: '#111111',
+    fontSize: 13,
+    fontWeight: '800',
+    marginTop: 4,
+  },
+
+  programmeEditMetaText: {
+    color: '#111111',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   weekGrid: { flexDirection: 'row', gap: 5 },
   dayCell: { flex: 1, minHeight: 50, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   activeDay: { backgroundColor: '#2FA044' },

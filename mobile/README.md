@@ -37,6 +37,27 @@ The backend is Render-ready from the project root:
 
 If you use Render Blueprint, `../render.yaml` contains the same settings.
 
+## Keep Render Backend Awake
+
+Render free services sleep when inactive. Use UptimeRobot/UptimeRoot to ping the lightweight health endpoint instead of the heavier analysis endpoint.
+
+Recommended monitor:
+
+- Monitor type: `HTTP(s)`
+- URL: `https://impuls-chl1.onrender.com/health`
+- Method: `GET`
+- Interval: `5 minutes`
+- Expected status: `200 OK`
+- Expected body: `{"ok":true}`
+
+Alternative URL:
+
+```text
+https://impuls-chl1.onrender.com/ping
+```
+
+Do not monitor `/analyze`; it is a POST endpoint and runs the full analytics path.
+
 After Render gives you a service URL, create `mobile/.env`:
 
 ```bash
