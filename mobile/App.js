@@ -196,7 +196,11 @@ function dateFromIso(dateValue) {
 
 function addMonths(dateValue, amount) {
   const date = dateFromIso(dateValue);
+  const originalDay = date.getDate();
+  date.setDate(1);
   date.setMonth(date.getMonth() + amount);
+  const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  date.setDate(Math.min(originalDay, lastDay));
   return isoDate(date);
 }
 
@@ -262,6 +266,10 @@ function isValidDateText(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const parsed = new Date(`${value}T00:00:00`);
   return !Number.isNaN(parsed.getTime()) && isoDate(parsed) === value;
+}
+
+function validateDateInput(value) {
+  return isValidDateText(String(value || '').trim());
 }
 
 function isDateRangeValid(startDate, endDate) {
@@ -2204,14 +2212,10 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
     selectCalendarDate(nextDate);
   }
 
-  function cycleCalendarMode() {
-    setCalendarMode((current) => (current === 'week' ? 'month' : current === 'month' ? 'year' : 'week'));
-  }
-
   function calendarHeading() {
     if (calendarMode === 'year') return yearLabel(selectedDate);
     if (calendarMode === 'month') return monthLabel(selectedDate);
-    return week?.week_name || dateRangeSummary(startOfWeekIso(selectedDate), addDays(startOfWeekIso(selectedDate), 6));
+    return dateRangeSummary(startOfWeekIso(selectedDate), addDays(startOfWeekIso(selectedDate), 6));
   }
 
   function hasSessionOnDate(date) {
@@ -2271,14 +2275,24 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
         <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveCalendar(-1)}><Text style={styles.chevron}>‹</Text></Pressable>
         <View style={styles.calendarHeadingWrap}>
           <Text style={styles.sectionTitle}>{calendarHeading()}</Text>
-          <Text style={styles.muted}>{calendarMode === 'week' ? 'Week view' : calendarMode === 'month' ? 'Month view' : 'Year view'}</Text>
         </View>
-        <View style={styles.calendarNavActions}>
-          <Pressable style={styles.calendarExpandButton} hitSlop={8} onPress={cycleCalendarMode}>
-            <Text style={styles.calendarExpandIcon}>▦</Text>
-          </Pressable>
-          <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveCalendar(1)}><Text style={styles.chevron}>›</Text></Pressable>
-        </View>
+        <Pressable style={styles.weekArrow} hitSlop={10} onPress={() => moveCalendar(1)}><Text style={styles.chevron}>›</Text></Pressable>
+      </View>
+      <View style={styles.calendarModeTabs}>
+        {['week', 'month', 'year'].map((mode) => {
+          const active = calendarMode === mode;
+          return (
+            <Pressable
+              key={mode}
+              style={[styles.calendarModeTab, active && styles.calendarModeTabActive]}
+              onPress={() => setCalendarMode(mode)}
+            >
+              <Text style={[styles.calendarModeTabText, active && styles.calendarModeTabTextActive]}>
+                {mode.charAt(0).toUpperCase() + mode.slice(1)}
+              </Text>
+            </Pressable>
+          );
+        })}
       </View>
       {calendarMode === 'year' ? (
         <View style={styles.yearGrid}>
@@ -4529,87 +4543,64 @@ function Input({ label, value, onChangeText, editable = true }) {
 }
 
 function DateField({ label, value, startDate, endDate, fieldKey, onCommit }) {
-  const [open, setOpen] = useState(false);
-  const [viewDate, setViewDate] = useState(value || startDate || endDate || isoDate());
+  const [draft, setDraft] = useState(value || '');
 
   useEffect(() => {
-    if (value) setViewDate(value);
+    setDraft(value || '');
   }, [value]);
 
-  function commitDate(nextDate) {
-    const nextStart = fieldKey === 'start_date' ? nextDate : startDate;
-    const nextEnd = fieldKey === 'end_date' ? nextDate : endDate;
+  function commitDate(nextDate, options = {}) {
+    const trimmed = String(nextDate || '').trim();
+    if (!validateDateInput(trimmed)) {
+      if (options.showAlert) Alert.alert('Invalid date', 'Use YYYY-MM-DD format.');
+      setDraft(value || '');
+      return false;
+    }
+    const nextStart = fieldKey === 'start_date' ? trimmed : startDate;
+    const nextEnd = fieldKey === 'end_date' ? trimmed : endDate;
     if (!isDateRangeValid(nextStart, nextEnd)) {
       Alert.alert('Invalid date range', 'End date cannot be before start date.');
+      setDraft(value || '');
+      return false;
+    }
+    onCommit(trimmed);
+    return true;
+  }
+
+  function handleChange(nextValue) {
+    const nextDraft = String(nextValue || '');
+    setDraft(nextDraft);
+    const trimmed = nextDraft.trim();
+    if (trimmed === '') {
+      onCommit('');
       return;
     }
-    onCommit(nextDate);
-    if (nextDate) setViewDate(nextDate);
-    setOpen(false);
+    if (trimmed.length === 10 && validateDateInput(trimmed)) {
+      commitDate(trimmed);
+    }
+  }
+
+  function handleEndEditing() {
+    const trimmed = String(draft || '').trim();
+    if (trimmed === '') {
+      onCommit('');
+      return;
+    }
+    if (trimmed !== value) commitDate(trimmed, { showAlert: true });
   }
 
   return (
-    <View style={styles.dateFieldWrap}>
+    <View style={styles.inputWrap}>
       <Text style={styles.inputLabel}>{label}</Text>
-      <Pressable style={styles.dateChipButton} onPress={() => setOpen((current) => !current)}>
-        <Text style={[styles.dateChipText, !value && styles.dateChipPlaceholder]}>
-          {value ? formatRangeDate(value) : 'Select date'}
-        </Text>
-        <Text style={styles.dateChipIcon}>⌄</Text>
-      </Pressable>
-      {open ? (
-        <MiniCalendarPicker
-          value={value || viewDate}
-          viewDate={viewDate}
-          onChangeViewDate={setViewDate}
-          onSelect={commitDate}
-          onClear={() => commitDate('')}
-        />
-      ) : null}
-    </View>
-  );
-}
-
-function MiniCalendarPicker({ value, viewDate, onChangeViewDate, onSelect, onClear }) {
-  const days = monthCalendarDays(viewDate);
-  return (
-    <View style={styles.miniCalendarPicker}>
-      <View style={styles.miniCalendarHeader}>
-        <Pressable style={styles.miniCalendarArrow} onPress={() => onChangeViewDate(addMonths(viewDate, -1))}>
-          <Text style={styles.chevron}>‹</Text>
-        </Pressable>
-        <Text style={styles.miniCalendarTitle}>{monthLabel(viewDate)}</Text>
-        <Pressable style={styles.miniCalendarArrow} onPress={() => onChangeViewDate(addMonths(viewDate, 1))}>
-          <Text style={styles.chevron}>›</Text>
-        </Pressable>
-      </View>
-      <View style={styles.monthWeekHeader}>
-        {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((label, index) => (
-          <Text key={`${label}-${index}`} style={styles.monthWeekHeaderText}>{label}</Text>
-        ))}
-      </View>
-      <View style={styles.miniCalendarGrid}>
-        {days.map((day) => {
-          const active = day.iso === value;
-          return (
-            <Pressable
-              key={day.iso}
-              style={[styles.miniCalendarDay, day.outsideMonth && styles.monthDayOutside, active && styles.activeDay]}
-              onPress={() => onSelect(day.iso)}
-            >
-              <Text style={[styles.dayText, day.outsideMonth && styles.monthDayOutsideText, active && styles.activeDayText]}>{day.day}</Text>
-            </Pressable>
-          );
-        })}
-      </View>
-      <View style={styles.miniCalendarFooter}>
-        <Pressable style={styles.miniCalendarFooterButton} onPress={() => onSelect(isoDate())}>
-          <Text style={styles.miniCalendarFooterText}>Today</Text>
-        </Pressable>
-        <Pressable style={styles.miniCalendarFooterButton} onPress={onClear}>
-          <Text style={styles.miniCalendarFooterText}>Clear</Text>
-        </Pressable>
-      </View>
+      <TextInput
+        style={styles.input}
+        value={draft}
+        placeholder="YYYY-MM-DD"
+        onChangeText={handleChange}
+        onEndEditing={handleEndEditing}
+        autoCapitalize="none"
+        keyboardType="numbers-and-punctuation"
+      />
     </View>
   );
 }
@@ -5080,9 +5071,11 @@ const styles = StyleSheet.create({
   weekNav: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 },
   weekArrow: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, height: 42, justifyContent: 'center', width: 48 },
   calendarHeadingWrap: { alignItems: 'center', flex: 1, gap: 2, paddingHorizontal: 8 },
-  calendarNavActions: { alignItems: 'center', flexDirection: 'row', gap: 8 },
-  calendarExpandButton: { alignItems: 'center', backgroundColor: '#F1F1ED', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, height: 36, justifyContent: 'center', width: 36 },
-  calendarExpandIcon: { color: '#111111', fontSize: 15, fontWeight: '900' },
+  calendarModeTabs: { backgroundColor: '#ECECE8', borderRadius: 12, flexDirection: 'row', gap: 4, padding: 4 },
+  calendarModeTab: { alignItems: 'center', borderRadius: 9, flex: 1, paddingVertical: 9 },
+  calendarModeTabActive: { backgroundColor: '#111111' },
+  calendarModeTabText: { color: '#555550', fontSize: 12, fontWeight: '900' },
+  calendarModeTabTextActive: { color: '#FFFFFF' },
   weekGrid: { flexDirection: 'row', gap: 5 },
   dayCell: { flex: 1, minHeight: 48, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   activeDay: { backgroundColor: '#2FA044' },
