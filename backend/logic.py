@@ -69,21 +69,26 @@ MOVEMENT_TYPE_FIELDS = {
 PERFORMANCE_TYPE_FIELDS = {
     PerformanceType.JUMPING: [
         "gct",
+        "gct_unit",
         "ft",
+        "ft_unit",
         "height_or_distance",
-        "unit",
+        "height_or_distance_unit",
     ],
     PerformanceType.RUNNING_SPRINTING: [
-        "time",
+        "sprint_time",
+        "sprint_time_unit",
         "distance",
-        "unit",
+        "distance_unit",
     ],
     PerformanceType.LIFT: [
         "lift_name",
         "weight",
+        "weight_unit",
         "sets",
         "reps",
         "bar_velocity",
+        "bar_velocity_unit",
     ],
 }
 
@@ -796,7 +801,9 @@ def calculate_check_in_rsi(check_in):
     if performance is None:
         return None
 
-    return calculate_rsi(performance.get("ft"), performance.get("gct"))
+    ft = _to_seconds(performance.get("ft"), performance.get("ft_unit"))
+    gct = _to_seconds(performance.get("gct"), performance.get("gct_unit"))
+    return calculate_rsi(ft, gct)
 
 
 def get_performance_metric(performance_entry, metric_name="performance_score"):
@@ -804,7 +811,30 @@ def get_performance_metric(performance_entry, metric_name="performance_score"):
         return None
 
     if metric_name == "rsi":
-        return calculate_rsi(performance_entry.get("ft"), performance_entry.get("gct"))
+        ft = _to_seconds(performance_entry.get("ft"), performance_entry.get("ft_unit"))
+        gct = _to_seconds(performance_entry.get("gct"), performance_entry.get("gct_unit"))
+        return calculate_rsi(ft, gct)
+
+    if metric_name == "height_or_distance":
+        return _to_cm(
+            performance_entry.get("height_or_distance"),
+            performance_entry.get("height_or_distance_unit") or performance_entry.get("unit"),
+        )
+
+    if metric_name == "sprint_time":
+        return _to_seconds(
+            performance_entry.get("sprint_time") if performance_entry.get("sprint_time") is not None else performance_entry.get("time"),
+            performance_entry.get("sprint_time_unit") or performance_entry.get("time_unit") or "seconds",
+        )
+
+    if metric_name == "distance":
+        return _to_metres(
+            performance_entry.get("distance"),
+            performance_entry.get("distance_unit") or performance_entry.get("unit"),
+        )
+
+    if metric_name == "weight":
+        return _to_kg(performance_entry.get("weight"), performance_entry.get("weight_unit"))
 
     return performance_entry.get(metric_name)
 
@@ -2018,12 +2048,30 @@ def get_performance_field_value(performance_entry, metric_name):
 
     if metric_name == "rsi":
         return calculate_rsi(
-            performance_entry.get("ft"),
-            performance_entry.get("gct")
+            _to_seconds(performance_entry.get("ft"), performance_entry.get("ft_unit")),
+            _to_seconds(performance_entry.get("gct"), performance_entry.get("gct_unit")),
         )
 
     if metric_name == "sprint_time":
-        return performance_entry.get("time")
+        return _to_seconds(
+            performance_entry.get("sprint_time") if performance_entry.get("sprint_time") is not None else performance_entry.get("time"),
+            performance_entry.get("sprint_time_unit") or performance_entry.get("time_unit") or "seconds",
+        )
+
+    if metric_name == "height_or_distance":
+        return _to_cm(
+            performance_entry.get("height_or_distance"),
+            performance_entry.get("height_or_distance_unit") or performance_entry.get("unit"),
+        )
+
+    if metric_name == "distance":
+        return _to_metres(
+            performance_entry.get("distance"),
+            performance_entry.get("distance_unit") or performance_entry.get("unit"),
+        )
+
+    if metric_name == "weight":
+        return _to_kg(performance_entry.get("weight"), performance_entry.get("weight_unit"))
 
     return performance_entry.get(metric_name)
 
@@ -2614,6 +2662,50 @@ def _pretty(value, digits=1):
     return f"{value:.{digits}f}" if _finite(value) else "-"
 
 
+def _unit(value):
+    return str(value or "").strip().lower()
+
+
+def _to_seconds(value, unit):
+    numeric = _num(value, None)
+    if not _finite(numeric):
+        return None
+    base_unit = _unit(unit) or "seconds"
+    if base_unit in ["milliseconds", "ms"]:
+        return numeric / 1000
+    return numeric
+
+
+def _to_cm(value, unit):
+    numeric = _num(value, None)
+    if not _finite(numeric):
+        return None
+    base_unit = _unit(unit) or "cm"
+    if base_unit in ["inches", "inch", "in"]:
+        return numeric * 2.54
+    return numeric
+
+
+def _to_metres(value, unit):
+    numeric = _num(value, None)
+    if not _finite(numeric):
+        return None
+    base_unit = _unit(unit) or "metres"
+    if base_unit in ["yards", "yard", "yd"]:
+        return numeric * 0.9144
+    return numeric
+
+
+def _to_kg(value, unit):
+    numeric = _num(value, None)
+    if not _finite(numeric):
+        return None
+    base_unit = _unit(unit) or "kg"
+    if base_unit in ["lbs", "lb"]:
+        return numeric * 0.45359237
+    return numeric
+
+
 def _parse_dt(value):
     if not value:
         return datetime.min
@@ -2648,12 +2740,13 @@ def app_get_intent_score(exercise):
 
 
 def app_get_intensity_score(exercise):
-    value = _num(exercise.get("intensity_value"), 1)
-    unit = exercise.get("intensity_unit")
+    value = _num(exercise.get("intensity_value"), None)
+    unit = exercise.get("intensity_unit") or "%"
     if unit == "%":
-        return value / 100
+        return (value / 100) if _finite(value) else 1
     if unit in ["kg", "lbs"]:
-        return value
+        converted = _to_kg(value if _finite(value) else 1, unit)
+        return converted if _finite(converted) else 1
     return 1
 
 
@@ -2692,8 +2785,8 @@ def app_readiness(check_in):
 
 
 def app_rsi(check_in):
-    gct = _num(check_in.get("gct"))
-    ft = _num(check_in.get("ft"))
+    gct = _to_seconds(check_in.get("gct"), check_in.get("gct_unit"))
+    ft = _to_seconds(check_in.get("ft"), check_in.get("ft_unit"))
     return ft / gct if gct > 0 else None
 
 
@@ -3730,12 +3823,19 @@ def analyze_app_data(data):
             "fatigue": app_fatigue(check_in),
             "readiness": app_readiness(check_in),
             "performance": _num(check_in.get("performance_score")),
-            "height_or_distance": _num(check_in.get("height_or_distance"), None),
-            "ft": _num(check_in.get("ft"), None),
-            "gct": _num(check_in.get("gct"), None),
-            "sprint_time": _num(check_in.get("sprint_time"), None),
+            "height_or_distance": _to_cm(
+                check_in.get("height_or_distance"),
+                check_in.get("height_or_distance_unit") or check_in.get("unit"),
+            ),
+            "ft": _to_seconds(check_in.get("ft"), check_in.get("ft_unit")),
+            "gct": _to_seconds(check_in.get("gct"), check_in.get("gct_unit")),
+            "sprint_time": _to_seconds(check_in.get("sprint_time"), check_in.get("sprint_time_unit")),
+            "distance": _to_metres(
+                check_in.get("distance"),
+                check_in.get("distance_unit") or check_in.get("unit"),
+            ),
             "bar_velocity": _num(check_in.get("bar_velocity"), None),
-            "weight": _num(check_in.get("weight"), None),
+            "weight": _to_kg(check_in.get("weight"), check_in.get("weight_unit")),
             "rsi": app_rsi(check_in),
         }
         rows.append(row)

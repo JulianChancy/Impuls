@@ -81,6 +81,28 @@ const performanceMetricOptions = [
   ['lift', 'Lift'],
 ];
 
+const gctFtUnitOptions = [
+  ['seconds', 'seconds'],
+  ['milliseconds', 'milliseconds'],
+];
+const jumpDistanceUnitOptions = [
+  ['cm', 'cm'],
+  ['inches', 'inches'],
+];
+const sprintDistanceUnitOptions = [
+  ['metres', 'metres'],
+  ['yards', 'yards'],
+];
+const weightUnitOptions = [
+  ['kg', 'kg'],
+  ['lbs', 'lbs'],
+];
+const intensityUnitOptions = [
+  ['%', '%'],
+  ['kg', 'kg'],
+  ['lbs', 'lbs'],
+];
+
 const insightSections = [
   { id: 'overview', title: 'Overview', color: '#111111' },
   { id: 'performance', title: 'Performance', color: '#24883B' },
@@ -486,7 +508,41 @@ function setMetricDraft(exercise, setIndex) {
   return {
     performance_score: saved.performance_score ?? legacy.performance_score ?? 0,
     metric_type: saved.metric_type || legacy.metric_type || 'jump_output',
-    metrics: saved.metrics || legacy.metrics || {},
+    metrics: metricDraftDefaults(
+      saved.metric_type || legacy.metric_type || 'jump_output',
+      saved.metrics || legacy.metrics || {}
+    ),
+  };
+}
+
+function metricDraftDefaults(metricType, metrics = {}) {
+  if (metricType === 'jump_output') {
+    return {
+      height_or_distance: metrics.height_or_distance || '',
+      height_or_distance_unit: metrics.height_or_distance_unit || metrics.unit || 'cm',
+    };
+  }
+  if (metricType === 'jump_rsi') {
+    return {
+      ft: metrics.ft || '',
+      ft_unit: metrics.ft_unit || 'seconds',
+      gct: metrics.gct || '',
+      gct_unit: metrics.gct_unit || 'seconds',
+    };
+  }
+  if (metricType === 'sprint') {
+    return {
+      sprint_time: metrics.sprint_time || metrics.time || '',
+      sprint_time_unit: metrics.sprint_time_unit || 'seconds',
+      distance: metrics.distance || '',
+      distance_unit: metrics.distance_unit || metrics.unit || 'metres',
+    };
+  }
+  return {
+    weight: metrics.weight || '',
+    weight_unit: metrics.weight_unit || 'kg',
+    bar_velocity: metrics.bar_velocity || '',
+    bar_velocity_unit: metrics.bar_velocity_unit || 'm/s',
   };
 }
 
@@ -497,7 +553,11 @@ function updateExerciseSetMetrics(exercise, setIndex, key, value) {
   if (key === 'performance_score') {
     rows[setIndex] = { ...current, performance_score: value };
   } else if (key === 'metric_type') {
-    rows[setIndex] = { ...current, metric_type: value, metrics: {} };
+    rows[setIndex] = {
+      ...current,
+      metric_type: value,
+      metrics: metricDraftDefaults(value, current.metrics || {}),
+    };
   } else {
     rows[setIndex] = { ...current, metrics: { ...(current.metrics || {}), [key]: value } };
   }
@@ -827,6 +887,7 @@ export default function App() {
   const [selectedDashboardMetric, setSelectedDashboardMetric] = useState('performance');
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(isoDate());
   const [selectedPlannedSessionId, setSelectedPlannedSessionId] = useState(null);
+  const [plannedSessionReturnScreen, setPlannedSessionReturnScreen] = useState('editBlockCalendar');
   const hasLoadedInitialDataRef = useRef(false);
   const lastProgrammeSaveSignatureRef = useRef(null);
   const latestProgrammeSignatureRef = useRef(null);
@@ -1184,6 +1245,13 @@ export default function App() {
       id: createId('checkin'),
       check_in_datetime: new Date().toISOString(),
       linked_session_id: data.activeSession.id,
+      gct_unit: data.checkInDraft.gct_unit || 'seconds',
+      ft_unit: data.checkInDraft.ft_unit || 'seconds',
+      height_or_distance_unit: data.checkInDraft.height_or_distance_unit || 'cm',
+      sprint_time_unit: data.checkInDraft.sprint_time_unit || 'seconds',
+      distance_unit: data.checkInDraft.distance_unit || 'metres',
+      weight_unit: data.checkInDraft.weight_unit || 'kg',
+      bar_velocity_unit: data.checkInDraft.bar_velocity_unit || 'm/s',
     };
     setLastSavedCheckInId(checkIn.id);
     setData((current) => ({ ...current, checkIns: [checkIn, ...current.checkIns] }));
@@ -1393,6 +1461,8 @@ export default function App() {
                 setData={setData}
                 selectedDate={selectedCalendarDate}
                 setSelectedDate={setSelectedCalendarDate}
+                setSelectedPlannedSessionId={setSelectedPlannedSessionId}
+                setPlannedSessionReturnScreen={setPlannedSessionReturnScreen}
                 setScreen={setScreen}
                 tutorialSeen={data.profile?.tutorialFlags?.programme_seen}
                 onDismissTutorial={() => dismissTutorial('programme_seen')}
@@ -1414,6 +1484,7 @@ export default function App() {
                 selectedDate={selectedCalendarDate}
                 setSelectedDate={setSelectedCalendarDate}
                 setSelectedPlannedSessionId={setSelectedPlannedSessionId}
+                setPlannedSessionReturnScreen={setPlannedSessionReturnScreen}
                 setScreen={setScreen}
               />
             )}
@@ -1422,6 +1493,7 @@ export default function App() {
                 data={data}
                 setData={setData}
                 sessionId={selectedPlannedSessionId}
+                returnScreen={plannedSessionReturnScreen}
                 setScreen={setScreen}
               />
             )}
@@ -1632,28 +1704,58 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSee
           onChange={(value) => updateDraft('performance_type', value)}
         />
         {draft.performance_type === 'jumping' && (
-          <View style={styles.twoCol}>
-            <Input label="GCT" value={draft.gct} onChangeText={(value) => updateDraft('gct', value)} />
-            <Input label="FT" value={draft.ft} onChangeText={(value) => updateDraft('ft', value)} />
-            <Input label="Height / Distance" value={draft.height_or_distance} onChangeText={(value) => updateDraft('height_or_distance', value)} />
-            <Input label="Unit" value={draft.unit} onChangeText={(value) => updateDraft('unit', value)} />
-          </View>
+          <>
+            <View style={styles.twoCol}>
+              <Input label="GCT" value={draft.gct} onChangeText={(value) => updateDraft('gct', value)} />
+              <View style={styles.inputWrap}>
+                <Text style={styles.inputLabel}>GCT unit</Text>
+                <ChipWrap options={gctFtUnitOptions} value={draft.gct_unit || 'seconds'} onChange={(value) => updateDraft('gct_unit', value)} />
+              </View>
+            </View>
+            <View style={styles.twoCol}>
+              <Input label="FT" value={draft.ft} onChangeText={(value) => updateDraft('ft', value)} />
+              <View style={styles.inputWrap}>
+                <Text style={styles.inputLabel}>FT unit</Text>
+                <ChipWrap options={gctFtUnitOptions} value={draft.ft_unit || 'seconds'} onChange={(value) => updateDraft('ft_unit', value)} />
+              </View>
+            </View>
+            <View style={styles.twoCol}>
+              <Input label="Height / Distance" value={draft.height_or_distance} onChangeText={(value) => updateDraft('height_or_distance', value)} />
+              <View style={styles.inputWrap}>
+                <Text style={styles.inputLabel}>Jump unit</Text>
+                <ChipWrap options={jumpDistanceUnitOptions} value={draft.height_or_distance_unit || 'cm'} onChange={(value) => updateDraft('height_or_distance_unit', value)} />
+              </View>
+            </View>
+          </>
         )}
         {draft.performance_type === 'running_sprinting' && (
-          <View style={styles.twoCol}>
-            <Input label="Time" value={draft.sprint_time} onChangeText={(value) => updateDraft('sprint_time', value)} />
-            <Input label="Distance" value={draft.distance} onChangeText={(value) => updateDraft('distance', value)} />
-            <Input label="Unit" value={draft.unit} onChangeText={(value) => updateDraft('unit', value)} />
-          </View>
+          <>
+            <Input label="Time (seconds)" value={draft.sprint_time} onChangeText={(value) => updateDraft('sprint_time', value)} />
+            <View style={styles.twoCol}>
+              <Input label="Distance" value={draft.distance} onChangeText={(value) => updateDraft('distance', value)} />
+              <View style={styles.inputWrap}>
+                <Text style={styles.inputLabel}>Distance unit</Text>
+                <ChipWrap options={sprintDistanceUnitOptions} value={draft.distance_unit || 'metres'} onChange={(value) => updateDraft('distance_unit', value)} />
+              </View>
+            </View>
+          </>
         )}
         {draft.performance_type === 'lift' && (
-          <View style={styles.twoCol}>
+          <>
             <Input label="Lift" value={draft.lift_name} onChangeText={(value) => updateDraft('lift_name', value)} />
-            <Input label="Weight" value={draft.weight} onChangeText={(value) => updateDraft('weight', value)} />
-            <Input label="Sets" value={draft.sets} onChangeText={(value) => updateDraft('sets', value)} />
-            <Input label="Reps" value={draft.reps} onChangeText={(value) => updateDraft('reps', value)} />
-            <Input label="Velocity" value={draft.bar_velocity} onChangeText={(value) => updateDraft('bar_velocity', value)} />
-          </View>
+            <View style={styles.twoCol}>
+              <Input label="Weight" value={draft.weight} onChangeText={(value) => updateDraft('weight', value)} />
+              <View style={styles.inputWrap}>
+                <Text style={styles.inputLabel}>Weight unit</Text>
+                <ChipWrap options={weightUnitOptions} value={draft.weight_unit || 'kg'} onChange={(value) => updateDraft('weight_unit', value)} />
+              </View>
+            </View>
+            <View style={styles.twoCol}>
+              <Input label="Sets" value={draft.sets} onChangeText={(value) => updateDraft('sets', value)} />
+              <Input label="Reps" value={draft.reps} onChangeText={(value) => updateDraft('reps', value)} />
+            </View>
+            <Input label="Bar Velocity (m/s)" value={draft.bar_velocity} onChangeText={(value) => updateDraft('bar_velocity', value)} />
+          </>
         )}
       </FormSection>
       <ActionButton title="Save Check-in" tone="black" onPress={saveCheckIn} />
@@ -2176,7 +2278,17 @@ function ReviewScreen({ analysis, setScreen }) {
   );
 }
 
-function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScreen, tutorialSeen, onDismissTutorial }) {
+function CalendarScreen({
+  data,
+  setData,
+  selectedDate,
+  setSelectedDate,
+  setSelectedPlannedSessionId,
+  setPlannedSessionReturnScreen,
+  setScreen,
+  tutorialSeen,
+  onDismissTutorial,
+}) {
   const programme = data.programme;
   const macro = currentMacro(programme);
   const block = currentBlock(programme);
@@ -2266,6 +2378,13 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
     commitProgramme((draft) => {
       draft.day_notes = { ...(draft.day_notes || {}), [selectedDate]: value };
     });
+  }
+
+  function openPlannedSessionFromCalendar(session) {
+    setSelectedDate(session.date || selectedDate);
+    setSelectedPlannedSessionId(session.id);
+    setPlannedSessionReturnScreen('calendar');
+    setScreen('editPlannedSession');
   }
 
   return (
@@ -2374,7 +2493,12 @@ function CalendarScreen({ data, setData, selectedDate, setSelectedDate, setScree
           selectedDaySessions.map((session) => {
             return (
               <View key={session.id} style={styles.todayTrainingCard}>
-                <Text style={styles.cardTitle}>{session.session_name}</Text>
+                <View style={styles.rowBetween}>
+                  <Text style={styles.cardTitle}>{session.session_name}</Text>
+                  <Pressable style={styles.smallPill} onPress={() => openPlannedSessionFromCalendar(session)}>
+                    <Text style={styles.smallPillText}>Edit Session</Text>
+                  </Pressable>
+                </View>
                 <Text style={styles.calendarMetaText}>{session.week_name ? `${session.week_name} / ` : ''}{session.focus} / {session.duration}</Text>
                 <Text style={styles.label}>Exercises</Text>
                 {(session.exercises || []).length === 0 ? (
@@ -2742,7 +2866,15 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
   );
 }
 
-function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate, setSelectedPlannedSessionId, setScreen }) {
+function EditBlockCalendarScreen({
+  data,
+  setData,
+  selectedDate,
+  setSelectedDate,
+  setSelectedPlannedSessionId,
+  setPlannedSessionReturnScreen,
+  setScreen,
+}) {
   const [newSession, setNewSession] = useState({ session_name: '', focus: '', duration: '', date: selectedDate || isoDate() });
   const [templateWeekday, setTemplateWeekday] = useState('1');
   const programme = data.programme;
@@ -2753,6 +2885,10 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   const sessionsForSelectedDate = sessions.filter((session) => session.date === selectedDate);
   const weekSessions = [...sessions].sort((a, b) => String(a.date).localeCompare(String(b.date)));
   const editDays = weekDayLabels(visibleWeekStart(week, selectedDate));
+
+  useEffect(() => {
+    setNewSession((current) => ({ ...current, date: selectedDate }));
+  }, [selectedDate]);
 
   function commitProgramme(updater) {
     setData((current) => {
@@ -2877,7 +3013,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   }
 
   function addPlannedSession() {
-    const dateValue = (newSession.date || selectedDate || '').trim();
+    const dateValue = (selectedDate || '').trim();
     if (!isValidDateText(dateValue)) {
       Alert.alert('Invalid date', 'Use a valid calendar date.');
       return;
@@ -2902,6 +3038,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
     setNewSession({ session_name: '', focus: '', duration: '', date: selectedDate });
     if (!createdId) return;
     setSelectedPlannedSessionId(createdId);
+    setPlannedSessionReturnScreen('editBlockCalendar');
     setScreen('editPlannedSession');
   }
 
@@ -2962,10 +3099,10 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   function pasteSession() {
     if (!programme.copied_session) return;
     commitProgramme((draft) => {
-      ensureProgrammeWeek(draft, newSession.date || selectedDate).sessions.push({
+      ensureProgrammeWeek(draft, selectedDate).sessions.push({
         ...draft.copied_session,
         id: createId('planned'),
-        date: newSession.date || selectedDate,
+        date: selectedDate,
         completed: false,
       });
     });
@@ -2998,6 +3135,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   function openPlannedSession(session) {
     setSelectedDate(session.date || selectedDate);
     setSelectedPlannedSessionId(session.id);
+    setPlannedSessionReturnScreen('editBlockCalendar');
     setScreen('editPlannedSession');
   }
 
@@ -3069,7 +3207,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
         <Text style={styles.sectionTitle}>Session Template</Text>
         <Input label="Session Name" value={newSession.session_name} onChangeText={(value) => setNewSession((current) => ({ ...current, session_name: value }))} />
         <View style={styles.twoCol}>
-          <Input label="Date" value={newSession.date || selectedDate} onChangeText={(value) => setNewSession((current) => ({ ...current, date: value }))} />
+          <Input label="Date" value={selectedDate} onChangeText={() => {}} editable={false} />
           <Input label="Duration" value={newSession.duration} onChangeText={(value) => setNewSession((current) => ({ ...current, duration: value }))} />
         </View>
         <View style={styles.twoCol}>
@@ -3107,7 +3245,7 @@ function EditBlockCalendarScreen({ data, setData, selectedDate, setSelectedDate,
   );
 }
 
-function EditPlannedSessionScreen({ data, setData, sessionId, setScreen }) {
+function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'editBlockCalendar', setScreen }) {
   const [draftExercise, setDraftExercise] = useState(emptyExercise);
   const [expandedExerciseMetricId, setExpandedExerciseMetricId] = useState(null);
   const found = findPlannedSession(data.programme, sessionId);
@@ -3184,7 +3322,7 @@ function EditPlannedSessionScreen({ data, setData, sessionId, setScreen }) {
   if (!session) {
     return (
       <View style={styles.screen}>
-        <Header title="Edit Session" onBack={() => setScreen('editBlockCalendar')} />
+        <Header title="Edit Session" onBack={() => setScreen(returnScreen)} />
         <Text style={styles.bodyText}>Session not found.</Text>
       </View>
     );
@@ -3194,10 +3332,10 @@ function EditPlannedSessionScreen({ data, setData, sessionId, setScreen }) {
 
   return (
     <View style={styles.screen}>
-      <Header title="Edit Training Session" onBack={() => setScreen('editBlockCalendar')} right="check" onRight={loadIntoTraining} />
+      <Header title="Edit Training Session" onBack={() => setScreen(returnScreen)} right="check" onRight={loadIntoTraining} />
       <Input label="Session Name" value={session.session_name} onChangeText={(value) => updateSessionField('session_name', value)} />
       <View style={styles.twoCol}>
-        <Input label="Date" value={session.date} onChangeText={(value) => updateSessionField('date', value)} />
+        <Input label="Date" value={session.date} onChangeText={() => {}} editable={false} />
         <Input label="Duration" value={session.duration} onChangeText={(value) => updateSessionField('duration', value)} />
       </View>
       <Input label="Focus" value={session.focus} onChangeText={(value) => updateSessionField('focus', value)} />
@@ -3210,7 +3348,13 @@ function EditPlannedSessionScreen({ data, setData, sessionId, setScreen }) {
             <View style={styles.orderBadge}><Text style={styles.orderBadgeText}>{exercise.order || index + 1}</Text></View>
             <View style={styles.exerciseEdit}>
               <Input label="Exercise" value={exercise.exercise_name} onChangeText={(value) => updateExercise(exercise.id, 'exercise_name', value)} />
-              <Text style={styles.muted}>{exercise.movement_type.replace('_', ' ')} / {exercisePrescription(exercise)}</Text>
+              <ChipWrap
+                options={movementOptions}
+                value={exercise.movement_type}
+                onChange={(value) => updateExercise(exercise.id, 'movement_type', value)}
+              />
+              <ExerciseFields draft={exercise} update={(key, value) => updateExercise(exercise.id, key, value)} />
+              <Text style={styles.muted}>{exercisePrescription(exercise)}</Text>
               <MetricToggle
                 expanded={expandedExerciseMetricId === exercise.id}
                 onPress={() => setExpandedExerciseMetricId(expandedExerciseMetricId === exercise.id ? null : exercise.id)}
@@ -3249,7 +3393,6 @@ function EditPlannedSessionScreen({ data, setData, sessionId, setScreen }) {
           placeholder="Notes for this planned session"
         />
       </View>
-      <ActionButton title="Use This Session Today" tone="black" onPress={loadIntoTraining} />
     </View>
   );
 }
@@ -4730,18 +4873,29 @@ function ExerciseFields({ draft, update }) {
           <Input label="Intensity" value={String(draft.intensity_value)} onChangeText={(value) => update('intensity_value', value)} />
           <Input label="Intent" value={String(draft.intent_percent)} onChangeText={(value) => update('intent_percent', value)} />
         </View>
+        <View style={styles.inputWrap}>
+          <Text style={styles.inputLabel}>Intensity unit</Text>
+          <ChipWrap options={intensityUnitOptions} value={draft.intensity_unit || '%'} onChange={(value) => update('intensity_unit', value)} />
+        </View>
       </>
     );
   }
   if (draft.movement_type === 'strength') {
     return (
-      <View style={styles.twoCol}>
-        <Input label="Sets" value={String(draft.sets || '')} onChangeText={(value) => update('sets', value)} />
-        <Input label="Reps" value={String(draft.reps)} onChangeText={(value) => update('reps', value)} />
-        <Input label="Intensity" value={String(draft.intensity_value)} onChangeText={(value) => update('intensity_value', value)} />
-        <Input label="Unit" value={String(draft.intensity_unit)} onChangeText={(value) => update('intensity_unit', value)} />
-        <Input label="ROM" value={String(draft.rom)} onChangeText={(value) => update('rom', value)} />
-      </View>
+      <>
+        <View style={styles.twoCol}>
+          <Input label="Sets" value={String(draft.sets || '')} onChangeText={(value) => update('sets', value)} />
+          <Input label="Reps" value={String(draft.reps)} onChangeText={(value) => update('reps', value)} />
+        </View>
+        <View style={styles.twoCol}>
+          <Input label="Intensity" value={String(draft.intensity_value)} onChangeText={(value) => update('intensity_value', value)} />
+          <Input label="ROM" value={String(draft.rom)} onChangeText={(value) => update('rom', value)} />
+        </View>
+        <View style={styles.inputWrap}>
+          <Text style={styles.inputLabel}>Intensity unit</Text>
+          <ChipWrap options={intensityUnitOptions} value={draft.intensity_unit || '%'} onChange={(value) => update('intensity_unit', value)} />
+        </View>
+      </>
     );
   }
   return (
@@ -4943,33 +5097,80 @@ function SetMetricFields({ exercise, onChangeSetMetric }) {
 function MetricInputs({ metricType, metrics, onChangeMetric }) {
   if (metricType === 'jump_output') {
     return (
-      <View style={styles.twoCol}>
+      <>
         <Input label="Height / Distance" value={metrics.height_or_distance || ''} onChangeText={(value) => onChangeMetric('height_or_distance', value)} />
-        <Input label="Unit" value={metrics.unit || ''} onChangeText={(value) => onChangeMetric('unit', value)} />
-      </View>
+        <View style={styles.inputWrap}>
+          <Text style={styles.inputLabel}>Unit</Text>
+          <ChipWrap
+            options={jumpDistanceUnitOptions}
+            value={metrics.height_or_distance_unit || metrics.unit || 'cm'}
+            onChange={(value) => onChangeMetric('height_or_distance_unit', value)}
+          />
+        </View>
+      </>
     );
   }
   if (metricType === 'jump_rsi') {
     return (
-      <View style={styles.twoCol}>
-        <Input label="FT" value={metrics.ft || ''} onChangeText={(value) => onChangeMetric('ft', value)} />
-        <Input label="GCT" value={metrics.gct || ''} onChangeText={(value) => onChangeMetric('gct', value)} />
-      </View>
+      <>
+        <View style={styles.twoCol}>
+          <Input label="FT" value={metrics.ft || ''} onChangeText={(value) => onChangeMetric('ft', value)} />
+          <View style={styles.inputWrap}>
+            <Text style={styles.inputLabel}>FT unit</Text>
+            <ChipWrap
+              options={gctFtUnitOptions}
+              value={metrics.ft_unit || 'seconds'}
+              onChange={(value) => onChangeMetric('ft_unit', value)}
+            />
+          </View>
+        </View>
+        <View style={styles.twoCol}>
+          <Input label="GCT" value={metrics.gct || ''} onChangeText={(value) => onChangeMetric('gct', value)} />
+          <View style={styles.inputWrap}>
+            <Text style={styles.inputLabel}>GCT unit</Text>
+            <ChipWrap
+              options={gctFtUnitOptions}
+              value={metrics.gct_unit || 'seconds'}
+              onChange={(value) => onChangeMetric('gct_unit', value)}
+            />
+          </View>
+        </View>
+      </>
     );
   }
   if (metricType === 'sprint') {
     return (
-      <View style={styles.twoCol}>
-        <Input label="Time" value={metrics.time || ''} onChangeText={(value) => onChangeMetric('time', value)} />
-        <Input label="Distance" value={metrics.distance || ''} onChangeText={(value) => onChangeMetric('distance', value)} />
-      </View>
+      <>
+        <Input label="Time (seconds)" value={metrics.sprint_time || metrics.time || ''} onChangeText={(value) => onChangeMetric('sprint_time', value)} />
+        <View style={styles.twoCol}>
+          <Input label="Distance" value={metrics.distance || ''} onChangeText={(value) => onChangeMetric('distance', value)} />
+          <View style={styles.inputWrap}>
+            <Text style={styles.inputLabel}>Distance unit</Text>
+            <ChipWrap
+              options={sprintDistanceUnitOptions}
+              value={metrics.distance_unit || 'metres'}
+              onChange={(value) => onChangeMetric('distance_unit', value)}
+            />
+          </View>
+        </View>
+      </>
     );
   }
   return (
-    <View style={styles.twoCol}>
-      <Input label="Weight" value={metrics.weight || ''} onChangeText={(value) => onChangeMetric('weight', value)} />
-      <Input label="Bar Velocity" value={metrics.bar_velocity || ''} onChangeText={(value) => onChangeMetric('bar_velocity', value)} />
-    </View>
+    <>
+      <View style={styles.twoCol}>
+        <Input label="Weight" value={metrics.weight || ''} onChangeText={(value) => onChangeMetric('weight', value)} />
+        <View style={styles.inputWrap}>
+          <Text style={styles.inputLabel}>Weight unit</Text>
+          <ChipWrap
+            options={weightUnitOptions}
+            value={metrics.weight_unit || 'kg'}
+            onChange={(value) => onChangeMetric('weight_unit', value)}
+          />
+        </View>
+      </View>
+      <Input label="Bar Velocity (m/s)" value={metrics.bar_velocity || ''} onChangeText={(value) => onChangeMetric('bar_velocity', value)} />
+    </>
   );
 }
 

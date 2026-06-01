@@ -116,7 +116,7 @@ create table if not exists public.planned_exercises (
   contacts numeric,
   duration_minutes numeric,
   intensity_value numeric,
-  intensity_unit text,
+  intensity_unit text default '%',
   intent_percent numeric,
   rom text,
   -- set_metrics stays jsonb because each exercise can store flexible set-level metrics that vary by movement type.
@@ -152,7 +152,7 @@ create table if not exists public.session_exercises (
   contacts numeric,
   duration_minutes numeric,
   intensity_value numeric,
-  intensity_unit text,
+  intensity_unit text default '%',
   intent_percent numeric,
   rom text,
   -- set_metrics stays jsonb because performance metrics are set-specific and app-specific.
@@ -176,19 +176,51 @@ create table if not exists public.check_ins (
   performance_score numeric,
   performance_type text,
   gct numeric,
+  gct_unit text default 'seconds',
   ft numeric,
+  ft_unit text default 'seconds',
   height_or_distance numeric,
+  height_or_distance_unit text default 'cm',
   unit text,
   sprint_time numeric,
+  sprint_time_unit text default 'seconds',
   distance numeric,
+  distance_unit text default 'metres',
   lift_name text,
   weight numeric,
+  weight_unit text default 'kg',
   sets numeric,
   reps numeric,
   bar_velocity numeric,
+  bar_velocity_unit text default 'm/s',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Existing projects can run these safely to add expanded check-in unit fields:
+alter table if exists public.check_ins add column if not exists gct_unit text;
+alter table if exists public.check_ins add column if not exists ft_unit text;
+alter table if exists public.check_ins add column if not exists height_or_distance_unit text;
+alter table if exists public.check_ins add column if not exists sprint_time_unit text;
+alter table if exists public.check_ins add column if not exists distance_unit text;
+alter table if exists public.check_ins add column if not exists weight_unit text;
+alter table if exists public.check_ins add column if not exists bar_velocity_unit text;
+alter table if exists public.check_ins alter column gct_unit set default 'seconds';
+alter table if exists public.check_ins alter column ft_unit set default 'seconds';
+alter table if exists public.check_ins alter column height_or_distance_unit set default 'cm';
+alter table if exists public.check_ins alter column sprint_time_unit set default 'seconds';
+alter table if exists public.check_ins alter column distance_unit set default 'metres';
+alter table if exists public.check_ins alter column weight_unit set default 'kg';
+alter table if exists public.check_ins alter column bar_velocity_unit set default 'm/s';
+comment on column public.check_ins.gct_unit is 'Unit chosen by user for GCT (seconds or milliseconds).';
+comment on column public.check_ins.ft_unit is 'Unit chosen by user for FT (seconds or milliseconds).';
+comment on column public.check_ins.height_or_distance_unit is 'Unit chosen by user for jump output (cm or inches).';
+comment on column public.check_ins.sprint_time_unit is 'Unit chosen by user for sprint time (seconds).';
+comment on column public.check_ins.distance_unit is 'Unit chosen by user for sprint distance (metres or yards).';
+comment on column public.check_ins.weight_unit is 'Unit chosen by user for lift weight (kg or lbs).';
+comment on column public.check_ins.bar_velocity_unit is 'Unit chosen by user for bar velocity (m/s).';
+alter table if exists public.planned_exercises alter column intensity_unit set default '%';
+alter table if exists public.session_exercises alter column intensity_unit set default '%';
 
 create table if not exists public.check_in_insight_history (
   id uuid primary key default gen_random_uuid(),
