@@ -13,7 +13,7 @@ export const emptyExercise = {
   intensity_value: '',
   intensity_unit: '%',
   intent_percent: '',
-  rom: '',
+  rom: 'full',
 };
 
 export const defaultData = {

@@ -102,6 +102,11 @@ const intensityUnitOptions = [
   ['kg', 'kg'],
   ['lbs', 'lbs'],
 ];
+const romOptions = [
+  ['full', 'Full'],
+  ['half', 'Half'],
+  ['partial', 'Partial'],
+];
 
 const insightSections = [
   { id: 'overview', title: 'Overview', color: '#111111' },
@@ -4889,11 +4894,14 @@ function ExerciseFields({ draft, update }) {
         </View>
         <View style={styles.twoCol}>
           <Input label="Intensity" value={String(draft.intensity_value)} onChangeText={(value) => update('intensity_value', value)} />
-          <Input label="ROM" value={String(draft.rom)} onChangeText={(value) => update('rom', value)} />
         </View>
         <View style={styles.inputWrap}>
           <Text style={styles.inputLabel}>Intensity unit</Text>
           <ChipWrap options={intensityUnitOptions} value={draft.intensity_unit || '%'} onChange={(value) => update('intensity_unit', value)} />
+        </View>
+        <View style={styles.inputWrap}>
+          <Text style={styles.inputLabel}>ROM</Text>
+          <ChipWrap options={romOptions} value={draft.rom || 'full'} onChange={(value) => update('rom', value)} />
         </View>
       </>
     );

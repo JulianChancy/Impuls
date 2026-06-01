@@ -64,10 +64,11 @@ function exerciseRow(userId, parentKey, parentId, exercise, position = 0) {
 }
 
 function exerciseFromRow(row) {
+  const movementType = row.movement_type || 'skill';
   return {
     id: row.id,
     exercise_name: row.exercise_name || '',
-    movement_type: row.movement_type || 'skill',
+    movement_type: movementType,
     sets: row.sets ?? '',
     reps: row.reps ?? '',
     contacts: row.contacts ?? '',
@@ -75,7 +76,7 @@ function exerciseFromRow(row) {
     intensity_value: row.intensity_value ?? '',
     intensity_unit: row.intensity_unit || '%',
     intent_percent: row.intent_percent ?? '',
-    rom: row.rom || '',
+    rom: row.rom || (movementType === 'strength' ? 'full' : ''),
     set_metrics: row.set_metrics || [],
     order: row.position ?? 0,
   };
