@@ -658,6 +658,225 @@ def calculate_rsi(ft, gct):
     return ft / gct
 
 
+def _number_or_none(value):
+    try:
+        if value in ["", None]:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _actual_metric_value(attempt, metric_name):
+    metrics = attempt.get("metrics", {}) or {}
+
+    if metric_name == "rsi":
+        return calculate_rsi(
+            _number_or_none(metrics.get("ft")),
+            _number_or_none(metrics.get("gct")),
+        )
+
+    return _number_or_none(metrics.get(metric_name))
+
+
+def _best_mode(metric_name):
+    return "min" if metric_name in ["gct", "sprint_time"] else "max"
+
+
+def _choose_best(metric_name, values):
+    values = extract_non_null(values)
+    if not values:
+        return None
+    return min(values) if _best_mode(metric_name) == "min" else max(values)
+
+
+def _metric_summary(attempts, metric_name):
+    rows = [
+        {
+            "attempt": attempt,
+            "value": _actual_metric_value(attempt, metric_name),
+        }
+        for attempt in attempts
+    ]
+    values = [row["value"] for row in rows if row["value"] is not None]
+
+    if not values:
+        return None
+
+    average = statistics.mean(values)
+    best = _choose_best(metric_name, values)
+    sd = statistics.stdev(values) if len(values) >= 2 else None
+    best_attempt = next(
+        (row["attempt"] for row in rows if row["value"] == best),
+        None,
+    )
+
+    return {
+        "average": average,
+        "peak": best,
+        "best": best,
+        "sd": sd,
+        "consistency": None if sd is None else max(0, 100 - (sd / max(abs(average), 1)) * 100),
+        "n": len(values),
+        "best_attempt": best_attempt,
+    }
+
+
+def _session_date(session):
+    value = session.get("session_datetime") or session.get("date")
+    if value is None:
+        return None
+    parsed = parse_datetime(value if "T" in str(value) else f"{value}T00:00:00")
+    return parsed.date()
+
+
+def _sessions_in_days(sessions, target_session, days):
+    target_date = _session_date(target_session)
+    if target_date is None:
+        return []
+
+    rows = []
+    for session in sessions:
+        candidate_date = _session_date(session)
+        if candidate_date is None:
+            continue
+        if abs((candidate_date - target_date).days) <= days:
+            rows.append(session)
+    return rows
+
+
+def _nearest_check_in(check_ins, session):
+    session_date = _session_date(session)
+    if session_date is None or not check_ins:
+        return None
+
+    same_day = [
+        check_in for check_in in check_ins
+        if date_key(check_in.get("check_in_datetime")) == session_date.isoformat()
+    ]
+    if same_day:
+        return sort_by_datetime(same_day, "check_in_datetime")[-1]
+
+    return sort_by_datetime(check_ins, "check_in_datetime")[-1]
+
+
+def sessionPerformanceAnalysis(session, sessions=None, check_ins=None):
+    sessions = sessions or [session]
+    check_ins = check_ins or []
+    metric_names = [
+        "rsi",
+        "ft",
+        "gct",
+        "height_or_distance",
+        "sprint_time",
+        "distance",
+        "weight",
+        "bar_velocity",
+    ]
+
+    exercise_summaries = []
+    all_attempts = []
+
+    for exercise in session.get("exercises", []):
+        attempts = exercise.get("actual_metrics", []) or []
+        all_attempts.extend([
+            {
+                **attempt,
+                "exercise_id": exercise.get("exercise_id") or exercise.get("id"),
+                "exercise_name": exercise.get("exercise_name"),
+            }
+            for attempt in attempts
+        ])
+        metrics = {
+            metric_name: summary
+            for metric_name in metric_names
+            for summary in [_metric_summary(attempts, metric_name)]
+            if summary is not None
+        }
+        best_metric = None
+        for metric_name, summary in metrics.items():
+            if best_metric is None:
+                best_metric = {"metric": metric_name, **summary}
+                continue
+            current = summary["peak"]
+            previous = best_metric["peak"]
+            if _best_mode(metric_name) == "min":
+                if current < previous:
+                    best_metric = {"metric": metric_name, **summary}
+            elif current > previous:
+                best_metric = {"metric": metric_name, **summary}
+
+        exercise_summaries.append({
+            "exercise_id": exercise.get("exercise_id") or exercise.get("id"),
+            "exercise_name": exercise.get("exercise_name"),
+            "movement_type": exercise.get("movement_type"),
+            "metrics": metrics,
+            "best_attempt": best_metric.get("best_attempt") if best_metric else None,
+            "best_metric": best_metric,
+        })
+
+    session_metrics = {
+        metric_name: summary
+        for metric_name in metric_names
+        for summary in [_metric_summary(all_attempts, metric_name)]
+        if summary is not None
+    }
+
+    check_in = _nearest_check_in(check_ins, session)
+    previous_check_ins = [
+        item for item in sort_by_datetime(check_ins, "check_in_datetime")
+        if check_in is not None and parse_datetime(item["check_in_datetime"]) < parse_datetime(check_in["check_in_datetime"])
+    ]
+    previous_check_in = previous_check_ins[-1] if previous_check_ins else None
+    pain = get_check_in_pain(check_in) if check_in else None
+    previous_pain = get_check_in_pain(previous_check_in) if previous_check_in else None
+
+    session_load = calculate_session_load(session)
+    weekly_load = sum(calculate_session_load(item) for item in _sessions_in_days(sessions, session, 7))
+    monthly_load = sum(calculate_session_load(item) for item in _sessions_in_days(sessions, session, 30))
+    freshness = get_check_in_freshness(check_in) if check_in else None
+    soreness = get_check_in_soreness(check_in) if check_in else None
+
+    historical_sessions = [
+        item for item in sessions
+        if item is not session and any(exercise.get("actual_metrics") for exercise in item.get("exercises", []))
+    ]
+    historical_comparison = {}
+    for metric_name in ["rsi", "gct", "ft"]:
+        historical_attempts = [
+            attempt
+            for historical_session in historical_sessions
+            for exercise in historical_session.get("exercises", [])
+            for attempt in exercise.get("actual_metrics", [])
+        ]
+        historical_summary = _metric_summary(historical_attempts, metric_name)
+        historical_comparison[metric_name] = {
+            "today": session_metrics.get(metric_name, {}).get("peak"),
+            "historical_best": historical_summary.get("peak") if historical_summary else None,
+        }
+
+    best_session_metric = next(iter(session_metrics.values()), None)
+
+    return {
+        "exercise_summaries": exercise_summaries,
+        "session_metrics": session_metrics,
+        "best_exercise": next((item for item in exercise_summaries if item.get("best_metric")), None),
+        "best_attempt": best_session_metric.get("best_attempt") if best_session_metric else None,
+        "comparisons": {
+            "session_load": session_load,
+            "weekly_load": weekly_load,
+            "monthly_load": monthly_load,
+            "freshness": freshness,
+            "soreness": soreness,
+            "fatigue": calculate_fatigue(freshness, soreness),
+            "readiness": calculate_readiness(freshness, soreness, pain),
+            "pain": pain,
+            "irritation_delta": calculate_irritation_delta(pain, previous_pain),
+        },
+        "historical_comparison": historical_comparison,
+    }
+
+
 def calculate_slope(values):
     values = extract_non_null(values)
 
@@ -946,6 +1165,65 @@ def calculate_session_metric_series(sessions, metric_name):
     return extract_non_null(values)
 
 
+def get_session_actual_metric(session, metric_name="rsi"):
+    attempts = [
+        attempt
+        for exercise in session.get("exercises", [])
+        for attempt in exercise.get("actual_metrics", [])
+    ]
+    summary = _metric_summary(attempts, metric_name)
+    return summary.get("peak") if summary else None
+
+
+def calculate_actual_performance_series(sessions, metric_name="rsi"):
+    return [
+        value for value in [
+            get_session_actual_metric(session, metric_name)
+            for session in sort_by_datetime(sessions, "session_datetime")
+        ]
+        if value is not None
+    ]
+
+
+def calculate_performance_source_series(calendar, metric_name="performance_score"):
+    sessions = get_all_sessions(calendar)
+    actual_metric_name = "rsi" if metric_name == "performance_score" else metric_name
+    actual_values = calculate_actual_performance_series(sessions, actual_metric_name)
+    if actual_values:
+        return actual_values
+    return get_check_in_series(calendar.get("check_ins", []), metric_name)
+
+
+def derive_pbs_from_actual_metrics(calendar):
+    sessions = get_all_sessions(calendar)
+    metric_map = {
+        "max_height_or_distance": ("height_or_distance", "max"),
+        "max_ft": ("ft", "max"),
+        "min_gct": ("gct", "min"),
+        "max_rsi": ("rsi", "max"),
+        "min_sprint_time": ("sprint_time", "min"),
+        "max_bar_velocity": ("bar_velocity", "max"),
+        "max_weight": ("weight", "max"),
+    }
+    attempts = [
+        attempt
+        for session in sessions
+        for exercise in session.get("exercises", [])
+        for attempt in exercise.get("actual_metrics", [])
+    ]
+
+    pbs = {}
+    for pb_key, (metric_name, mode) in metric_map.items():
+        values = [
+            _actual_metric_value(attempt, metric_name)
+            for attempt in attempts
+        ]
+        values = extract_non_null(values)
+        pbs[pb_key] = min(values) if mode == "min" and values else max(values) if values else None
+
+    return pbs
+
+
 def calculate_movement_type_frequency(sessions):
     frequency = {}
 
@@ -1090,7 +1368,7 @@ def calculate_macro_trends(calendar, performance_metric="performance_score"):
     check_ins = calendar.get("check_ins", [])
 
     session_loads = calculate_session_load_series(sessions)
-    performance_values = get_check_in_series(check_ins, performance_metric)
+    performance_values = calculate_performance_source_series(calendar, performance_metric)
     pain_values = get_check_in_series(check_ins, "pain")
     fatigue_values = get_check_in_series(check_ins, "fatigue")
 
@@ -1126,7 +1404,7 @@ def calculate_macro_trends(calendar, performance_metric="performance_score"):
 def calculate_performance_relationships(calendar, performance_metric="performance_score"):
     sessions = get_all_sessions(calendar)
     check_ins = calendar.get("check_ins", [])
-    performance_values = get_check_in_series(check_ins, performance_metric)
+    performance_values = calculate_performance_source_series(calendar, performance_metric)
 
     return {
         "freshness_to_performance": calculate_effect_size_summary(

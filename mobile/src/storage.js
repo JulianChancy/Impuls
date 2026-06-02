@@ -17,7 +17,7 @@ export const emptyExercise = {
 };
 
 export const defaultData = {
-  version: 5,
+  version: 6,
   profile: {
     name: '',
     onboarding_completed: false,
@@ -62,25 +62,6 @@ export const defaultData = {
     freshness_score: 0,
     soreness_score: 0,
     performance_score: 0,
-    performance_type: 'jumping',
-    gct: '',
-    gct_unit: 'seconds',
-    ft: '',
-    ft_unit: 'seconds',
-    height_or_distance: '',
-    height_or_distance_unit: 'cm',
-    sprint_time: '',
-    sprint_time_unit: 'seconds',
-    distance: '',
-    distance_unit: 'metres',
-    lift_name: '',
-    weight: '',
-    weight_unit: 'kg',
-    bar_velocity: '',
-    bar_velocity_unit: 'm/s',
-    sets: '',
-    reps: '',
-    unit: '',
   },
   sessions: [],
   checkIns: [],
@@ -189,18 +170,14 @@ function migrateCheckInDraft(checkInDraft = {}, version) {
   if (version < 4 && checkInDraft.pain_location === 'Left Achilles') {
     return cloneData(defaultData.checkInDraft);
   }
-  const merged = { ...defaultData.checkInDraft, ...checkInDraft };
-  const legacyUnit = checkInDraft.unit || '';
-  if (!merged.height_or_distance_unit && legacyUnit) merged.height_or_distance_unit = legacyUnit;
-  if (!merged.distance_unit && legacyUnit) merged.distance_unit = legacyUnit;
-  if (!merged.gct_unit) merged.gct_unit = 'seconds';
-  if (!merged.ft_unit) merged.ft_unit = 'seconds';
-  if (!merged.height_or_distance_unit) merged.height_or_distance_unit = 'cm';
-  if (!merged.sprint_time_unit) merged.sprint_time_unit = 'seconds';
-  if (!merged.distance_unit) merged.distance_unit = 'metres';
-  if (!merged.weight_unit) merged.weight_unit = 'kg';
-  if (!merged.bar_velocity_unit) merged.bar_velocity_unit = 'm/s';
-  return merged;
+  return {
+    ...defaultData.checkInDraft,
+    pain_score: checkInDraft.pain_score ?? defaultData.checkInDraft.pain_score,
+    pain_location: checkInDraft.pain_location ?? defaultData.checkInDraft.pain_location,
+    freshness_score: checkInDraft.freshness_score ?? defaultData.checkInDraft.freshness_score,
+    soreness_score: checkInDraft.soreness_score ?? defaultData.checkInDraft.soreness_score,
+    performance_score: checkInDraft.performance_score ?? defaultData.checkInDraft.performance_score,
+  };
 }
 
 export async function loadAppData() {
