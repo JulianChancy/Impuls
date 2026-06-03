@@ -75,7 +75,7 @@ const movementOptions = [
 ];
 
 const performanceMetricOptions = [
-  ['jumping', 'Jumping'],
+  ['jumping', 'Plyometrics'],
   ['sprinting', 'Sprinting'],
   ['lift', 'Lift'],
 ];
@@ -608,14 +608,13 @@ function plannedRepCount(exercise = {}) {
 }
 
 function plannedAttemptsForSet(exercise = {}, setNumber = 1) {
-  const sets = exerciseSetCount(exercise);
   const contacts = Math.round(toNumber(exercise.contacts, 0));
-  if (contacts > 0) {
-    const base = Math.floor(contacts / sets);
-    const remainder = contacts % sets;
-    return base + (setNumber <= remainder ? 1 : 0);
-  }
+  if (contacts > 0) return Math.max(1, contacts);
   return plannedRepCount(exercise);
+}
+
+function actualMetricRowKey(attempt = {}) {
+  return `${Number(attempt.set_number) || 1}:${Number(attempt.rep_number) || 1}`;
 }
 
 function plannedAttemptRows(exercise = {}) {
@@ -629,7 +628,7 @@ function plannedAttemptRows(exercise = {}) {
     for (let repNumber = 1; repNumber <= attemptCount; repNumber += 1) {
       const saved = existing.find((attempt) => Number(attempt.set_number) === setNumber && Number(attempt.rep_number) === repNumber);
       rows.push({
-        id: saved?.id || createId('attempt'),
+        id: saved?.id || `${exercise.id || 'exercise'}-set-${setNumber}-attempt-${repNumber}`,
         set_number: setNumber,
         rep_number: repNumber,
         metric_type: saved?.metric_type || defaultType,
@@ -2469,7 +2468,9 @@ function CalendarScreen({
           if (key === 'gct') nextMetrics.gct_unit = 'milliseconds';
           return { ...attempt, metrics: emptyActualMetrics(attempt.metric_type, nextMetrics) };
         });
-        return { ...exercise, actual_metrics: nextRows };
+        const plannedKeys = new Set(nextRows.map(actualMetricRowKey));
+        const preservedRows = (exercise.actual_metrics || []).filter((attempt) => !plannedKeys.has(actualMetricRowKey(attempt)));
+        return { ...exercise, actual_metrics: [...nextRows, ...preservedRows] };
       });
     });
   }
@@ -3501,10 +3502,7 @@ function CalendarExerciseMetrics({ exercise, onChangeAttempt }) {
             <Text style={styles.setMetricTitle}>Set {setNumber}</Text>
             {setRows.map((attempt) => (
               <View key={attempt.id} style={styles.attemptCard}>
-                <View style={styles.rowBetween}>
-                  <Text style={styles.cardTitle}>{attemptLabel} {attempt.rep_number}</Text>
-                  <Text style={styles.muted}>Actual metrics</Text>
-                </View>
+                <Text style={styles.cardTitle}>{attemptLabel} {attempt.rep_number}</Text>
                 <ChipWrap
                   options={performanceMetricOptions}
                   value={attempt.metric_type}
@@ -5292,17 +5290,7 @@ function MetricInputs({ metricType, metrics, onChangeMetric }) {
         </View>
         <View style={styles.twoCol}>
           <Input label="FT (ms)" value={metrics.ft || ''} onChangeText={(value) => onChangeMetric('ft', value)} />
-          <View style={styles.fixedUnitPill}>
-            <Text style={styles.inputLabel}>FT unit</Text>
-            <Text style={styles.fixedUnitText}>ms</Text>
-          </View>
-        </View>
-        <View style={styles.twoCol}>
           <Input label="GCT (ms)" value={metrics.gct || ''} onChangeText={(value) => onChangeMetric('gct', value)} />
-          <View style={styles.fixedUnitPill}>
-            <Text style={styles.inputLabel}>GCT unit</Text>
-            <Text style={styles.fixedUnitText}>ms</Text>
-          </View>
         </View>
         <Text style={styles.smallCopy}>Auto RSI: {pretty(rsi, 2)}</Text>
       </>
@@ -5761,8 +5749,6 @@ const styles = StyleSheet.create({
   formTitle: { color: '#111111', fontSize: 14, fontWeight: '900' },
   inputWrap: { gap: 6, flex: 1 },
   input: { backgroundColor: '#FFFFFF', borderColor: '#D9D9D4', borderRadius: 6, borderWidth: 1, minHeight: 42, paddingHorizontal: 10, color: '#111111' },
-  fixedUnitPill: { backgroundColor: '#EFEFEC', borderColor: '#D9D9D4', borderRadius: 8, borderWidth: 1, flex: 1, gap: 6, justifyContent: 'center', minHeight: 42, paddingHorizontal: 10 },
-  fixedUnitText: { color: '#111111', fontSize: 14, fontWeight: '900' },
   sliderWrap: { gap: 8 },
   sliderValue: { color: '#111111', fontWeight: '900' },
   sliderRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
@@ -5900,8 +5886,8 @@ const styles = StyleSheet.create({
   miniButtonText: { color: '#111111', fontSize: 12, fontWeight: '900' },
   miniButtonTextLight: { color: '#FFFFFF' },
   programmeFocusedPanel: { backgroundColor: '#F7F7F5', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 12, padding: 12 },
-  performanceSetCard: { backgroundColor: '#F7F7F5', borderColor: '#E1E1DC', borderRadius: 12, borderWidth: 1, gap: 10, padding: 10 },
-  attemptCard: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E4', borderRadius: 10, borderWidth: 1, gap: 10, padding: 10 },
+  performanceSetCard: { backgroundColor: '#F7F7F5', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, gap: 8, padding: 8 },
+  attemptCard: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E4', borderRadius: 8, borderWidth: 1, gap: 7, padding: 8 },
   rangeSummaryText: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '800', lineHeight: 18 },
   calendarMetaText: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '700', lineHeight: 18 },
   weekSessionRow: { alignItems: 'center', backgroundColor: '#F7F7F5', borderRadius: 8, flexDirection: 'row', gap: 10, padding: 10 },
