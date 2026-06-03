@@ -80,7 +80,7 @@ const performanceMetricOptions = [
   ['lift', 'Lift'],
 ];
 
-const gctFtUnitOptions = [
+const sprintTimeUnitOptions = [
   ['seconds', 'seconds'],
   ['milliseconds', 'milliseconds'],
 ];
@@ -576,12 +576,18 @@ function defaultMetricTypeForExercise(exercise = {}) {
   return 'jumping';
 }
 
+function timeMetricToMilliseconds(value, unit) {
+  const numeric = storedNumber(value);
+  if (!Number.isFinite(numeric)) return value || '';
+  return ['seconds', 'second', 'sec', 's'].includes(String(unit || '').toLowerCase()) ? String(numeric * 1000) : String(numeric);
+}
+
 function emptyActualMetrics(metricType = 'jumping', metrics = {}) {
   return {
-    ft: metrics.ft || '',
-    ft_unit: metrics.ft_unit || 'seconds',
-    gct: metrics.gct || '',
-    gct_unit: metrics.gct_unit || 'seconds',
+    ft: timeMetricToMilliseconds(metrics.ft, metrics.ft_unit),
+    ft_unit: 'milliseconds',
+    gct: timeMetricToMilliseconds(metrics.gct, metrics.gct_unit),
+    gct_unit: 'milliseconds',
     height_or_distance: metrics.height_or_distance || '',
     height_or_distance_unit: metrics.height_or_distance_unit || metrics.unit || 'cm',
     sprint_time: metrics.sprint_time || metrics.time || '',
@@ -597,21 +603,30 @@ function emptyActualMetrics(metricType = 'jumping', metrics = {}) {
 
 function plannedRepCount(exercise = {}) {
   const reps = Math.round(toNumber(exercise.reps, 0));
-  const contacts = Math.round(toNumber(exercise.contacts, 0));
   if (reps) return Math.max(1, reps);
-  if (contacts) return Math.max(1, Math.ceil(contacts / exerciseSetCount(exercise)));
   return 1;
+}
+
+function plannedAttemptsForSet(exercise = {}, setNumber = 1) {
+  const sets = exerciseSetCount(exercise);
+  const contacts = Math.round(toNumber(exercise.contacts, 0));
+  if (contacts > 0) {
+    const base = Math.floor(contacts / sets);
+    const remainder = contacts % sets;
+    return base + (setNumber <= remainder ? 1 : 0);
+  }
+  return plannedRepCount(exercise);
 }
 
 function plannedAttemptRows(exercise = {}) {
   const sets = exerciseSetCount(exercise);
-  const reps = plannedRepCount(exercise);
   const existing = exercise.actual_metrics || [];
   const defaultType = defaultMetricTypeForExercise(exercise);
   const rows = [];
 
   for (let setNumber = 1; setNumber <= sets; setNumber += 1) {
-    for (let repNumber = 1; repNumber <= reps; repNumber += 1) {
+    const attemptCount = plannedAttemptsForSet(exercise, setNumber);
+    for (let repNumber = 1; repNumber <= attemptCount; repNumber += 1) {
       const saved = existing.find((attempt) => Number(attempt.set_number) === setNumber && Number(attempt.rep_number) === repNumber);
       rows.push({
         id: saved?.id || createId('attempt'),
@@ -1414,12 +1429,6 @@ export default function App() {
     setScreen('review');
   }
 
-  function openPerformanceLog(sessionId, returnDate = selectedCalendarDate) {
-    setSelectedPlannedSessionId(sessionId);
-    if (returnDate) setSelectedCalendarDate(returnDate);
-    setScreen('performanceLog');
-  }
-
   function openSessionAnalysis(sessionId, returnDate = selectedCalendarDate) {
     setSelectedPlannedSessionId(sessionId);
     if (returnDate) setSelectedCalendarDate(returnDate);
@@ -1434,7 +1443,9 @@ export default function App() {
       setScreen('calendar');
       return;
     }
-    openPerformanceLog(planned.id, planned.date || isoDate());
+    setSelectedCalendarDate(planned.date || isoDate());
+    setSelectedPlannedSessionId(planned.id);
+    setScreen('calendar');
   }
 
   function clearAll() {
@@ -1604,7 +1615,6 @@ export default function App() {
                 setSelectedDate={setSelectedCalendarDate}
                 setSelectedPlannedSessionId={setSelectedPlannedSessionId}
                 setPlannedSessionReturnScreen={setPlannedSessionReturnScreen}
-                openPerformanceLog={openPerformanceLog}
                 openSessionAnalysis={openSessionAnalysis}
                 setScreen={setScreen}
                 tutorialSeen={data.profile?.tutorialFlags?.programme_seen}
@@ -1628,7 +1638,6 @@ export default function App() {
                 setSelectedDate={setSelectedCalendarDate}
                 setSelectedPlannedSessionId={setSelectedPlannedSessionId}
                 setPlannedSessionReturnScreen={setPlannedSessionReturnScreen}
-                openPerformanceLog={openPerformanceLog}
                 openSessionAnalysis={openSessionAnalysis}
                 setScreen={setScreen}
               />
@@ -1639,14 +1648,6 @@ export default function App() {
                 setData={setData}
                 sessionId={selectedPlannedSessionId}
                 returnScreen={plannedSessionReturnScreen}
-                setScreen={setScreen}
-              />
-            )}
-            {screen === 'performanceLog' && (
-              <PerformanceLogScreen
-                data={data}
-                setData={setData}
-                sessionId={selectedPlannedSessionId}
                 setScreen={setScreen}
               />
             )}
@@ -2361,7 +2362,6 @@ function CalendarScreen({
   setSelectedDate,
   setSelectedPlannedSessionId,
   setPlannedSessionReturnScreen,
-  openPerformanceLog,
   openSessionAnalysis,
   setScreen,
   tutorialSeen,
@@ -2439,6 +2439,44 @@ function CalendarScreen({
         exercise.id === exerciseId ? { ...exercise, [key]: value } : exercise
       );
     });
+  }
+
+  function updatePlannedSessionPerformance(sessionId, key, value) {
+    commitProgramme((draft) => {
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (target) target[key] = value;
+    });
+  }
+
+  function updatePlannedAttempt(sessionId, exerciseId, attemptId, key, value) {
+    commitProgramme((draft) => {
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (!target) return;
+      target.exercises = (target.exercises || []).map((exercise) => {
+        if (exercise.id !== exerciseId) return exercise;
+        const rows = plannedAttemptRows(exercise);
+        const nextRows = rows.map((attempt) => {
+          if (attempt.id !== attemptId) return attempt;
+          if (key === 'metric_type') {
+            return {
+              ...attempt,
+              metric_type: value,
+              metrics: emptyActualMetrics(value, attempt.metrics || {}),
+            };
+          }
+          const nextMetrics = { ...(attempt.metrics || {}), [key]: value };
+          if (key === 'ft') nextMetrics.ft_unit = 'milliseconds';
+          if (key === 'gct') nextMetrics.gct_unit = 'milliseconds';
+          return { ...attempt, metrics: emptyActualMetrics(attempt.metric_type, nextMetrics) };
+        });
+        return { ...exercise, actual_metrics: nextRows };
+      });
+    });
+  }
+
+  function analysePlannedSession(session) {
+    updatePlannedSessionPerformance(session.id, 'performance_logged_at', new Date().toISOString());
+    openSessionAnalysis(session.id, session.date || selectedDate);
   }
 
   function updateDayNote(value) {
@@ -2567,10 +2605,7 @@ function CalendarScreen({
                   </Pressable>
                 </View>
                 <Text style={styles.calendarMetaText}>{session.week_name ? `${session.week_name} / ` : ''}{session.focus} / {session.duration}</Text>
-                <View style={styles.twoCol}>
-                  <ActionButton title="Log Performance" tone="black" onPress={() => openPerformanceLog(session.id, session.date || selectedDate)} />
-                  <ActionButton title="Analyse Session" tone="outline" onPress={() => openSessionAnalysis(session.id, session.date || selectedDate)} />
-                </View>
+                <ActionButton title="Analyse Session" tone="outline" onPress={() => analysePlannedSession(session)} />
                 <Text style={styles.label}>Exercises</Text>
                 {(session.exercises || []).length === 0 ? (
                   <Text style={styles.calendarMetaText}>No exercises added yet.</Text>
@@ -2586,10 +2621,29 @@ function CalendarScreen({
                           <Text style={styles.calendarMetaText}>{exercise.movement_type.replace('_', ' ')}</Text>
                         </View>
                         <Text style={styles.exercisePrescription}>{exercisePrescription(exercise)}</Text>
+                        <CalendarExerciseMetrics
+                          exercise={exercise}
+                          onChangeAttempt={(attemptId, key, value) => updatePlannedAttempt(session.id, exercise.id, attemptId, key, value)}
+                        />
                       </View>
                     );
                   })
                 )}
+                <View style={styles.analysisSubcard}>
+                  <Text style={styles.sectionTitle}>Whole-session outputs</Text>
+                  <SliderField
+                    label="Performance score (0-10)"
+                    value={session.performance_score ?? 0}
+                    onChange={(value) => updatePlannedSessionPerformance(session.id, 'performance_score', value)}
+                  />
+                  <TextInput
+                    style={[styles.input, styles.noteInput]}
+                    multiline
+                    value={session.performance_notes || ''}
+                    onChangeText={(value) => updatePlannedSessionPerformance(session.id, 'performance_notes', value)}
+                    placeholder="Notes about actual performance"
+                  />
+                </View>
               </View>
             );
           })
@@ -2931,7 +2985,6 @@ function EditBlockCalendarScreen({
   setSelectedDate,
   setSelectedPlannedSessionId,
   setPlannedSessionReturnScreen,
-  openPerformanceLog,
   openSessionAnalysis,
   setScreen,
 }) {
@@ -3256,7 +3309,6 @@ function EditBlockCalendarScreen({
             <Text style={styles.muted}>{session.date} / {session.focus} / {session.duration}</Text>
           </Pressable>
           <View style={styles.programmeActions}>
-            <Pressable style={[styles.miniButton, styles.miniButtonDark]} onPress={() => openPerformanceLog(session.id, session.date || selectedDate)}><Text style={[styles.miniButtonText, styles.miniButtonTextLight]}>Log Performance</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => openSessionAnalysis(session.id, session.date || selectedDate)}><Text style={styles.miniButtonText}>Analyse Session</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => updatePlannedSession(session.id, 'date', selectedDate)}><Text style={styles.miniButtonText}>To Day</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => copySession(session)}><Text style={styles.miniButtonText}>Copy</Text></Pressable>
@@ -3430,142 +3482,44 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
   );
 }
 
-function PerformanceLogScreen({ data, setData, sessionId, setScreen }) {
-  const found = findPlannedSession(data.programme, sessionId);
-  const session = found?.session;
+function CalendarExerciseMetrics({ exercise, onChangeAttempt }) {
+  const rows = plannedAttemptRows(exercise);
+  const sets = [...new Set(rows.map((row) => row.set_number))];
+  const attemptLabel = Math.round(toNumber(exercise.contacts, 0)) > 0 ? 'Contact' : 'Rep';
 
-  function commitProgramme(updater) {
-    setData((current) => {
-      const nextProgramme = JSON.parse(JSON.stringify(current.programme));
-      updater(nextProgramme);
-      return { ...current, programme: nextProgramme };
-    });
-  }
-
-  function updateSessionPerformanceField(key, value) {
-    commitProgramme((draft) => {
-      const target = findPlannedSession(draft, sessionId)?.session;
-      if (target) target[key] = value;
-    });
-  }
-
-  function updateAttempt(exerciseId, attemptId, key, value) {
-    commitProgramme((draft) => {
-      const target = findPlannedSession(draft, sessionId)?.session;
-      if (!target) return;
-      target.exercises = (target.exercises || []).map((exercise) => {
-        if (exercise.id !== exerciseId) return exercise;
-        const rows = plannedAttemptRows(exercise);
-        const nextRows = rows.map((attempt) => {
-          if (attempt.id !== attemptId) return attempt;
-          if (key === 'metric_type') {
-            return {
-              ...attempt,
-              metric_type: value,
-              metrics: emptyActualMetrics(value, attempt.metrics || {}),
-            };
-          }
-          return {
-            ...attempt,
-            metrics: {
-              ...(attempt.metrics || {}),
-              [key]: value,
-            },
-          };
-        });
-        return { ...exercise, actual_metrics: nextRows };
-      });
-    });
-  }
-
-  function saveAndAnalyse() {
-    updateSessionPerformanceField('performance_logged_at', new Date().toISOString());
-    setScreen('sessionAnalysis');
-  }
-
-  if (!session) {
-    return (
-      <View style={styles.screen}>
-        <Header title="Log Performance" onBack={() => setScreen('calendar')} />
-        <Text style={styles.bodyText}>No planned session today. Create one in Calendar.</Text>
-        <ActionButton title="Open Calendar" tone="black" onPress={() => setScreen('calendar')} />
-      </View>
-    );
+  if (!rows.length) {
+    return <Text style={styles.muted}>No attempts to log yet.</Text>;
   }
 
   return (
-    <View style={styles.screen}>
-      <Header title="Log Performance" subtitle={session.session_name || session.date} onBack={() => setScreen('calendar')} />
-      <View style={styles.card}>
-        <Text style={styles.label}>Planned session</Text>
-        <Text style={styles.sectionTitle}>{session.session_name || 'Untitled session'}</Text>
-        <Text style={styles.muted}>{session.date} / {session.focus || 'No focus'} / {session.duration || 'No duration'}</Text>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Whole-session outputs</Text>
-        <SliderField
-          label="Performance score (0-10)"
-          value={session.performance_score ?? 0}
-          onChange={(value) => updateSessionPerformanceField('performance_score', value)}
-        />
-        <TextInput
-          style={[styles.input, styles.noteInput]}
-          multiline
-          value={session.performance_notes || ''}
-          onChangeText={(value) => updateSessionPerformanceField('performance_notes', value)}
-          placeholder="Notes about actual performance"
-        />
-      </View>
-
-      {(session.exercises || []).length === 0 ? (
-        <View style={styles.card}>
-          <Text style={styles.bodyText}>No exercises are planned in this session yet.</Text>
-          <ActionButton title="Edit Session Structure" tone="outline" onPress={() => setScreen('editPlannedSession')} />
-        </View>
-      ) : null}
-
-      {(session.exercises || []).map((exercise, exerciseIndex) => {
-        const rows = plannedAttemptRows(exercise);
-        const sets = [...new Set(rows.map((row) => row.set_number))];
+    <View style={styles.setMetricsList}>
+      {sets.map((setNumber) => {
+        const setRows = rows.filter((row) => row.set_number === setNumber);
+        if (!setRows.length) return null;
         return (
-          <View key={exercise.id} style={styles.card}>
-            <View style={styles.exerciseBulletRow}>
-              <View style={styles.exerciseNameWithOrder}>
-                <View style={styles.orderBadge}><Text style={styles.orderBadgeText}>{exercise.order || exerciseIndex + 1}</Text></View>
-                <Text style={styles.exerciseNameText}>{exercise.exercise_name || 'Unnamed exercise'}</Text>
-              </View>
-              <Text style={styles.calendarMetaText}>{String(exercise.movement_type || '').replace('_', ' ')}</Text>
-            </View>
-            <Text style={styles.exercisePrescription}>{exercisePrescription(exercise)}</Text>
-            {sets.map((setNumber) => (
-              <View key={`${exercise.id}-set-${setNumber}`} style={styles.performanceSetCard}>
-                <Text style={styles.setMetricTitle}>Set {setNumber}</Text>
-                {rows.filter((row) => row.set_number === setNumber).map((attempt) => (
-                  <View key={attempt.id} style={styles.attemptCard}>
-                    <View style={styles.rowBetween}>
-                      <Text style={styles.cardTitle}>Rep {attempt.rep_number}</Text>
-                      <Text style={styles.muted}>Attempt metrics</Text>
-                    </View>
-                    <ChipWrap
-                      options={performanceMetricOptions}
-                      value={attempt.metric_type}
-                      onChange={(value) => updateAttempt(exercise.id, attempt.id, 'metric_type', value)}
-                    />
-                    <MetricInputs
-                      metricType={attempt.metric_type}
-                      metrics={attempt.metrics || {}}
-                      onChangeMetric={(key, value) => updateAttempt(exercise.id, attempt.id, key, value)}
-                    />
-                  </View>
-                ))}
+          <View key={`${exercise.id}-set-${setNumber}`} style={styles.performanceSetCard}>
+            <Text style={styles.setMetricTitle}>Set {setNumber}</Text>
+            {setRows.map((attempt) => (
+              <View key={attempt.id} style={styles.attemptCard}>
+                <View style={styles.rowBetween}>
+                  <Text style={styles.cardTitle}>{attemptLabel} {attempt.rep_number}</Text>
+                  <Text style={styles.muted}>Actual metrics</Text>
+                </View>
+                <ChipWrap
+                  options={performanceMetricOptions}
+                  value={attempt.metric_type}
+                  onChange={(value) => onChangeAttempt(attempt.id, 'metric_type', value)}
+                />
+                <MetricInputs
+                  metricType={attempt.metric_type}
+                  metrics={attempt.metrics || {}}
+                  onChangeMetric={(key, value) => onChangeAttempt(attempt.id, key, value)}
+                />
               </View>
             ))}
           </View>
         );
       })}
-
-      <ActionButton title="Analyse Session" tone="black" onPress={saveAndAnalyse} />
     </View>
   );
 }
@@ -5337,25 +5291,17 @@ function MetricInputs({ metricType, metrics, onChangeMetric }) {
           />
         </View>
         <View style={styles.twoCol}>
-          <Input label="FT" value={metrics.ft || ''} onChangeText={(value) => onChangeMetric('ft', value)} />
-          <View style={styles.inputWrap}>
+          <Input label="FT (ms)" value={metrics.ft || ''} onChangeText={(value) => onChangeMetric('ft', value)} />
+          <View style={styles.fixedUnitPill}>
             <Text style={styles.inputLabel}>FT unit</Text>
-            <ChipWrap
-              options={gctFtUnitOptions}
-              value={metrics.ft_unit || 'seconds'}
-              onChange={(value) => onChangeMetric('ft_unit', value)}
-            />
+            <Text style={styles.fixedUnitText}>ms</Text>
           </View>
         </View>
         <View style={styles.twoCol}>
-          <Input label="GCT" value={metrics.gct || ''} onChangeText={(value) => onChangeMetric('gct', value)} />
-          <View style={styles.inputWrap}>
+          <Input label="GCT (ms)" value={metrics.gct || ''} onChangeText={(value) => onChangeMetric('gct', value)} />
+          <View style={styles.fixedUnitPill}>
             <Text style={styles.inputLabel}>GCT unit</Text>
-            <ChipWrap
-              options={gctFtUnitOptions}
-              value={metrics.gct_unit || 'seconds'}
-              onChange={(value) => onChangeMetric('gct_unit', value)}
-            />
+            <Text style={styles.fixedUnitText}>ms</Text>
           </View>
         </View>
         <Text style={styles.smallCopy}>Auto RSI: {pretty(rsi, 2)}</Text>
@@ -5370,7 +5316,7 @@ function MetricInputs({ metricType, metrics, onChangeMetric }) {
           <View style={styles.inputWrap}>
             <Text style={styles.inputLabel}>Time unit</Text>
             <ChipWrap
-              options={gctFtUnitOptions}
+              options={sprintTimeUnitOptions}
               value={metrics.sprint_time_unit || 'seconds'}
               onChange={(value) => onChangeMetric('sprint_time_unit', value)}
             />
@@ -5815,6 +5761,8 @@ const styles = StyleSheet.create({
   formTitle: { color: '#111111', fontSize: 14, fontWeight: '900' },
   inputWrap: { gap: 6, flex: 1 },
   input: { backgroundColor: '#FFFFFF', borderColor: '#D9D9D4', borderRadius: 6, borderWidth: 1, minHeight: 42, paddingHorizontal: 10, color: '#111111' },
+  fixedUnitPill: { backgroundColor: '#EFEFEC', borderColor: '#D9D9D4', borderRadius: 8, borderWidth: 1, flex: 1, gap: 6, justifyContent: 'center', minHeight: 42, paddingHorizontal: 10 },
+  fixedUnitText: { color: '#111111', fontSize: 14, fontWeight: '900' },
   sliderWrap: { gap: 8 },
   sliderValue: { color: '#111111', fontWeight: '900' },
   sliderRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
