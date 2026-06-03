@@ -1,5 +1,6 @@
 from enum import Enum
 from datetime import datetime, timedelta
+import math
 import statistics
 from uuid import uuid4
 
@@ -106,9 +107,10 @@ def parse_datetime(value):
         return None
 
     if isinstance(value, datetime):
-        return value
+        return value.replace(tzinfo=None)
 
-    return datetime.fromisoformat(value)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=None)
 
 
 def date_key(datetime_value):
@@ -126,6 +128,18 @@ def safe_divide(numerator, denominator):
         return None
 
     return numerator / denominator
+
+
+def is_positive_number(value):
+    return isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+
+
+def is_finite_number(value):
+    return isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def finite_values(values):
+    return [value for value in values if is_finite_number(value)]
 
 
 def extract_non_null(values):
@@ -627,32 +641,34 @@ def calculate_monthly_load(sessions, end_datetime):
 
 
 def calculate_load_change(current_load, previous_load):
-    return safe_divide(current_load - previous_load, previous_load) * 100 if previous_load not in [0, None] else None
+    if not is_finite_number(current_load) or not is_positive_number(previous_load):
+        return None
+    return ((current_load - previous_load) / previous_load) * 100
 
 
 def calculate_irritation_delta(current_pain, previous_pain):
-    if current_pain is None or previous_pain is None:
+    if not is_finite_number(current_pain) or not is_finite_number(previous_pain):
         return None
 
     return current_pain - previous_pain
 
 
 def calculate_fatigue(freshness, soreness):
-    if freshness is None or soreness is None:
+    if not is_finite_number(freshness) or not is_finite_number(soreness):
         return None
 
     return ((10 - freshness) + soreness) / 2
 
 
 def calculate_readiness(freshness, soreness, pain):
-    if freshness is None or soreness is None or pain is None:
+    if not is_finite_number(freshness) or not is_finite_number(soreness) or not is_finite_number(pain):
         return None
 
     return freshness - ((soreness + pain) / 2)
 
 
 def calculate_rsi(ft, gct):
-    if ft is None or gct in [0, None]:
+    if not is_positive_number(ft) or not is_positive_number(gct):
         return None
 
     return ft / gct
@@ -667,14 +683,62 @@ def _number_or_none(value):
         return None
 
 
+def normalise_time(value, unit):
+    numeric = _number_or_none(value)
+    if not is_finite_number(numeric):
+        return None
+    base_unit = str(unit or "seconds").strip().lower()
+    if base_unit in ["milliseconds", "millisecond", "ms"]:
+        return numeric / 1000
+    return numeric
+
+
+def normalise_distance(value, unit):
+    numeric = _number_or_none(value)
+    if not is_finite_number(numeric):
+        return None
+    base_unit = str(unit or "cm").strip().lower()
+    if base_unit in ["inches", "inch", "in"]:
+        return numeric * 2.54
+    if base_unit in ["metres", "metre", "meters", "meter", "m"]:
+        return numeric * 100
+    return numeric
+
+
+def normalise_weight(value, unit):
+    numeric = _number_or_none(value)
+    if not is_finite_number(numeric):
+        return None
+    base_unit = str(unit or "kg").strip().lower()
+    if base_unit in ["lbs", "lb", "pounds", "pound"]:
+        return numeric * 0.45359237
+    return numeric
+
+
+def calculate_normalised_rsi(ft, ft_unit, gct, gct_unit):
+    ft_seconds = normalise_time(ft, ft_unit)
+    gct_seconds = normalise_time(gct, gct_unit)
+    if not is_positive_number(ft_seconds) or not is_positive_number(gct_seconds):
+        return None
+    return ft_seconds / gct_seconds
+
+
 def _actual_metric_value(attempt, metric_name):
     metrics = attempt.get("metrics", {}) or {}
 
     if metric_name == "rsi":
-        return calculate_rsi(
-            _number_or_none(metrics.get("ft")),
-            _number_or_none(metrics.get("gct")),
+        return calculate_normalised_rsi(
+            metrics.get("ft"),
+            metrics.get("ft_unit"),
+            metrics.get("gct"),
+            metrics.get("gct_unit"),
         )
+    if metric_name in ["ft", "gct", "sprint_time"]:
+        return normalise_time(metrics.get(metric_name), metrics.get(f"{metric_name}_unit"))
+    if metric_name in ["height_or_distance", "distance"]:
+        return normalise_distance(metrics.get(metric_name), metrics.get(f"{metric_name}_unit"))
+    if metric_name == "weight":
+        return normalise_weight(metrics.get("weight"), metrics.get("weight_unit"))
 
     return _number_or_none(metrics.get(metric_name))
 
@@ -684,7 +748,7 @@ def _best_mode(metric_name):
 
 
 def _choose_best(metric_name, values):
-    values = extract_non_null(values)
+    values = finite_values(values)
     if not values:
         return None
     return min(values) if _best_mode(metric_name) == "min" else max(values)
@@ -698,7 +762,7 @@ def _metric_summary(attempts, metric_name):
         }
         for attempt in attempts
     ]
-    values = [row["value"] for row in rows if row["value"] is not None]
+    values = finite_values([row["value"] for row in rows])
 
     if not values:
         return None
@@ -800,6 +864,8 @@ def sessionPerformanceAnalysis(session, sessions=None, check_ins=None):
                 continue
             current = summary["peak"]
             previous = best_metric["peak"]
+            if not is_finite_number(current) or not is_finite_number(previous):
+                continue
             if _best_mode(metric_name) == "min":
                 if current < previous:
                     best_metric = {"metric": metric_name, **summary}
@@ -878,7 +944,7 @@ def sessionPerformanceAnalysis(session, sessions=None, check_ins=None):
 
 
 def calculate_slope(values):
-    values = extract_non_null(values)
+    values = finite_values(values)
 
     if len(values) < 2:
         return None
@@ -931,7 +997,7 @@ def calculate_adaptation_trend(performance_trend, load_tolerance_trend, irritati
 
 
 def calculate_rolling_mean(values):
-    values = extract_non_null(values)
+    values = finite_values(values)
 
     if len(values) == 0:
         return None
@@ -940,7 +1006,7 @@ def calculate_rolling_mean(values):
 
 
 def calculate_rolling_sd(values):
-    values = extract_non_null(values)
+    values = finite_values(values)
 
     if len(values) < 2:
         return 0
@@ -960,7 +1026,7 @@ def get_rolling_window(values, window_size):
 
 
 def calculate_rolling_metrics(values, window_size=None):
-    values = extract_non_null(values)
+    values = finite_values(values)
 
     if window_size is not None:
         values = get_rolling_window(values, window_size)
@@ -1020,9 +1086,12 @@ def calculate_check_in_rsi(check_in):
     if performance is None:
         return None
 
-    ft = _to_seconds(performance.get("ft"), performance.get("ft_unit"))
-    gct = _to_seconds(performance.get("gct"), performance.get("gct_unit"))
-    return calculate_rsi(ft, gct)
+    return calculate_normalised_rsi(
+        performance.get("ft"),
+        performance.get("ft_unit"),
+        performance.get("gct"),
+        performance.get("gct_unit"),
+    )
 
 
 def get_performance_metric(performance_entry, metric_name="performance_score"):
@@ -1030,9 +1099,12 @@ def get_performance_metric(performance_entry, metric_name="performance_score"):
         return None
 
     if metric_name == "rsi":
-        ft = _to_seconds(performance_entry.get("ft"), performance_entry.get("ft_unit"))
-        gct = _to_seconds(performance_entry.get("gct"), performance_entry.get("gct_unit"))
-        return calculate_rsi(ft, gct)
+        return calculate_normalised_rsi(
+            performance_entry.get("ft"),
+            performance_entry.get("ft_unit"),
+            performance_entry.get("gct"),
+            performance_entry.get("gct_unit"),
+        )
 
     if metric_name == "height_or_distance":
         return _to_cm(
@@ -1082,7 +1154,7 @@ def get_check_in_series(check_ins, metric_name):
         else:
             values.append(get_check_in_performance_metric(check_in, metric_name))
 
-    return extract_non_null(values)
+    return finite_values(values)
 
 
 def add_derived_values_to_check_in(check_in, previous_check_in=None):
@@ -1162,7 +1234,7 @@ def calculate_session_metric_series(sessions, metric_name):
         elif metric_name == "average_intent":
             values.append(calculate_session_average_intent(session))
 
-    return extract_non_null(values)
+    return finite_values(values)
 
 
 def get_session_actual_metric(session, metric_name="rsi"):
@@ -1181,7 +1253,7 @@ def calculate_actual_performance_series(sessions, metric_name="rsi"):
             get_session_actual_metric(session, metric_name)
             for session in sort_by_datetime(sessions, "session_datetime")
         ]
-        if value is not None
+        if is_finite_number(value)
     ]
 
 
@@ -1218,7 +1290,7 @@ def derive_pbs_from_actual_metrics(calendar):
             _actual_metric_value(attempt, metric_name)
             for attempt in attempts
         ]
-        values = extract_non_null(values)
+        values = finite_values(values)
         pbs[pb_key] = min(values) if mode == "min" and values else max(values) if values else None
 
     return pbs
@@ -1241,7 +1313,7 @@ def calculate_max_intent_frequency(sessions, threshold=90):
     for session in sessions:
         for exercise in session.get("exercises", []):
             intent_percent = exercise.get("intent_percent")
-            if intent_percent is not None and intent_percent >= threshold:
+            if is_finite_number(intent_percent) and intent_percent >= threshold:
                 count += 1
 
     return count
@@ -1328,7 +1400,7 @@ def absolute_effect_size(effect_summary):
         effect_summary.get("pearson_r"),
         effect_summary.get("spearman_r"),
     ]
-    values = [abs(value) for value in values if value is not None]
+    values = [abs(value) for value in values if is_finite_number(value)]
 
     if not values:
         return None
@@ -1461,7 +1533,7 @@ def get_historical_performance_days(calendar, metric_name="performance_score", t
     for check_in in calendar.get("check_ins", []):
         value = get_check_in_performance_metric(check_in, metric_name)
 
-        if value is None:
+        if not is_finite_number(value):
             continue
 
         context = None
@@ -1540,22 +1612,22 @@ def calculate_day_to_day_changes(rows):
             "week": current["week"],
             "load_change": (
                 current["session_load"] - previous["session_load"]
-                if current["session_load"] is not None and previous["session_load"] is not None
+                if is_finite_number(current["session_load"]) and is_finite_number(previous["session_load"])
                 else None
             ),
             "performance_change": (
                 current["performance"] - previous["performance"]
-                if current["performance"] is not None and previous["performance"] is not None
+                if is_finite_number(current["performance"]) and is_finite_number(previous["performance"])
                 else None
             ),
             "pain_change": (
                 current["pain"] - previous["pain"]
-                if current["pain"] is not None and previous["pain"] is not None
+                if is_finite_number(current["pain"]) and is_finite_number(previous["pain"])
                 else None
             ),
             "fatigue_change": (
                 current["fatigue"] - previous["fatigue"]
-                if current["fatigue"] is not None and previous["fatigue"] is not None
+                if is_finite_number(current["fatigue"]) and is_finite_number(previous["fatigue"])
                 else None
             ),
         })
@@ -1564,7 +1636,7 @@ def calculate_day_to_day_changes(rows):
 
 
 def get_largest_absolute_change(changes, metric_name):
-    valid_changes = [change for change in changes if change.get(metric_name) is not None]
+    valid_changes = [change for change in changes if is_finite_number(change.get(metric_name))]
 
     if not valid_changes:
         return None
@@ -1592,7 +1664,7 @@ def create_calendar_mapping_to_insight(calendar, performance_metric="performance
 
 
 def describe_trend_value(value):
-    if value is None:
+    if not is_finite_number(value):
         return "insufficient data"
 
     if value > 0:
@@ -1628,7 +1700,7 @@ def create_insight(insight_type, category, finding, evidence=None, interpretatio
 
 
 def classify_direction(value, threshold=0):
-    if value is None:
+    if not is_finite_number(value):
         return "unknown"
 
     if value > threshold:
@@ -1646,7 +1718,7 @@ def top_calendar_points_by_metric(calendar, metric_name, performance_metric="per
         for check_in in calendar.get("check_ins", [])
     ]
 
-    valid_rows = [row for row in rows if row.get(metric_name) is not None]
+    valid_rows = [row for row in rows if is_finite_number(row.get(metric_name))]
     return sorted(valid_rows, key=lambda row: row[metric_name], reverse=reverse)[:top_n]
 
 
@@ -2325,9 +2397,11 @@ def get_performance_field_value(performance_entry, metric_name):
         return performance_entry.get("performance_score")
 
     if metric_name == "rsi":
-        return calculate_rsi(
-            _to_seconds(performance_entry.get("ft"), performance_entry.get("ft_unit")),
-            _to_seconds(performance_entry.get("gct"), performance_entry.get("gct_unit")),
+        return calculate_normalised_rsi(
+            performance_entry.get("ft"),
+            performance_entry.get("ft_unit"),
+            performance_entry.get("gct"),
+            performance_entry.get("gct_unit"),
         )
 
     if metric_name == "sprint_time":
@@ -2649,13 +2723,17 @@ def create_metric_calendar_markers(calendar, metric_name, top_n=3):
     for index in range(1, len(rows)):
         previous = rows[index - 1]
         current = rows[index]
+        current_value = current.get(metric_name)
+        previous_value = previous.get(metric_name)
+        if not is_finite_number(current_value) or not is_finite_number(previous_value):
+            continue
 
         changes.append({
             "from_date": previous["date"],
             "to_date": current["date"],
-            "from_value": previous.get(metric_name),
-            "to_value": current.get(metric_name),
-            "change": current.get(metric_name) - previous.get(metric_name),
+            "from_value": previous_value,
+            "to_value": current_value,
+            "change": current_value - previous_value,
             "from_session": previous.get("session_name"),
             "to_session": current.get("session_name"),
             "macro_block": current.get("macro_block"),
@@ -2876,8 +2954,6 @@ def generate_full_app_output(calendar, performance_metric="performance_score", e
 # data-dependent interpretation copy and analytics used by the UI should be
 # generated here, not in App.js.
 
-import math
-
 APP_METRIC_META = {
     "performance": {"label": "Performance score", "tone": "positive"},
     "height_or_distance": {"label": "Height / distance", "tone": "positive"},
@@ -2929,7 +3005,7 @@ def _num(value, fallback=0):
 
 
 def _finite(value):
-    return isinstance(value, (int, float)) and math.isfinite(value)
+    return is_finite_number(value)
 
 
 def _json_num(value):
@@ -2988,9 +3064,9 @@ def _parse_dt(value):
     if not value:
         return datetime.min
     if isinstance(value, datetime):
-        return value
+        return value.replace(tzinfo=None)
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
     except ValueError:
         return datetime.min
 
@@ -3054,6 +3130,49 @@ def app_session_volume_by_type(session):
     return rows
 
 
+def app_all_planned_sessions(data):
+    sessions = []
+    for macro in ((data.get("programme") or {}).get("macro_blocks") or []):
+        for block in macro.get("blocks", []) or []:
+            for week in block.get("weeks", []) or []:
+                for session in week.get("sessions", []) or []:
+                    sessions.append({
+                        **session,
+                        "macro_id": macro.get("id"),
+                        "macro_name": macro.get("macro_block_name"),
+                        "block_id": block.get("id"),
+                        "block_name": block.get("block_name"),
+                        "week_id": week.get("id"),
+                        "week_name": week.get("week_name"),
+                        "session_datetime": session.get("session_datetime") or session.get("date"),
+                    })
+    return sessions
+
+
+def app_session_attempts(session):
+    return [
+        attempt
+        for exercise in (session or {}).get("exercises", [])
+        for attempt in exercise.get("actual_metrics", []) or []
+    ]
+
+
+def app_session_actual_metric(session, metric_name):
+    if metric_name == "performance":
+        return _num((session or {}).get("performance_score"), None)
+    attempts = app_session_attempts(session)
+    values = finite_values([_actual_metric_value(attempt, metric_name) for attempt in attempts])
+    if not values:
+        return None
+    return min(values) if _best_mode(metric_name) == "min" else max(values)
+
+
+def app_session_has_actual_outputs(session):
+    if _finite(_num((session or {}).get("performance_score"), None)):
+        return True
+    return any(exercise.get("actual_metrics") for exercise in (session or {}).get("exercises", []))
+
+
 def app_fatigue(check_in):
     return ((10 - _num(check_in.get("freshness_score"))) + _num(check_in.get("soreness_score"))) / 2
 
@@ -3063,9 +3182,12 @@ def app_readiness(check_in):
 
 
 def app_rsi(check_in):
-    gct = _to_seconds(check_in.get("gct"), check_in.get("gct_unit"))
-    ft = _to_seconds(check_in.get("ft"), check_in.get("ft_unit"))
-    return ft / gct if gct > 0 else None
+    return calculate_normalised_rsi(
+        check_in.get("ft"),
+        check_in.get("ft_unit"),
+        check_in.get("gct"),
+        check_in.get("gct_unit"),
+    )
 
 
 def app_mean(values):
@@ -3133,7 +3255,7 @@ def app_spearman(x_values, y_values):
 
 
 def app_relationship_strength(r):
-    if r is None:
+    if not _finite(r):
         return "Collecting"
     abs_r = abs(r)
     if abs_r >= 0.7:
@@ -3159,7 +3281,7 @@ def app_confidence_label(count):
 
 
 def app_trend_state(value, count):
-    if count < 2 or value is None:
+    if count < 2 or not _finite(value):
         return "collecting"
     if value > 0.05:
         return "increasing"
@@ -3207,7 +3329,11 @@ def app_exercise_detail_summary(session):
 
 def app_metric_value(row, key, previous_row=None):
     if key == "pain_delta":
-        return row.get("pain") - previous_row.get("pain") if previous_row else 0
+        if not previous_row:
+            return 0
+        pain = row.get("pain")
+        previous_pain = previous_row.get("pain")
+        return pain - previous_pain if _finite(pain) and _finite(previous_pain) else None
     return row.get(key)
 
 
@@ -3221,10 +3347,11 @@ def app_metric_series(rows, key):
 
 
 def app_metric_stats(points):
-    values = [point.get("value") for point in points if _finite(point.get("value"))]
+    finite_points = [point for point in points if _finite(point.get("value"))]
+    values = [point.get("value") for point in finite_points]
     changes = []
-    for index, point in enumerate(points[1:], start=1):
-        previous = points[index - 1]
+    for index, point in enumerate(finite_points[1:], start=1):
+        previous = finite_points[index - 1]
         changes.append({**point, "previous": previous, "change": point.get("value") - previous.get("value")})
     changes.sort(key=lambda item: abs(item.get("change", 0)), reverse=True)
     return {
@@ -3235,8 +3362,8 @@ def app_metric_stats(points):
         "count": len(values),
         "min": _json_num(min(values) if values else None),
         "max": _json_num(max(values) if values else None),
-        "highest": sorted(points, key=lambda item: item.get("value", 0), reverse=True)[:3],
-        "lowest": sorted(points, key=lambda item: item.get("value", 0))[:3],
+        "highest": sorted(finite_points, key=lambda item: item.get("value"), reverse=True)[:3],
+        "lowest": sorted(finite_points, key=lambda item: item.get("value"))[:3],
         "changes": changes[:3],
     }
 
@@ -3450,6 +3577,8 @@ def app_aligned_pairs(rows, x_key, y_key):
         y = row.get(y_key)
         if _finite(x) and _finite(y):
             previous = rows[index - 1] if index else None
+            pain = row.get("pain")
+            previous_pain = previous.get("pain") if previous else None
             points.append({
                 "x": x,
                 "y": y,
@@ -3458,7 +3587,7 @@ def app_aligned_pairs(rows, x_key, y_key):
                 "session_name": (row.get("session") or {}).get("session_name") or "Session context is collecting.",
                 "load": row.get("load"),
                 "pain": row.get("pain"),
-                "pain_delta": row.get("pain") - previous.get("pain") if previous else 0,
+                "pain_delta": pain - previous_pain if _finite(pain) and _finite(previous_pain) else 0,
                 "performance": row.get("performance"),
                 "freshness": row.get("freshness"),
                 "soreness": row.get("soreness"),
@@ -3487,7 +3616,7 @@ def app_p_value_status(value, count):
 
 
 def app_relationship_state(r, count):
-    if count < 3 or r is None:
+    if count < 3 or not _finite(r):
         return "collecting"
     return f"{app_relationship_strength(r).lower()} {'positive' if r >= 0 else 'negative'}"
 
@@ -3522,9 +3651,11 @@ def app_build_pattern_evidence(relationship):
     points = relationship.get("points", [])
     if len(points) < 3:
         return "More paired logs are needed before this can be interpreted."
-    by_x_high = sorted(points, key=lambda item: item.get("x", 0), reverse=True)[:2]
-    by_x_low = sorted(points, key=lambda item: item.get("x", 0))[:2]
-    by_y_high = sorted(points, key=lambda item: item.get("y", 0), reverse=True)[:2]
+    valid_x_points = [point for point in points if _finite(point.get("x"))]
+    valid_y_points = [point for point in points if _finite(point.get("y"))]
+    by_x_high = sorted(valid_x_points, key=lambda item: item.get("x"), reverse=True)[:2]
+    by_x_low = sorted(valid_x_points, key=lambda item: item.get("x"))[:2]
+    by_y_high = sorted(valid_y_points, key=lambda item: item.get("y"), reverse=True)[:2]
     repeated_sessions = app_repeated_context(points, "session_name")
     repeated_movements = app_repeated_context(points, "movement_types")
     repeated_exercises = app_repeated_context(points, "exercises")
@@ -3541,7 +3672,7 @@ def app_build_pattern_evidence(relationship):
 
 def app_build_training_interpretation(relationship):
     count = len(relationship.get("points", []))
-    if count < 3 or relationship.get("r") is None:
+    if count < 3 or not _finite(relationship.get("r")):
         return "Programming interpretation is collecting because the relationship estimate is not stable enough yet."
     x_key = relationship.get("xKey")
     y_key = relationship.get("yKey")
@@ -3562,7 +3693,7 @@ def app_build_training_interpretation(relationship):
 
 def app_build_bring_forward_prevent(relationship):
     count = len(relationship.get("points", []))
-    if count < 3 or relationship.get("r") is None:
+    if count < 3 or not _finite(relationship.get("r")):
         return {"bringForward": "Bring-forward context is collecting until more paired logs are available.", "preventMonitor": "Monitor context is collecting until more paired logs are available."}
     if relationship.get("yKey") == "pain":
         return {
@@ -3586,7 +3717,7 @@ def app_build_relationship_insight(relationship):
     state = app_relationship_state(relationship.get("r"), count)
     if count < 3:
         evidence = f"{relationship.get('title')} cannot yet be estimated because there are not enough paired observations."
-    elif relationship.get("r") is None:
+    elif not _finite(relationship.get("r")):
         evidence = "No relationship estimate is available yet."
     else:
         evidence = f"{relationship.get('xLabel')} showed a {state} association with {str(relationship.get('yLabel')).lower()} across {count} paired observations."
@@ -3707,8 +3838,8 @@ def app_build_max_intent_insight(sessions):
 
 
 def app_build_insight_summary(section_id, trend_insights, relationships, adaptation_insight, likely_response_insight, latest, avg_load):
-    performance = next((item for item in sorted([r for r in relationships if r.get("yKey") == "performance" and r.get("r") is not None], key=lambda item: abs(item.get("r", 0)), reverse=True)), None)
-    irritation = next((item for item in sorted([r for r in relationships if r.get("yKey") == "pain" and r.get("r") is not None], key=lambda item: abs(item.get("r", 0)), reverse=True)), None)
+    performance = next((item for item in sorted([r for r in relationships if r.get("yKey") == "performance" and _finite(r.get("r"))], key=lambda item: abs(item.get("r")), reverse=True)), None)
+    irritation = next((item for item in sorted([r for r in relationships if r.get("yKey") == "pain" and _finite(r.get("r"))], key=lambda item: abs(item.get("r")), reverse=True)), None)
     summaries = {
         "overview": f"Current read: performance {trend_insights['performance']['state']}, irritation {trend_insights['pain']['state']}, fatigue {trend_insights['fatigue']['state']}.",
         "performance": f"{trend_insights['performance']['evidenceStatement']} {performance['insight']['evidenceStatement'] if performance else 'Performance relationships are collecting.'}",
@@ -3774,8 +3905,8 @@ def app_checkin_deltas(latest, previous):
 
 
 def app_checkin_load_relationship(relationships, strongest=None):
-    candidates = [item for item in relationships if item.get("r") is not None and "load" in [item.get("xKey"), item.get("yKey")]]
-    if strongest and "load" in [strongest.get("xKey"), strongest.get("yKey")] and strongest.get("r") is not None:
+    candidates = [item for item in relationships if _finite(item.get("r")) and "load" in [item.get("xKey"), item.get("yKey")]]
+    if strongest and "load" in [strongest.get("xKey"), strongest.get("yKey")] and _finite(strongest.get("r")):
         return strongest
     return next(iter(sorted(candidates, key=lambda item: abs(item.get("r", 0)), reverse=True)), None)
 
@@ -3858,8 +3989,8 @@ def app_checkin_evidence_summary(latest, previous, strongest):
     if not latest.get("id"):
         return "Check-in evidence is collecting because no saved check-in is available yet."
 
-    pain_delta = latest.get("pain") - previous.get("pain") if previous else None
-    load_delta = latest.get("load") - previous.get("load") if previous else None
+    pain_delta = latest.get("pain") - previous.get("pain") if previous and _finite(latest.get("pain")) and _finite(previous.get("pain")) else None
+    load_delta = latest.get("load") - previous.get("load") if previous and _finite(latest.get("load")) and _finite(previous.get("load")) else None
     if previous and _finite(pain_delta) and abs(pain_delta) >= 1 and _finite(load_delta):
         direction = "increased" if pain_delta > 0 else "decreased"
         return (
@@ -3867,7 +3998,7 @@ def app_checkin_evidence_summary(latest, previous, strongest):
             f"while session load changed from {_pretty(previous.get('load'), 1)} to {_pretty(latest.get('load'), 1)}."
         )
 
-    if strongest and strongest.get("r") is not None:
+    if strongest and _finite(strongest.get("r")):
         p_text = app_p_value_text(strongest.get("pValue"))
         return (
             f"Current logs show a {strongest.get('strength', 'collecting').lower()} "
@@ -4059,7 +4190,7 @@ def app_checkin_visual(latest, previous, strongest, metric_series, relationships
 def app_build_checkin_review(data, ordered, rows_desc, metric_series, trend_insights, relationships, current_read, adaptation_insight):
     latest = rows_desc[0] if rows_desc else {}
     previous = ordered[-2] if len(ordered) >= 2 else None
-    strongest = next(iter(sorted([item for item in relationships if item.get("r") is not None], key=lambda item: abs(item.get("r", 0)), reverse=True)), None)
+    strongest = next(iter(sorted([item for item in relationships if _finite(item.get("r"))], key=lambda item: abs(item.get("r", 0)), reverse=True)), None)
     frame = app_checkin_frame(latest, previous, strongest, trend_insights, adaptation_insight, relationships)
     theme = app_checkin_theme(latest, previous, strongest, current_read, adaptation_insight, trend_insights, relationships)
     return {
@@ -4074,49 +4205,71 @@ def app_build_checkin_review(data, ordered, rows_desc, metric_series, trend_insi
 
 
 def analyze_app_data(data):
-    sessions = data.get("sessions") or []
+    sessions = [*(data.get("sessions") or []), *app_all_planned_sessions(data)]
     check_ins = data.get("checkIns") or []
     active_session = data.get("activeSession") or {}
-    session_by_id = {session.get("id"): session for session in sessions}
+    session_by_id = {session.get("id"): session for session in sessions if session.get("id")}
     rows = []
-    for check_in in check_ins:
-        linked = session_by_id.get(check_in.get("linked_session_id"), active_session)
-        exercises = linked.get("exercises", [])
+
+    def build_session_row(session, check_in=None):
+        exercises = (session or {}).get("exercises", [])
         intents = [_num(exercise.get("intent_percent"), None) for exercise in exercises]
         intents = [value for value in intents if _finite(value)]
-        row = {
-            "id": check_in.get("id"),
-            "date": check_in.get("check_in_datetime"),
+        actual_values = {
+            "performance": app_session_actual_metric(session, "performance"),
+            "height_or_distance": app_session_actual_metric(session, "height_or_distance"),
+            "ft": app_session_actual_metric(session, "ft"),
+            "gct": app_session_actual_metric(session, "gct"),
+            "sprint_time": app_session_actual_metric(session, "sprint_time"),
+            "distance": app_session_actual_metric(session, "distance"),
+            "bar_velocity": app_session_actual_metric(session, "bar_velocity"),
+            "weight": app_session_actual_metric(session, "weight"),
+            "rsi": app_session_actual_metric(session, "rsi"),
+        }
+        has_check_in = bool(check_in)
+        check_in = check_in or {}
+        return {
+            "id": check_in.get("id") or session.get("id"),
+            "date": check_in.get("check_in_datetime") or session.get("session_datetime") or session.get("date"),
             "checkIn": check_in,
-            "session": linked,
-            "load": app_session_load(linked),
+            "session": session,
+            "load": app_session_load(session),
             "volume": sum(app_get_volume(exercise) for exercise in exercises),
             "contacts": sum(_num(exercise.get("contacts")) for exercise in exercises),
             "reps": sum((_num(exercise.get("sets"), 1) or 1) * _num(exercise.get("reps")) for exercise in exercises),
             "duration": sum(_num(exercise.get("duration_minutes")) for exercise in exercises),
             "average_intent": app_mean(intents),
-            "pain": _num(check_in.get("pain_score")),
-            "freshness": _num(check_in.get("freshness_score")),
-            "soreness": _num(check_in.get("soreness_score")),
-            "fatigue": app_fatigue(check_in),
-            "readiness": app_readiness(check_in),
-            "performance": _num(check_in.get("performance_score")),
-            "height_or_distance": _to_cm(
+            "pain": _num(check_in.get("pain_score"), None) if has_check_in else None,
+            "freshness": _num(check_in.get("freshness_score"), None) if has_check_in else None,
+            "soreness": _num(check_in.get("soreness_score"), None) if has_check_in else None,
+            "fatigue": app_fatigue(check_in) if has_check_in else None,
+            "readiness": app_readiness(check_in) if has_check_in else None,
+            "performance": actual_values["performance"] if _finite(actual_values["performance"]) else _num(check_in.get("performance_score"), None),
+            "height_or_distance": actual_values["height_or_distance"] if _finite(actual_values["height_or_distance"]) else _to_cm(
                 check_in.get("height_or_distance"),
                 check_in.get("height_or_distance_unit") or check_in.get("unit"),
             ),
-            "ft": _to_seconds(check_in.get("ft"), check_in.get("ft_unit")),
-            "gct": _to_seconds(check_in.get("gct"), check_in.get("gct_unit")),
-            "sprint_time": _to_seconds(check_in.get("sprint_time"), check_in.get("sprint_time_unit")),
-            "distance": _to_metres(
+            "ft": actual_values["ft"] if _finite(actual_values["ft"]) else _to_seconds(check_in.get("ft"), check_in.get("ft_unit")),
+            "gct": actual_values["gct"] if _finite(actual_values["gct"]) else _to_seconds(check_in.get("gct"), check_in.get("gct_unit")),
+            "sprint_time": actual_values["sprint_time"] if _finite(actual_values["sprint_time"]) else _to_seconds(check_in.get("sprint_time"), check_in.get("sprint_time_unit")),
+            "distance": actual_values["distance"] if _finite(actual_values["distance"]) else _to_metres(
                 check_in.get("distance"),
                 check_in.get("distance_unit") or check_in.get("unit"),
             ),
-            "bar_velocity": _num(check_in.get("bar_velocity"), None),
-            "weight": _to_kg(check_in.get("weight"), check_in.get("weight_unit")),
-            "rsi": app_rsi(check_in),
+            "bar_velocity": actual_values["bar_velocity"] if _finite(actual_values["bar_velocity"]) else _num(check_in.get("bar_velocity"), None),
+            "weight": actual_values["weight"] if _finite(actual_values["weight"]) else _to_kg(check_in.get("weight"), check_in.get("weight_unit")),
+            "rsi": actual_values["rsi"] if _finite(actual_values["rsi"]) else app_rsi(check_in),
         }
-        rows.append(row)
+
+    for check_in in check_ins:
+        linked = session_by_id.get(check_in.get("linked_session_id"), active_session)
+        rows.append(build_session_row(linked, check_in))
+    logged_session_ids = {row.get("session", {}).get("id") for row in rows}
+    for session in sessions:
+        if session.get("id") in logged_session_ids:
+            continue
+        if app_session_has_actual_outputs(session):
+            rows.append(build_session_row(session))
     ordered = sorted(rows, key=lambda item: _parse_dt(item.get("date")))
     rows_desc = sorted(rows, key=lambda item: _parse_dt(item.get("date")), reverse=True)
     latest = rows_desc[0] if rows_desc else {
@@ -4157,10 +4310,10 @@ def analyze_app_data(data):
             "color": color,
             "points": points,
         }
-        relationship["finding"] = f"{title} needs at least three matching logs." if r is None else f"{title} showed a {relationship['strength'].lower()} {'positive' if r >= 0 else 'negative'} association in stored logs."
+        relationship["finding"] = f"{title} needs at least three matching logs." if not _finite(r) else f"{title} showed a {relationship['strength'].lower()} {'positive' if r >= 0 else 'negative'} association in stored logs."
         relationship["insight"] = app_build_relationship_insight(relationship)
         relationships.append(relationship)
-    strongest = next(iter(sorted([item for item in relationships if item.get("r") is not None], key=lambda item: abs(item.get("r", 0)), reverse=True)), None)
+    strongest = next(iter(sorted([item for item in relationships if _finite(item.get("r"))], key=lambda item: abs(item.get("r", 0)), reverse=True)), None)
     performance_trend = metric_stats["performance"].get("trend")
     load_trend = metric_stats["load"].get("trend")
     fatigue_trend = metric_stats["fatigue"].get("trend")
@@ -4177,7 +4330,7 @@ def analyze_app_data(data):
     return {
         "rows": rows_desc,
         "latest": latest,
-        "best": next(iter(sorted(rows, key=lambda item: item.get("performance", 0), reverse=True)), None),
+        "best": next(iter(sorted([row for row in rows if _finite(row.get("performance"))], key=lambda item: item.get("performance"), reverse=True)), None),
         "strongest": strongest,
         "relationships": relationships,
         "cards": [],
