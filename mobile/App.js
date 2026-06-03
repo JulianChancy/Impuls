@@ -75,9 +75,8 @@ const movementOptions = [
 ];
 
 const performanceMetricOptions = [
-  ['jump_output', 'Height / Distance'],
-  ['jump_rsi', 'FT + GCT'],
-  ['sprint', 'Sprint'],
+  ['jumping', 'Jumping'],
+  ['sprinting', 'Sprinting'],
   ['lift', 'Lift'],
 ];
 
@@ -96,6 +95,10 @@ const sprintDistanceUnitOptions = [
 const weightUnitOptions = [
   ['kg', 'kg'],
   ['lbs', 'lbs'],
+];
+const barVelocityUnitOptions = [
+  ['m/s', 'm/s'],
+  ['ft/s', 'ft/s'],
 ];
 const intensityUnitOptions = [
   ['%', '%'],
@@ -372,6 +375,12 @@ function exercisePrescription(exercise) {
   return parts.length ? parts.join(' / ') : 'No prescription set';
 }
 
+function exercisePrescriptionSummary(session = {}) {
+  const exercises = session.exercises || [];
+  if (!exercises.length) return 'No exercises added yet.';
+  return `${exercises.length} exercise${exercises.length === 1 ? '' : 's'} planned`;
+}
+
 function currentMacro(programme) {
   const macros = programme?.macro_blocks || [];
   return macros.find((macro) => macro.id === programme?.selected_macro_id) || macros[0] || null;
@@ -449,6 +458,24 @@ function plannedSessionsInCurrentBlock(programme) {
   );
 }
 
+function allPlannedSessions(programme) {
+  return (programme?.macro_blocks || []).flatMap((macro) =>
+    (macro.blocks || []).flatMap((block) =>
+      (block.weeks || []).flatMap((week) =>
+        (week.sessions || []).map((session) => ({
+          ...session,
+          macro_id: macro.id,
+          macro_name: macro.macro_block_name,
+          block_id: block.id,
+          block_name: block.block_name,
+          week_id: week.id,
+          week_name: week.week_name,
+        }))
+      )
+    )
+  );
+}
+
 function plannedSessionsOnDate(programme, date) {
   return plannedSessionsInCurrentBlock(programme).filter((session) => session.date === date);
 }
@@ -502,82 +529,13 @@ function exerciseSetCount(exercise) {
   return Math.max(1, count || 1);
 }
 
-function setMetricDraft(exercise, setIndex) {
-  const saved = exercise.set_metrics?.[setIndex] || {};
-  const legacy = setIndex === 0 ? {
-    performance_score: exercise.performance_score,
-    metric_type: exercise.metric_type,
-    metrics: exercise.metrics,
-  } : {};
-
-  return {
-    performance_score: saved.performance_score ?? legacy.performance_score ?? 0,
-    metric_type: saved.metric_type || legacy.metric_type || 'jump_output',
-    metrics: metricDraftDefaults(
-      saved.metric_type || legacy.metric_type || 'jump_output',
-      saved.metrics || legacy.metrics || {}
-    ),
-  };
-}
-
-function metricDraftDefaults(metricType, metrics = {}) {
-  if (metricType === 'jump_output') {
-    return {
-      height_or_distance: metrics.height_or_distance || '',
-      height_or_distance_unit: metrics.height_or_distance_unit || metrics.unit || 'cm',
-    };
-  }
-  if (metricType === 'jump_rsi') {
-    return {
-      ft: metrics.ft || '',
-      ft_unit: metrics.ft_unit || 'seconds',
-      gct: metrics.gct || '',
-      gct_unit: metrics.gct_unit || 'seconds',
-    };
-  }
-  if (metricType === 'sprint') {
-    return {
-      sprint_time: metrics.sprint_time || metrics.time || '',
-      sprint_time_unit: metrics.sprint_time_unit || 'seconds',
-      distance: metrics.distance || '',
-      distance_unit: metrics.distance_unit || metrics.unit || 'metres',
-    };
-  }
-  return {
-    weight: metrics.weight || '',
-    weight_unit: metrics.weight_unit || 'kg',
-    bar_velocity: metrics.bar_velocity || '',
-    bar_velocity_unit: metrics.bar_velocity_unit || 'm/s',
-  };
-}
-
-function updateExerciseSetMetrics(exercise, setIndex, key, value) {
-  const rows = Array.from({ length: exerciseSetCount(exercise) }, (_, index) => setMetricDraft(exercise, index));
-  const current = rows[setIndex] || setMetricDraft(exercise, setIndex);
-
-  if (key === 'performance_score') {
-    rows[setIndex] = { ...current, performance_score: value };
-  } else if (key === 'metric_type') {
-    rows[setIndex] = {
-      ...current,
-      metric_type: value,
-      metrics: metricDraftDefaults(value, current.metrics || {}),
-    };
-  } else {
-    rows[setIndex] = { ...current, metrics: { ...(current.metrics || {}), [key]: value } };
-  }
-
-  return { ...exercise, set_metrics: rows };
-}
-
 function todayPlannedSession(programme) {
   const today = isoDate();
   const blockSessions = plannedSessionsInCurrentBlock(programme);
-  const sessions = currentPlannedSessions(programme);
-  return blockSessions.find((session) => session.date === today) || sessions[0] || blockSessions[0] || {
+  return blockSessions.find((session) => session.date === today) || {
     id: 'empty_plan',
     session_name: 'No session planned',
-    focus: 'Create one in Programme',
+    focus: 'No planned session today. Create one in Calendar.',
     duration: '',
     exercises: [],
   };
@@ -612,6 +570,149 @@ function findPlannedSession(programme, sessionId) {
   return null;
 }
 
+function defaultMetricTypeForExercise(exercise = {}) {
+  if (exercise.movement_type === 'strength' || exercise.movement_type === 'power_ballistic') return 'lift';
+  if (exercise.movement_type === 'endurance' || exercise.movement_type === 'skill') return 'sprinting';
+  return 'jumping';
+}
+
+function emptyActualMetrics(metricType = 'jumping', metrics = {}) {
+  return {
+    ft: metrics.ft || '',
+    ft_unit: metrics.ft_unit || 'seconds',
+    gct: metrics.gct || '',
+    gct_unit: metrics.gct_unit || 'seconds',
+    height_or_distance: metrics.height_or_distance || '',
+    height_or_distance_unit: metrics.height_or_distance_unit || metrics.unit || 'cm',
+    sprint_time: metrics.sprint_time || metrics.time || '',
+    sprint_time_unit: metrics.sprint_time_unit || 'seconds',
+    distance: metrics.distance || '',
+    distance_unit: metrics.distance_unit || metrics.unit || 'metres',
+    weight: metrics.weight || '',
+    weight_unit: metrics.weight_unit || 'kg',
+    bar_velocity: metrics.bar_velocity || '',
+    bar_velocity_unit: metrics.bar_velocity_unit || 'm/s',
+  };
+}
+
+function plannedRepCount(exercise = {}) {
+  const reps = Math.round(toNumber(exercise.reps, 0));
+  const contacts = Math.round(toNumber(exercise.contacts, 0));
+  if (reps) return Math.max(1, reps);
+  if (contacts) return Math.max(1, Math.ceil(contacts / exerciseSetCount(exercise)));
+  return 1;
+}
+
+function plannedAttemptRows(exercise = {}) {
+  const sets = exerciseSetCount(exercise);
+  const reps = plannedRepCount(exercise);
+  const existing = exercise.actual_metrics || [];
+  const defaultType = defaultMetricTypeForExercise(exercise);
+  const rows = [];
+
+  for (let setNumber = 1; setNumber <= sets; setNumber += 1) {
+    for (let repNumber = 1; repNumber <= reps; repNumber += 1) {
+      const saved = existing.find((attempt) => Number(attempt.set_number) === setNumber && Number(attempt.rep_number) === repNumber);
+      rows.push({
+        id: saved?.id || createId('attempt'),
+        set_number: setNumber,
+        rep_number: repNumber,
+        metric_type: saved?.metric_type || defaultType,
+        metrics: emptyActualMetrics(saved?.metric_type || defaultType, saved?.metrics || {}),
+      });
+    }
+  }
+
+  return rows;
+}
+
+function normaliseTimeClient(value, unit) {
+  const numeric = storedNumber(value);
+  if (!Number.isFinite(numeric)) return null;
+  return ['milliseconds', 'millisecond', 'ms'].includes(String(unit || '').toLowerCase()) ? numeric / 1000 : numeric;
+}
+
+function normaliseDistanceClient(value, unit) {
+  const numeric = storedNumber(value);
+  if (!Number.isFinite(numeric)) return null;
+  const baseUnit = String(unit || 'cm').toLowerCase();
+  if (['inches', 'inch', 'in'].includes(baseUnit)) return numeric * 2.54;
+  if (['metres', 'metre', 'meters', 'meter', 'm'].includes(baseUnit)) return numeric * 100;
+  return numeric;
+}
+
+function actualMetricValue(attempt = {}, metric) {
+  const metrics = attempt.metrics || {};
+  if (metric === 'rsi') {
+    const ft = normaliseTimeClient(metrics.ft, metrics.ft_unit);
+    const gct = normaliseTimeClient(metrics.gct, metrics.gct_unit);
+    return Number.isFinite(ft) && Number.isFinite(gct) && ft > 0 && gct > 0 ? ft / gct : null;
+  }
+  if (metric === 'ft' || metric === 'gct' || metric === 'sprint_time') {
+    return normaliseTimeClient(metrics[metric], metrics[`${metric}_unit`]);
+  }
+  if (metric === 'height_or_distance') return normaliseDistanceClient(metrics.height_or_distance, metrics.height_or_distance_unit);
+  return storedNumber(metrics[metric]);
+}
+
+function bestModeForMetric(metric) {
+  return ['gct', 'sprint_time'].includes(metric) ? 'min' : 'max';
+}
+
+function summariseMetricAttempts(attempts = [], metric) {
+  const rows = attempts
+    .map((attempt) => ({ attempt, value: actualMetricValue(attempt, metric) }))
+    .filter((row) => Number.isFinite(row.value));
+  if (!rows.length) return null;
+  const values = rows.map((row) => row.value);
+  const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const best = bestModeForMetric(metric) === 'min' ? Math.min(...values) : Math.max(...values);
+  const sd = values.length >= 2
+    ? Math.sqrt(values.reduce((sum, value) => sum + (value - average) ** 2, 0) / (values.length - 1))
+    : null;
+  return {
+    average,
+    peak: best,
+    best,
+    sd,
+    consistency: sd === null ? null : Math.max(0, 100 - (sd / Math.max(Math.abs(average), 1)) * 100),
+    n: values.length,
+    best_attempt: rows.find((row) => row.value === best)?.attempt || null,
+  };
+}
+
+function buildSessionAnalysis(session = {}, analysis = {}) {
+  const metricKeys = ['rsi', 'ft', 'gct', 'height_or_distance', 'sprint_time', 'distance', 'weight', 'bar_velocity'];
+  const exercises = session.exercises || [];
+  const allAttempts = exercises.flatMap((exercise) =>
+    (exercise.actual_metrics || []).map((attempt) => ({
+      ...attempt,
+      exercise_id: exercise.id,
+      exercise_name: exercise.exercise_name,
+    }))
+  );
+  const sessionMetrics = Object.fromEntries(metricKeys.map((metric) => [metric, summariseMetricAttempts(allAttempts, metric)]).filter(([, value]) => value));
+  const exerciseSummaries = exercises.map((exercise) => {
+    const attempts = exercise.actual_metrics || [];
+    const metrics = Object.fromEntries(metricKeys.map((metric) => [metric, summariseMetricAttempts(attempts, metric)]).filter(([, value]) => value));
+    const bestMetric = Object.entries(metrics)[0] || null;
+    return {
+      exercise,
+      metrics,
+      best_attempt: bestMetric?.[1]?.best_attempt || null,
+    };
+  });
+  const comparisonKeys = ['load', 'fatigue', 'readiness', 'pain', 'pain_delta'];
+  const sessionDate = session.date || isoDate();
+  const closestRow = (analysis.rows || []).find((row) => String(row.date || '').slice(0, 10) === sessionDate) || analysis.latest || {};
+  return {
+    sessionMetrics,
+    exerciseSummaries,
+    attempts: allAttempts,
+    comparisons: Object.fromEntries(comparisonKeys.map((key) => [key, closestRow?.[key]]).filter(([, value]) => Number.isFinite(value))),
+  };
+}
+
 function orderedRows(analysis) {
   return [...(analysis.rows || [])].sort((a, b) => new Date(a.date) - new Date(b.date));
 }
@@ -625,6 +726,29 @@ function metricPointSource(point) {
 }
 
 function fallbackMetricPoints(data, key) {
+  const loggedSessions = allPlannedSessions(data?.programme);
+  const sessionPerformancePoints = key === 'performance'
+    ? loggedSessions.map((session) => ({
+      id: `${session.id}-performance-score`,
+      date: session.date || session.session_datetime,
+      value: storedNumber(session.performance_score),
+      source: session.session_name || 'performance log',
+    }))
+    : [];
+  const actualMetricPoints = loggedSessions.flatMap((session) =>
+    (session.exercises || []).flatMap((exercise) =>
+      (exercise.actual_metrics || []).map((attempt) => ({
+        id: `${session.id}-${exercise.id}-${attempt.id}-${key}`,
+        date: session.date || session.session_datetime,
+        value: key === 'performance' ? storedNumber(session.performance_score) : actualMetricValue(attempt, key),
+        source: [session.session_name, exercise.exercise_name].filter(Boolean).join(' / ') || 'performance log',
+      }))
+    )
+  );
+  const actualPoints = [...sessionPerformancePoints, ...actualMetricPoints].filter((point) => Number.isFinite(point.value));
+
+  if (actualPoints.length) return actualPoints;
+
   const checkInPoints = (data?.checkIns || []).map((checkIn) => {
     let value = null;
     if (key === 'performance') value = storedNumber(checkIn.performance_score);
@@ -641,7 +765,7 @@ function fallbackMetricPoints(data, key) {
     };
   });
 
-  const setMetricPoints = (data?.sessions || []).flatMap((session) =>
+  const legacySetMetricPoints = (data?.sessions || []).flatMap((session) =>
     (session.exercises || []).flatMap((exercise) =>
       (exercise.set_metrics || []).map((setMetric, index) => {
         const metrics = setMetric.metrics || {};
@@ -665,7 +789,7 @@ function fallbackMetricPoints(data, key) {
     )
   );
 
-  return [...checkInPoints, ...setMetricPoints].filter((point) => Number.isFinite(point.value));
+  return [...checkInPoints, ...legacySetMetricPoints].filter((point) => Number.isFinite(point.value));
 }
 
 function bestMetricPoint(points, mode) {
@@ -1246,17 +1370,14 @@ export default function App() {
 
   function saveCheckIn() {
     const checkIn = {
-      ...data.checkInDraft,
       id: createId('checkin'),
       check_in_datetime: new Date().toISOString(),
       linked_session_id: data.activeSession.id,
-      gct_unit: data.checkInDraft.gct_unit || 'seconds',
-      ft_unit: data.checkInDraft.ft_unit || 'seconds',
-      height_or_distance_unit: data.checkInDraft.height_or_distance_unit || 'cm',
-      sprint_time_unit: data.checkInDraft.sprint_time_unit || 'seconds',
-      distance_unit: data.checkInDraft.distance_unit || 'metres',
-      weight_unit: data.checkInDraft.weight_unit || 'kg',
-      bar_velocity_unit: data.checkInDraft.bar_velocity_unit || 'm/s',
+      pain_score: data.checkInDraft.pain_score,
+      pain_location: data.checkInDraft.pain_location,
+      freshness_score: data.checkInDraft.freshness_score,
+      soreness_score: data.checkInDraft.soreness_score,
+      performance_score: data.checkInDraft.performance_score,
     };
     setLastSavedCheckInId(checkIn.id);
     setData((current) => ({ ...current, checkIns: [checkIn, ...current.checkIns] }));
@@ -1293,12 +1414,27 @@ export default function App() {
     setScreen('review');
   }
 
-  function startTodayTraining() {
+  function openPerformanceLog(sessionId, returnDate = selectedCalendarDate) {
+    setSelectedPlannedSessionId(sessionId);
+    if (returnDate) setSelectedCalendarDate(returnDate);
+    setScreen('performanceLog');
+  }
+
+  function openSessionAnalysis(sessionId, returnDate = selectedCalendarDate) {
+    setSelectedPlannedSessionId(sessionId);
+    if (returnDate) setSelectedCalendarDate(returnDate);
+    setScreen('sessionAnalysis');
+  }
+
+  function startTodayPerformance() {
     const planned = todayPlannedSession(data.programme);
-    if (planned.id !== 'empty_plan') {
-      setData((current) => ({ ...current, activeSession: mapPlannedToActiveSession(planned) }));
+    if (planned.id === 'empty_plan') {
+      Alert.alert('No planned session today', 'No planned session today. Create one in Calendar.');
+      setSelectedCalendarDate(isoDate());
+      setScreen('calendar');
+      return;
     }
-    setScreen('session');
+    openPerformanceLog(planned.id, planned.date || isoDate());
   }
 
   function clearAll() {
@@ -1430,7 +1566,7 @@ export default function App() {
         <View style={styles.appShell}>
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
             {screen === 'today' && (
-              <TodayScreen data={data} analysis={analysis} setScreen={setScreen} startTodayTraining={startTodayTraining} />
+              <TodayScreen data={data} analysis={analysis} setScreen={setScreen} startTodayPerformance={startTodayPerformance} />
             )}
             {screen === 'checkin' && (
               <CheckInScreen
@@ -1448,7 +1584,7 @@ export default function App() {
                 expectedCheckInId={lastSavedCheckInId}
                 analysisLoading={analysisLoading}
                 setScreen={setScreen}
-                startTodayTraining={startTodayTraining}
+                startTodayPerformance={startTodayPerformance}
               />
             )}
             {screen === 'session' && (
@@ -1468,6 +1604,8 @@ export default function App() {
                 setSelectedDate={setSelectedCalendarDate}
                 setSelectedPlannedSessionId={setSelectedPlannedSessionId}
                 setPlannedSessionReturnScreen={setPlannedSessionReturnScreen}
+                openPerformanceLog={openPerformanceLog}
+                openSessionAnalysis={openSessionAnalysis}
                 setScreen={setScreen}
                 tutorialSeen={data.profile?.tutorialFlags?.programme_seen}
                 onDismissTutorial={() => dismissTutorial('programme_seen')}
@@ -1490,6 +1628,8 @@ export default function App() {
                 setSelectedDate={setSelectedCalendarDate}
                 setSelectedPlannedSessionId={setSelectedPlannedSessionId}
                 setPlannedSessionReturnScreen={setPlannedSessionReturnScreen}
+                openPerformanceLog={openPerformanceLog}
+                openSessionAnalysis={openSessionAnalysis}
                 setScreen={setScreen}
               />
             )}
@@ -1499,6 +1639,22 @@ export default function App() {
                 setData={setData}
                 sessionId={selectedPlannedSessionId}
                 returnScreen={plannedSessionReturnScreen}
+                setScreen={setScreen}
+              />
+            )}
+            {screen === 'performanceLog' && (
+              <PerformanceLogScreen
+                data={data}
+                setData={setData}
+                sessionId={selectedPlannedSessionId}
+                setScreen={setScreen}
+              />
+            )}
+            {screen === 'sessionAnalysis' && (
+              <SessionAnalysisScreen
+                data={data}
+                analysis={analysis}
+                sessionId={selectedPlannedSessionId}
                 setScreen={setScreen}
               />
             )}
@@ -1556,8 +1712,9 @@ export default function App() {
   );
 }
 
-function TodayScreen({ data, analysis, setScreen, startTodayTraining }) {
+function TodayScreen({ data, analysis, setScreen, startTodayPerformance }) {
   const planned = todayPlannedSession(data.programme);
+  const hasPlannedSession = planned.id !== 'empty_plan';
   const last = analysis.strongest;
   const displayName = String(data.profile?.name || '').trim();
   return (
@@ -1577,6 +1734,7 @@ function TodayScreen({ data, analysis, setScreen, startTodayTraining }) {
           <View>
             <Text style={styles.cardTitle}>{planned.session_name}</Text>
             {planned.focus ? <Text style={styles.muted}>{planned.focus}</Text> : null}
+            {hasPlannedSession ? <Text style={styles.calendarMetaText}>{exercisePrescriptionSummary(planned)}</Text> : null}
           </View>
         </View>
       </View>
@@ -1590,7 +1748,7 @@ function TodayScreen({ data, analysis, setScreen, startTodayTraining }) {
 
       <View style={styles.twoCol}>
         <ActionButton title="Log Check-in" tone="green" onPress={() => setScreen('checkin')} />
-        <ActionButton title="Log Training" tone="black" onPress={startTodayTraining} />
+        <ActionButton title={hasPlannedSession ? 'Log Performance' : 'Create in Calendar'} tone="black" onPress={hasPlannedSession ? startTodayPerformance : () => setScreen('calendar')} />
       </View>
       <ActionButton title="View Insights" tone="outline" onPress={() => setScreen('insights')} />
     </View>
@@ -1686,7 +1844,7 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSee
       <TutorialHint
         visible={!tutorialSeen}
         title="Check-in response state"
-        body="Check-ins capture today’s response state: pain, freshness, soreness, and optional performance metrics."
+        body="Check-ins capture today’s response state: pain, freshness, soreness, and an optional whole-session performance score. Rep-level outputs live in Performance Log."
         onDismiss={onDismissTutorial}
       />
       <FormSection number="1." title="Pain">
@@ -1697,78 +1855,16 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSee
         <SliderField label="Freshness (0-10)" value={draft.freshness_score} onChange={(value) => updateDraft('freshness_score', value)} />
         <SliderField label="Soreness (0-10)" value={draft.soreness_score} onChange={(value) => updateDraft('soreness_score', value)} />
       </FormSection>
-      <FormSection number="3." title="Performance">
-        <SliderField label="Performance Score (0-10)" value={draft.performance_score} onChange={(value) => updateDraft('performance_score', value)} />
-        <ChipWrap
-          options={[
-            ['jumping', 'Jumping'],
-            ['running_sprinting', 'Sprint'],
-            ['lift', 'Lift'],
-          ]}
-          value={draft.performance_type}
-          onChange={(value) => updateDraft('performance_type', value)}
-        />
-        {draft.performance_type === 'jumping' && (
-          <>
-            <View style={styles.twoCol}>
-              <Input label="GCT" value={draft.gct} onChangeText={(value) => updateDraft('gct', value)} />
-              <View style={styles.inputWrap}>
-                <Text style={styles.inputLabel}>GCT unit</Text>
-                <ChipWrap options={gctFtUnitOptions} value={draft.gct_unit || 'seconds'} onChange={(value) => updateDraft('gct_unit', value)} />
-              </View>
-            </View>
-            <View style={styles.twoCol}>
-              <Input label="FT" value={draft.ft} onChangeText={(value) => updateDraft('ft', value)} />
-              <View style={styles.inputWrap}>
-                <Text style={styles.inputLabel}>FT unit</Text>
-                <ChipWrap options={gctFtUnitOptions} value={draft.ft_unit || 'seconds'} onChange={(value) => updateDraft('ft_unit', value)} />
-              </View>
-            </View>
-            <View style={styles.twoCol}>
-              <Input label="Height / Distance" value={draft.height_or_distance} onChangeText={(value) => updateDraft('height_or_distance', value)} />
-              <View style={styles.inputWrap}>
-                <Text style={styles.inputLabel}>Jump unit</Text>
-                <ChipWrap options={jumpDistanceUnitOptions} value={draft.height_or_distance_unit || 'cm'} onChange={(value) => updateDraft('height_or_distance_unit', value)} />
-              </View>
-            </View>
-          </>
-        )}
-        {draft.performance_type === 'running_sprinting' && (
-          <>
-            <Input label="Time (seconds)" value={draft.sprint_time} onChangeText={(value) => updateDraft('sprint_time', value)} />
-            <View style={styles.twoCol}>
-              <Input label="Distance" value={draft.distance} onChangeText={(value) => updateDraft('distance', value)} />
-              <View style={styles.inputWrap}>
-                <Text style={styles.inputLabel}>Distance unit</Text>
-                <ChipWrap options={sprintDistanceUnitOptions} value={draft.distance_unit || 'metres'} onChange={(value) => updateDraft('distance_unit', value)} />
-              </View>
-            </View>
-          </>
-        )}
-        {draft.performance_type === 'lift' && (
-          <>
-            <Input label="Lift" value={draft.lift_name} onChangeText={(value) => updateDraft('lift_name', value)} />
-            <View style={styles.twoCol}>
-              <Input label="Weight" value={draft.weight} onChangeText={(value) => updateDraft('weight', value)} />
-              <View style={styles.inputWrap}>
-                <Text style={styles.inputLabel}>Weight unit</Text>
-                <ChipWrap options={weightUnitOptions} value={draft.weight_unit || 'kg'} onChange={(value) => updateDraft('weight_unit', value)} />
-              </View>
-            </View>
-            <View style={styles.twoCol}>
-              <Input label="Sets" value={draft.sets} onChangeText={(value) => updateDraft('sets', value)} />
-              <Input label="Reps" value={draft.reps} onChangeText={(value) => updateDraft('reps', value)} />
-            </View>
-            <Input label="Bar Velocity (m/s)" value={draft.bar_velocity} onChangeText={(value) => updateDraft('bar_velocity', value)} />
-          </>
-        )}
+      <FormSection number="3." title="Subjective performance">
+        <SliderField label="Whole-session performance score (0-10)" value={draft.performance_score} onChange={(value) => updateDraft('performance_score', value)} />
+        <Text style={styles.smallCopy}>Optional. Detailed attempt metrics are logged from the planned session in Performance Log.</Text>
       </FormSection>
       <ActionButton title="Save Check-in" tone="black" onPress={saveCheckIn} />
     </View>
   );
 }
 
-function CheckInReviewScreen({ analysis, expectedCheckInId, analysisLoading, setScreen, startTodayTraining }) {
+function CheckInReviewScreen({ analysis, expectedCheckInId, analysisLoading, setScreen, startTodayPerformance }) {
   const review = analysis?.checkInReview;
   const isCurrent = review?.checkInId && (!expectedCheckInId || review.checkInId === expectedCheckInId);
 
@@ -1788,7 +1884,7 @@ function CheckInReviewScreen({ analysis, expectedCheckInId, analysisLoading, set
           <Text style={styles.bodyText}>analysis updating.</Text>
         </View>
         <View style={styles.twoCol}>
-          <ActionButton title="Log Training" tone="black" onPress={startTodayTraining} />
+          <ActionButton title="Log Performance" tone="black" onPress={startTodayPerformance} />
           <ActionButton title="View Insights" tone="outline" onPress={() => setScreen('insights')} />
         </View>
         <ActionButton title="Back to Today" tone="outline" onPress={() => setScreen('today')} />
@@ -1801,7 +1897,7 @@ function CheckInReviewScreen({ analysis, expectedCheckInId, analysisLoading, set
       <Header title="Check-in Review" subtitle={todayLabel()} onBack={() => setScreen('today')} />
       <CheckInReviewSnapshot review={review} />
       <View style={styles.twoCol}>
-        <ActionButton title="Log Training" tone="black" onPress={startTodayTraining} />
+        <ActionButton title="Log Performance" tone="black" onPress={startTodayPerformance} />
         <ActionButton title="View Insights" tone="outline" onPress={() => setScreen('insights')} />
       </View>
       <ActionButton title="Back to Today" tone="outline" onPress={() => setScreen('today')} />
@@ -2139,7 +2235,6 @@ function ReviewLineSvg({ series, height = 150, compact = false }) {
 
 function SessionScreen({ data, analysis, setData, updateSession, setScreen, finishSession }) {
   const load = analysis?.activeSessionLoad;
-  const [expandedExerciseMetricId, setExpandedExerciseMetricId] = useState(null);
 
   function updateExercise(exerciseId, key, value) {
     setData((current) => ({
@@ -2163,18 +2258,6 @@ function SessionScreen({ data, analysis, setData, updateSession, setScreen, fini
     }));
   }
 
-  function updateExerciseSetMetric(exerciseId, setIndex, key, value) {
-    setData((current) => ({
-      ...current,
-      activeSession: {
-        ...current.activeSession,
-        exercises: current.activeSession.exercises.map((exercise) =>
-          exercise.id === exerciseId ? updateExerciseSetMetrics(exercise, setIndex, key, value) : exercise
-        ),
-      },
-    }));
-  }
-
   return (
     <View style={styles.screen}>
       <Header title="Training Session" onBack={() => setScreen('today')} right="check" onRight={finishSession} />
@@ -2186,18 +2269,6 @@ function SessionScreen({ data, analysis, setData, updateSession, setScreen, fini
             <View style={styles.exerciseEdit}>
               <Input label="Exercise" value={exercise.exercise_name} onChangeText={(value) => updateExercise(exercise.id, 'exercise_name', value)} />
             <Text style={styles.muted}>{exercise.movement_type.replace('_', ' ')} / {exercisePrescription(exercise)}</Text>
-            <MetricToggle
-              expanded={expandedExerciseMetricId === exercise.id}
-              onPress={() => setExpandedExerciseMetricId(expandedExerciseMetricId === exercise.id ? null : exercise.id)}
-            />
-            {expandedExerciseMetricId === exercise.id ? (
-              <View style={styles.metricsReveal}>
-                <SetMetricFields
-                  exercise={exercise}
-                  onChangeSetMetric={(setIndex, key, value) => updateExerciseSetMetric(exercise.id, setIndex, key, value)}
-                />
-              </View>
-            ) : null}
           </View>
           <Pressable style={styles.deleteButton} onPress={() => removeExercise(exercise.id)}>
             <Text style={styles.deleteButtonText}>Delete</Text>
@@ -2290,6 +2361,8 @@ function CalendarScreen({
   setSelectedDate,
   setSelectedPlannedSessionId,
   setPlannedSessionReturnScreen,
+  openPerformanceLog,
+  openSessionAnalysis,
   setScreen,
   tutorialSeen,
   onDismissTutorial,
@@ -2306,7 +2379,6 @@ function CalendarScreen({
   const yearMonths = monthsInYear(selectedDate);
   const todayIso = isoDate();
   const todayTitle = new Date(`${todayIso}T00:00:00`).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
-  const [expandedMetricExerciseId, setExpandedMetricExerciseId] = useState(null);
 
   useEffect(() => {
     setSelectedDate(isoDate());
@@ -2365,16 +2437,6 @@ function CalendarScreen({
       if (!target) return;
       target.exercises = (target.exercises || []).map((exercise) =>
         exercise.id === exerciseId ? { ...exercise, [key]: value } : exercise
-      );
-    });
-  }
-
-  function updatePlannedExerciseSetMetric(sessionId, exerciseId, setIndex, key, value) {
-    commitProgramme((draft) => {
-      const target = findPlannedSession(draft, sessionId)?.session;
-      if (!target) return;
-      target.exercises = (target.exercises || []).map((exercise) =>
-        exercise.id === exerciseId ? updateExerciseSetMetrics(exercise, setIndex, key, value) : exercise
       );
     });
   }
@@ -2505,14 +2567,17 @@ function CalendarScreen({
                   </Pressable>
                 </View>
                 <Text style={styles.calendarMetaText}>{session.week_name ? `${session.week_name} / ` : ''}{session.focus} / {session.duration}</Text>
+                <View style={styles.twoCol}>
+                  <ActionButton title="Log Performance" tone="black" onPress={() => openPerformanceLog(session.id, session.date || selectedDate)} />
+                  <ActionButton title="Analyse Session" tone="outline" onPress={() => openSessionAnalysis(session.id, session.date || selectedDate)} />
+                </View>
                 <Text style={styles.label}>Exercises</Text>
                 {(session.exercises || []).length === 0 ? (
                   <Text style={styles.calendarMetaText}>No exercises added yet.</Text>
                 ) : (
                   (session.exercises || []).map((exercise, index) => {
-                    const exerciseMetricKey = `${session.id}:${exercise.id}`;
                     return (
-                      <View key={exerciseMetricKey} style={styles.exerciseMetricCard}>
+                      <View key={`${session.id}:${exercise.id}`} style={styles.exerciseMetricCard}>
                         <View style={styles.exerciseBulletRow}>
                           <View style={styles.exerciseNameWithOrder}>
                             <View style={styles.orderBadge}><Text style={styles.orderBadgeText}>{exercise.order || index + 1}</Text></View>
@@ -2521,18 +2586,6 @@ function CalendarScreen({
                           <Text style={styles.calendarMetaText}>{exercise.movement_type.replace('_', ' ')}</Text>
                         </View>
                         <Text style={styles.exercisePrescription}>{exercisePrescription(exercise)}</Text>
-                        <MetricToggle
-                          expanded={expandedMetricExerciseId === exerciseMetricKey}
-                          onPress={() => setExpandedMetricExerciseId(expandedMetricExerciseId === exerciseMetricKey ? null : exerciseMetricKey)}
-                        />
-                        {expandedMetricExerciseId === exerciseMetricKey ? (
-                          <View style={styles.metricsReveal}>
-                            <SetMetricFields
-                              exercise={exercise}
-                              onChangeSetMetric={(setIndex, key, value) => updatePlannedExerciseSetMetric(session.id, exercise.id, setIndex, key, value)}
-                            />
-                          </View>
-                        ) : null}
                       </View>
                     );
                   })
@@ -2878,6 +2931,8 @@ function EditBlockCalendarScreen({
   setSelectedDate,
   setSelectedPlannedSessionId,
   setPlannedSessionReturnScreen,
+  openPerformanceLog,
+  openSessionAnalysis,
   setScreen,
 }) {
   const [newSession, setNewSession] = useState({ session_name: '', focus: '', duration: '', date: selectedDate || isoDate() });
@@ -3201,6 +3256,8 @@ function EditBlockCalendarScreen({
             <Text style={styles.muted}>{session.date} / {session.focus} / {session.duration}</Text>
           </Pressable>
           <View style={styles.programmeActions}>
+            <Pressable style={[styles.miniButton, styles.miniButtonDark]} onPress={() => openPerformanceLog(session.id, session.date || selectedDate)}><Text style={[styles.miniButtonText, styles.miniButtonTextLight]}>Log Performance</Text></Pressable>
+            <Pressable style={styles.miniButton} onPress={() => openSessionAnalysis(session.id, session.date || selectedDate)}><Text style={styles.miniButtonText}>Analyse Session</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => updatePlannedSession(session.id, 'date', selectedDate)}><Text style={styles.miniButtonText}>To Day</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => copySession(session)}><Text style={styles.miniButtonText}>Copy</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => duplicateSession(session)}><Text style={styles.miniButtonText}>Dup</Text></Pressable>
@@ -3252,7 +3309,6 @@ function EditBlockCalendarScreen({
 
 function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'editBlockCalendar', setScreen }) {
   const [draftExercise, setDraftExercise] = useState(emptyExercise);
-  const [expandedExerciseMetricId, setExpandedExerciseMetricId] = useState(null);
   const found = findPlannedSession(data.programme, sessionId);
   const session = found?.session;
 
@@ -3277,16 +3333,6 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
       if (!target) return;
       target.exercises = (target.exercises || []).map((exercise) =>
         exercise.id === exerciseId ? { ...exercise, [key]: value } : exercise
-      );
-    });
-  }
-
-  function updateExerciseSetMetric(exerciseId, setIndex, key, value) {
-    commitProgramme((draft) => {
-      const target = findPlannedSession(draft, sessionId)?.session;
-      if (!target) return;
-      target.exercises = (target.exercises || []).map((exercise) =>
-        exercise.id === exerciseId ? updateExerciseSetMetrics(exercise, setIndex, key, value) : exercise
       );
     });
   }
@@ -3318,12 +3364,6 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
     setDraftExercise({ ...emptyExercise, movement_type: draftExercise.movement_type });
   }
 
-  function loadIntoTraining() {
-    if (!session) return;
-    setData((current) => ({ ...current, activeSession: mapPlannedToActiveSession(session) }));
-    setScreen('session');
-  }
-
   if (!session) {
     return (
       <View style={styles.screen}>
@@ -3337,7 +3377,7 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
 
   return (
     <View style={styles.screen}>
-      <Header title="Edit Training Session" onBack={() => setScreen(returnScreen)} right="check" onRight={loadIntoTraining} />
+      <Header title="Edit Training Session" onBack={() => setScreen(returnScreen)} />
       <Input label="Session Name" value={session.session_name} onChangeText={(value) => updateSessionField('session_name', value)} />
       <View style={styles.twoCol}>
         <Input label="Date" value={session.date} onChangeText={() => {}} editable={false} />
@@ -3360,18 +3400,6 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
               />
               <ExerciseFields draft={exercise} update={(key, value) => updateExercise(exercise.id, key, value)} />
               <Text style={styles.muted}>{exercisePrescription(exercise)}</Text>
-              <MetricToggle
-                expanded={expandedExerciseMetricId === exercise.id}
-                onPress={() => setExpandedExerciseMetricId(expandedExerciseMetricId === exercise.id ? null : exercise.id)}
-              />
-              {expandedExerciseMetricId === exercise.id ? (
-                <View style={styles.metricsReveal}>
-                  <SetMetricFields
-                    exercise={exercise}
-                    onChangeSetMetric={(setIndex, key, value) => updateExerciseSetMetric(exercise.id, setIndex, key, value)}
-                  />
-                </View>
-              ) : null}
             </View>
             <Pressable style={styles.deleteButton} onPress={() => deleteExercise(exercise.id)}>
               <Text style={styles.deleteButtonText}>Delete</Text>
@@ -3397,6 +3425,227 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
           onChangeText={(value) => updateSessionField('notes', value)}
           placeholder="Notes for this planned session"
         />
+      </View>
+    </View>
+  );
+}
+
+function PerformanceLogScreen({ data, setData, sessionId, setScreen }) {
+  const found = findPlannedSession(data.programme, sessionId);
+  const session = found?.session;
+
+  function commitProgramme(updater) {
+    setData((current) => {
+      const nextProgramme = JSON.parse(JSON.stringify(current.programme));
+      updater(nextProgramme);
+      return { ...current, programme: nextProgramme };
+    });
+  }
+
+  function updateSessionPerformanceField(key, value) {
+    commitProgramme((draft) => {
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (target) target[key] = value;
+    });
+  }
+
+  function updateAttempt(exerciseId, attemptId, key, value) {
+    commitProgramme((draft) => {
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (!target) return;
+      target.exercises = (target.exercises || []).map((exercise) => {
+        if (exercise.id !== exerciseId) return exercise;
+        const rows = plannedAttemptRows(exercise);
+        const nextRows = rows.map((attempt) => {
+          if (attempt.id !== attemptId) return attempt;
+          if (key === 'metric_type') {
+            return {
+              ...attempt,
+              metric_type: value,
+              metrics: emptyActualMetrics(value, attempt.metrics || {}),
+            };
+          }
+          return {
+            ...attempt,
+            metrics: {
+              ...(attempt.metrics || {}),
+              [key]: value,
+            },
+          };
+        });
+        return { ...exercise, actual_metrics: nextRows };
+      });
+    });
+  }
+
+  function saveAndAnalyse() {
+    updateSessionPerformanceField('performance_logged_at', new Date().toISOString());
+    setScreen('sessionAnalysis');
+  }
+
+  if (!session) {
+    return (
+      <View style={styles.screen}>
+        <Header title="Log Performance" onBack={() => setScreen('calendar')} />
+        <Text style={styles.bodyText}>No planned session today. Create one in Calendar.</Text>
+        <ActionButton title="Open Calendar" tone="black" onPress={() => setScreen('calendar')} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.screen}>
+      <Header title="Log Performance" subtitle={session.session_name || session.date} onBack={() => setScreen('calendar')} />
+      <View style={styles.card}>
+        <Text style={styles.label}>Planned session</Text>
+        <Text style={styles.sectionTitle}>{session.session_name || 'Untitled session'}</Text>
+        <Text style={styles.muted}>{session.date} / {session.focus || 'No focus'} / {session.duration || 'No duration'}</Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Whole-session outputs</Text>
+        <SliderField
+          label="Performance score (0-10)"
+          value={session.performance_score ?? 0}
+          onChange={(value) => updateSessionPerformanceField('performance_score', value)}
+        />
+        <TextInput
+          style={[styles.input, styles.noteInput]}
+          multiline
+          value={session.performance_notes || ''}
+          onChangeText={(value) => updateSessionPerformanceField('performance_notes', value)}
+          placeholder="Notes about actual performance"
+        />
+      </View>
+
+      {(session.exercises || []).length === 0 ? (
+        <View style={styles.card}>
+          <Text style={styles.bodyText}>No exercises are planned in this session yet.</Text>
+          <ActionButton title="Edit Session Structure" tone="outline" onPress={() => setScreen('editPlannedSession')} />
+        </View>
+      ) : null}
+
+      {(session.exercises || []).map((exercise, exerciseIndex) => {
+        const rows = plannedAttemptRows(exercise);
+        const sets = [...new Set(rows.map((row) => row.set_number))];
+        return (
+          <View key={exercise.id} style={styles.card}>
+            <View style={styles.exerciseBulletRow}>
+              <View style={styles.exerciseNameWithOrder}>
+                <View style={styles.orderBadge}><Text style={styles.orderBadgeText}>{exercise.order || exerciseIndex + 1}</Text></View>
+                <Text style={styles.exerciseNameText}>{exercise.exercise_name || 'Unnamed exercise'}</Text>
+              </View>
+              <Text style={styles.calendarMetaText}>{String(exercise.movement_type || '').replace('_', ' ')}</Text>
+            </View>
+            <Text style={styles.exercisePrescription}>{exercisePrescription(exercise)}</Text>
+            {sets.map((setNumber) => (
+              <View key={`${exercise.id}-set-${setNumber}`} style={styles.performanceSetCard}>
+                <Text style={styles.setMetricTitle}>Set {setNumber}</Text>
+                {rows.filter((row) => row.set_number === setNumber).map((attempt) => (
+                  <View key={attempt.id} style={styles.attemptCard}>
+                    <View style={styles.rowBetween}>
+                      <Text style={styles.cardTitle}>Rep {attempt.rep_number}</Text>
+                      <Text style={styles.muted}>Attempt metrics</Text>
+                    </View>
+                    <ChipWrap
+                      options={performanceMetricOptions}
+                      value={attempt.metric_type}
+                      onChange={(value) => updateAttempt(exercise.id, attempt.id, 'metric_type', value)}
+                    />
+                    <MetricInputs
+                      metricType={attempt.metric_type}
+                      metrics={attempt.metrics || {}}
+                      onChangeMetric={(key, value) => updateAttempt(exercise.id, attempt.id, key, value)}
+                    />
+                  </View>
+                ))}
+              </View>
+            ))}
+          </View>
+        );
+      })}
+
+      <ActionButton title="Analyse Session" tone="black" onPress={saveAndAnalyse} />
+    </View>
+  );
+}
+
+function SessionAnalysisScreen({ data, analysis, sessionId, setScreen }) {
+  const found = findPlannedSession(data.programme, sessionId);
+  const session = found?.session;
+
+  if (!session) {
+    return (
+      <View style={styles.screen}>
+        <Header title="Session Analysis" onBack={() => setScreen('calendar')} />
+        <Text style={styles.bodyText}>Session not found.</Text>
+      </View>
+    );
+  }
+
+  const result = buildSessionAnalysis(session, analysis);
+  const metricKeys = ['rsi', 'ft', 'gct', 'height_or_distance', 'sprint_time', 'distance', 'weight', 'bar_velocity'];
+  const sessionMetricRows = metricKeys.map((key) => [key, result.sessionMetrics[key]]).filter(([, summary]) => summary);
+  const bestSessionMetric = sessionMetricRows[0]?.[1] || null;
+  const chartSeries = ['rsi', 'gct', 'ft'].map((key) => ({
+    key,
+    label: formatMetricName(key),
+    color: dashboardMetricConfig(key).color,
+    points: result.attempts
+      .map((attempt, index) => ({ index, label: `A${index + 1}`, value: actualMetricValue(attempt, key) }))
+      .filter((point) => Number.isFinite(point.value)),
+  }));
+
+  return (
+    <View style={styles.screen}>
+      <Header title="Session Analysis" subtitle={session.session_name || session.date} onBack={() => setScreen('calendar')} />
+      <View style={styles.card}>
+        <Text style={styles.label}>Session peak metrics</Text>
+        {sessionMetricRows.length === 0 ? <Text style={styles.muted}>No actual performance metrics logged yet.</Text> : null}
+        {sessionMetricRows.map(([key, summary]) => (
+          <InsightLine key={`peak-${key}`} label={formatMetricName(key)} value={`Peak ${pretty(summary.peak, 2)} / Avg ${pretty(summary.average, 2)}`} />
+        ))}
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Best attempt</Text>
+        {bestSessionMetric?.best_attempt ? (
+          <Text style={styles.bodyText}>
+            Set {bestSessionMetric.best_attempt.set_number}, rep {bestSessionMetric.best_attempt.rep_number}
+            {' '}({bestSessionMetric.best_attempt.exercise_name || 'exercise'}) was the clearest best attempt.
+          </Text>
+        ) : (
+          <Text style={styles.muted}>Best attempt is collecting.</Text>
+        )}
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>RSI, GCT, FT Across Attempts</Text>
+        <AttemptMetricChart series={chartSeries} />
+      </View>
+
+      {(result.exerciseSummaries || []).map(({ exercise, metrics, best_attempt }) => (
+        <View key={`analysis-${exercise.id}`} style={styles.card}>
+          <Text style={styles.label}>Exercise summary</Text>
+          <Text style={styles.sectionTitle}>{exercise.exercise_name || 'Unnamed exercise'}</Text>
+          {Object.keys(metrics).length === 0 ? <Text style={styles.muted}>No actual metrics logged for this exercise.</Text> : null}
+          {Object.entries(metrics).map(([key, summary]) => (
+            <View key={`${exercise.id}-${key}`} style={styles.analysisSubcard}>
+              <Text style={styles.cardTitle}>{formatMetricName(key)}</Text>
+              <Text style={styles.muted}>Average {pretty(summary.average, 2)} / Peak {pretty(summary.peak, 2)}</Text>
+              <Text style={styles.smallCopy}>n={summary.n} / SD {summary.sd === null ? '-' : pretty(summary.sd, 2)} / Consistency {summary.consistency === null ? '-' : `${pretty(summary.consistency, 1)}%`}</Text>
+            </View>
+          ))}
+          {best_attempt ? <Text style={styles.smallCopy}>Best attempt: set {best_attempt.set_number}, rep {best_attempt.rep_number}</Text> : null}
+        </View>
+      ))}
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Context comparison</Text>
+        {Object.keys(result.comparisons).length === 0 ? <Text style={styles.muted}>Load, fatigue, readiness, pain, and irritation context is collecting.</Text> : null}
+        {Object.entries(result.comparisons).map(([key, value]) => (
+          <InsightLine key={`comparison-${key}`} label={formatMetricName(key)} value={pretty(value, 1)} />
+        ))}
       </View>
     </View>
   );
@@ -5073,37 +5322,9 @@ function DateRangePickerCard({ title, startDate, endDate, onSave, onCancel }) {
   );
 }
 
-function SetMetricFields({ exercise, onChangeSetMetric }) {
-  const rows = Array.from({ length: exerciseSetCount(exercise) }, (_, index) => setMetricDraft(exercise, index));
-
-  return (
-    <View style={styles.setMetricsList}>
-      {rows.map((row, index) => (
-        <View key={`${exercise.id}-set-${index}`} style={styles.setMetricCard}>
-          <Text style={styles.setMetricTitle}>Set {index + 1}</Text>
-          <SliderField
-            label="Performance Score (0-10)"
-            value={row.performance_score}
-            onChange={(value) => onChangeSetMetric(index, 'performance_score', value)}
-          />
-          <ChipWrap
-            options={performanceMetricOptions}
-            value={row.metric_type}
-            onChange={(value) => onChangeSetMetric(index, 'metric_type', value)}
-          />
-          <MetricInputs
-            metricType={row.metric_type}
-            metrics={row.metrics || {}}
-            onChangeMetric={(key, value) => onChangeSetMetric(index, key, value)}
-          />
-        </View>
-      ))}
-    </View>
-  );
-}
-
 function MetricInputs({ metricType, metrics, onChangeMetric }) {
-  if (metricType === 'jump_output') {
+  if (metricType === 'jumping' || metricType === 'jump_output' || metricType === 'jump_rsi') {
+    const rsi = actualMetricValue({ metrics }, 'rsi');
     return (
       <>
         <Input label="Height / Distance" value={metrics.height_or_distance || ''} onChangeText={(value) => onChangeMetric('height_or_distance', value)} />
@@ -5115,12 +5336,6 @@ function MetricInputs({ metricType, metrics, onChangeMetric }) {
             onChange={(value) => onChangeMetric('height_or_distance_unit', value)}
           />
         </View>
-      </>
-    );
-  }
-  if (metricType === 'jump_rsi') {
-    return (
-      <>
         <View style={styles.twoCol}>
           <Input label="FT" value={metrics.ft || ''} onChangeText={(value) => onChangeMetric('ft', value)} />
           <View style={styles.inputWrap}>
@@ -5143,13 +5358,24 @@ function MetricInputs({ metricType, metrics, onChangeMetric }) {
             />
           </View>
         </View>
+        <Text style={styles.smallCopy}>Auto RSI: {pretty(rsi, 2)}</Text>
       </>
     );
   }
-  if (metricType === 'sprint') {
+  if (metricType === 'sprinting' || metricType === 'sprint') {
     return (
       <>
-        <Input label="Time (seconds)" value={metrics.sprint_time || metrics.time || ''} onChangeText={(value) => onChangeMetric('sprint_time', value)} />
+        <View style={styles.twoCol}>
+          <Input label="Sprint time" value={metrics.sprint_time || metrics.time || ''} onChangeText={(value) => onChangeMetric('sprint_time', value)} />
+          <View style={styles.inputWrap}>
+            <Text style={styles.inputLabel}>Time unit</Text>
+            <ChipWrap
+              options={gctFtUnitOptions}
+              value={metrics.sprint_time_unit || 'seconds'}
+              onChange={(value) => onChangeMetric('sprint_time_unit', value)}
+            />
+          </View>
+        </View>
         <View style={styles.twoCol}>
           <Input label="Distance" value={metrics.distance || ''} onChangeText={(value) => onChangeMetric('distance', value)} />
           <View style={styles.inputWrap}>
@@ -5177,8 +5403,72 @@ function MetricInputs({ metricType, metrics, onChangeMetric }) {
           />
         </View>
       </View>
-      <Input label="Bar Velocity (m/s)" value={metrics.bar_velocity || ''} onChangeText={(value) => onChangeMetric('bar_velocity', value)} />
+      <View style={styles.twoCol}>
+        <Input label="Bar velocity" value={metrics.bar_velocity || ''} onChangeText={(value) => onChangeMetric('bar_velocity', value)} />
+        <View style={styles.inputWrap}>
+          <Text style={styles.inputLabel}>Velocity unit</Text>
+          <ChipWrap
+            options={barVelocityUnitOptions}
+            value={metrics.bar_velocity_unit || 'm/s'}
+            onChange={(value) => onChangeMetric('bar_velocity_unit', value)}
+          />
+        </View>
+      </View>
     </>
+  );
+}
+
+function AttemptMetricChart({ series }) {
+  const activeSeries = series.filter((item) => item.points.length >= 2);
+  const chartWidth = 320;
+  const chartHeight = 172;
+  const padding = { left: 32, right: 76, top: 18, bottom: 30 };
+  const allIndexes = [...new Set(activeSeries.flatMap((item) => item.points.map((point) => point.index)))].sort((a, b) => a - b);
+
+  if (activeSeries.length === 0 || allIndexes.length < 2) {
+    return (
+      <View style={styles.timeChartEmpty}>
+        <Text style={styles.muted}>Needs at least two valid attempts for RSI, GCT, or FT charting.</Text>
+      </View>
+    );
+  }
+
+  const plottedSeries = activeSeries.map((item) => {
+    const values = item.points.map((point) => point.value).filter(Number.isFinite);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const range = max - min || 1;
+    const coords = item.points.map((point) => ({
+      ...scaleSvgPoint(point.value, allIndexes.indexOf(point.index), allIndexes.length, min, range, chartWidth, chartHeight, padding),
+      label: point.label,
+      value: point.value,
+    }));
+    return { ...item, coords, path: smoothSvgPath(coords) };
+  });
+
+  return (
+    <View style={styles.axisChartWrap}>
+      <Text style={styles.yAxisLabel}>Y: metric value / X: attempts</Text>
+      <View style={styles.multiLineChart}>
+        <Svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`}>
+          <Line x1={padding.left} y1={padding.top + 54} x2={chartWidth - padding.right} y2={padding.top + 54} stroke="#ECECE8" strokeWidth="1" />
+          <Line x1={padding.left} y1={padding.top} x2={padding.left} y2={chartHeight - padding.bottom} stroke="#D8D8D4" strokeWidth="1" />
+          <Line x1={padding.left} y1={chartHeight - padding.bottom} x2={chartWidth - padding.right} y2={chartHeight - padding.bottom} stroke="#D8D8D4" strokeWidth="1" />
+          {plottedSeries.map((item) => (
+            <Path key={`${item.key}-attempt-path`} d={item.path} fill="none" stroke={item.color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+          ))}
+          {plottedSeries.map((item) => {
+            const end = item.coords[item.coords.length - 1];
+            return (
+              <G key={`${item.key}-attempt-label`}>
+                <Circle cx={end.x} cy={end.y} r={4} fill="#FFFFFF" stroke={item.color} strokeWidth="2" />
+                <SvgText x={chartWidth - padding.right + 10} y={end.y + 4} fill={item.color} fontSize="10" fontWeight="700">{item.label}</SvgText>
+              </G>
+            );
+          })}
+        </Svg>
+      </View>
+    </View>
   );
 }
 
@@ -5242,14 +5532,6 @@ function ActionButton({ title, tone, onPress }) {
   return (
     <Pressable style={[styles.action, styles[`action_${tone}`]]} onPress={onPress}>
       <Text style={[styles.actionText, tone === 'outline' && styles.actionOutlineText]}>{title}</Text>
-    </Pressable>
-  );
-}
-
-function MetricToggle({ expanded, onPress }) {
-  return (
-    <Pressable style={styles.metricToggle} onPress={onPress}>
-      <Text style={styles.metricToggleText}>{expanded ? 'Hide set metrics' : '+ Set metrics'}</Text>
     </Pressable>
   );
 }
@@ -5664,12 +5946,14 @@ const styles = StyleSheet.create({
   smallPillText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
   programmeEditRow: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E5', borderRadius: 8, borderWidth: 1, gap: 10, padding: 12 },
   programmeEditMain: { gap: 10 },
-  programmeActions: { flexDirection: 'row', gap: 8 },
+  programmeActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   miniButton: { backgroundColor: '#EFEFEC', borderRadius: 8, flex: 1, alignItems: 'center', paddingVertical: 9 },
   miniButtonDark: { backgroundColor: '#111111' },
   miniButtonText: { color: '#111111', fontSize: 12, fontWeight: '900' },
   miniButtonTextLight: { color: '#FFFFFF' },
   programmeFocusedPanel: { backgroundColor: '#F7F7F5', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 12, padding: 12 },
+  performanceSetCard: { backgroundColor: '#F7F7F5', borderColor: '#E1E1DC', borderRadius: 12, borderWidth: 1, gap: 10, padding: 10 },
+  attemptCard: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E4', borderRadius: 10, borderWidth: 1, gap: 10, padding: 10 },
   rangeSummaryText: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '800', lineHeight: 18 },
   calendarMetaText: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '700', lineHeight: 18 },
   weekSessionRow: { alignItems: 'center', backgroundColor: '#F7F7F5', borderRadius: 8, flexDirection: 'row', gap: 10, padding: 10 },
