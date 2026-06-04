@@ -66,6 +66,21 @@ function programmeSignature(programme) {
   return JSON.stringify(programme || {});
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuid(value) {
+  return UUID_RE.test(String(value || ''));
+}
+
+function createPersistentSessionId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+    const random = Math.floor(Math.random() * 16);
+    const value = char === 'x' ? random : (random & 0x3) | 0x8;
+    return value.toString(16);
+  });
+}
+
 const movementOptions = [
   ['plyometric', 'Plyometric'],
   ['power_ballistic', 'Power / Ballistic'],
@@ -543,16 +558,19 @@ function todayPlannedSession(programme) {
 
 function mapPlannedToActiveSession(planned) {
   return {
-    id: createId('draft_session'),
+    id: createPersistentSessionId(),
+    planned_session_id: planned.id,
     session_name: planned.session_name,
     session_datetime: new Date().toISOString(),
-    notes: planned.notes || '',
+    notes: planned.performance_notes || planned.notes || '',
+    performance_score: planned.performance_score ?? 0,
     metric_type: planned.metric_type || 'jump_output',
     metrics: planned.metrics || {},
     exercises: numberExercises(
       (planned.exercises || []).map((exercise) => ({
         ...exercise,
         id: createId('exercise'),
+        planned_exercise_id: exercise.id,
       }))
     ),
   };
@@ -568,6 +586,28 @@ function findPlannedSession(programme, sessionId) {
     }
   }
   return null;
+}
+
+function mergePerformanceSessionIntoProgramme(programme, performanceSession) {
+  const plannedSessionId = performanceSession?.planned_session_id;
+  if (!plannedSessionId) return programme;
+
+  const target = findPlannedSession(programme, plannedSessionId)?.session;
+  if (!target) return programme;
+
+  target.performance_score = performanceSession.performance_score ?? target.performance_score ?? 0;
+  target.performance_notes = performanceSession.notes || target.performance_notes || '';
+  target.performance_logged_at = new Date().toISOString();
+  target.exercises = (target.exercises || []).map((plannedExercise) => {
+    const loggedExercise = (performanceSession.exercises || []).find((exercise) => exercise.planned_exercise_id === plannedExercise.id);
+    if (!loggedExercise) return plannedExercise;
+    return {
+      ...plannedExercise,
+      actual_metrics: loggedExercise.actual_metrics || plannedExercise.actual_metrics || [],
+    };
+  });
+
+  return programme;
 }
 
 function defaultMetricTypeForExercise(exercise = {}) {
@@ -1026,6 +1066,8 @@ export default function App() {
   const [screen, setScreen] = useState('today');
   const [lastSavedCheckInId, setLastSavedCheckInId] = useState(null);
   const [exerciseDraft, setExerciseDraft] = useState(emptyExercise);
+  const [addExerciseReturnScreen, setAddExerciseReturnScreen] = useState('session');
+  const [performanceSaveStatus, setPerformanceSaveStatus] = useState('');
   const [selectedInsight, setSelectedInsight] = useState('performance_freshness');
   const [selectedDashboardMetric, setSelectedDashboardMetric] = useState('performance');
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(isoDate());
@@ -1379,7 +1421,7 @@ export default function App() {
       },
     }));
     setExerciseDraft({ ...emptyExercise, movement_type: exerciseDraft.movement_type });
-    setScreen('session');
+    setScreen(addExerciseReturnScreen);
   }
 
   function saveCheckIn() {
@@ -1406,20 +1448,40 @@ export default function App() {
     setScreen('checkinReview');
   }
 
-  function finishSession() {
+  function finishSession(options = {}) {
+    const sessionId = options.preserveId && isUuid(data.activeSession.id)
+      ? data.activeSession.id
+      : createId('session');
     const session = {
       ...data.activeSession,
-      id: createId('session'),
+      id: sessionId,
       session_datetime: new Date().toISOString(),
     };
-    setData((current) => ({
-      ...current,
-      sessions: [session, ...current.sessions],
-      activeSession: { ...current.activeSession, id: createId('draft'), exercises: [] },
-    }));
+    const programmeForDirectSave = options.syncPlanned
+      ? mergePerformanceSessionIntoProgramme(JSON.parse(JSON.stringify(data.programme)), session)
+      : null;
+    setData((current) => {
+      const nextProgramme = options.syncPlanned
+        ? mergePerformanceSessionIntoProgramme(JSON.parse(JSON.stringify(current.programme)), session)
+        : current.programme;
+      return {
+        ...current,
+        programme: nextProgramme,
+        sessions: [session, ...current.sessions.filter((item) => item.id !== session.id)],
+        activeSession: { ...current.activeSession, id: createId('draft'), exercises: [] },
+      };
+    });
     if (currentUser) {
       saveSessionToSupabase(currentUser.id, session)
-        .then(() => console.log('[SUPABASE SAVE] Session saved'))
+        .then(async () => {
+          if (programmeForDirectSave) {
+            await saveProgrammeToSupabase(currentUser.id, programmeForDirectSave);
+            const signature = programmeSignature(programmeForDirectSave);
+            latestProgrammeSignatureRef.current = signature;
+            lastProgrammeSaveSignatureRef.current = signature;
+          }
+          console.log('[SUPABASE SAVE] Session saved');
+        })
         .catch((error) => {
           console.error('[SUPABASE SAVE] Session failed. Local copy preserved.', error);
           console.log('[LOCAL FALLBACK] Session remains in local storage.');
@@ -1434,17 +1496,83 @@ export default function App() {
     setScreen('sessionAnalysis');
   }
 
+  async function savePerformanceDraft() {
+    const snapshot = latestDataRef.current;
+    if (!snapshot?.activeSession) return null;
+    const stableSessionId = isUuid(snapshot.activeSession.id) ? snapshot.activeSession.id : createPersistentSessionId();
+    const session = {
+      ...snapshot.activeSession,
+      id: stableSessionId,
+      session_datetime: snapshot.activeSession.session_datetime || new Date().toISOString(),
+      performance_saved_at: new Date().toISOString(),
+    };
+    const nextProgramme = session.planned_session_id
+      ? mergePerformanceSessionIntoProgramme(JSON.parse(JSON.stringify(snapshot.programme)), session)
+      : snapshot.programme;
+    const nextData = {
+      ...snapshot,
+      programme: nextProgramme,
+      activeSession: session,
+      sessions: [
+        session,
+        ...(snapshot.sessions || []).filter((item) => item.id !== stableSessionId),
+      ],
+    };
+
+    setPerformanceSaveStatus('Saving...');
+    latestDataRef.current = nextData;
+    setData(nextData);
+
+    try {
+      await saveAppData(nextData);
+      if (currentUser?.id) {
+        await saveSessionToSupabase(currentUser.id, session);
+        if (session.planned_session_id) {
+          await saveProgrammeToSupabase(currentUser.id, nextProgramme);
+          const signature = programmeSignature(nextProgramme);
+          latestProgrammeSignatureRef.current = signature;
+          lastProgrammeSaveSignatureRef.current = signature;
+        }
+      }
+      setPerformanceSaveStatus('Saved just now');
+      return session;
+    } catch (error) {
+      console.error('[SUPABASE SAVE] Performance draft save failed. Local copy preserved where possible.', error);
+      setPerformanceSaveStatus('Local save kept. Cloud save failed.');
+      Alert.alert('Save failed', error.message || 'Could not save performance log.');
+      return null;
+    }
+  }
+
   function startTodayPerformance() {
     const planned = todayPlannedSession(data.programme);
-    if (planned.id === 'empty_plan') {
-      Alert.alert('No planned session today', 'No planned session today. Create one in Calendar.');
-      setSelectedCalendarDate(isoDate());
-      setScreen('calendar');
-      return;
+    const hasActiveDraft = Boolean(
+      String(data.activeSession?.session_name || '').trim()
+      || String(data.activeSession?.notes || '').trim()
+      || (data.activeSession?.exercises || []).length
+    );
+
+    if (!hasActiveDraft) {
+      setData((current) => ({
+        ...current,
+        activeSession: planned.id === 'empty_plan'
+          ? {
+            ...current.activeSession,
+            id: createPersistentSessionId(),
+            session_name: 'Performance Log',
+            session_datetime: new Date().toISOString(),
+            notes: '',
+            exercises: [],
+          }
+          : mapPlannedToActiveSession(planned),
+      }));
     }
-    setSelectedCalendarDate(planned.date || isoDate());
-    setSelectedPlannedSessionId(planned.id);
-    setScreen('calendar');
+    if (planned.id !== 'empty_plan') {
+      setSelectedCalendarDate(planned.date || isoDate());
+      setSelectedPlannedSessionId(planned.id);
+    }
+    setAddExerciseReturnScreen('performanceSession');
+    setScreen('performanceSession');
   }
 
   function clearAll() {
@@ -1598,10 +1726,38 @@ export default function App() {
               />
             )}
             {screen === 'session' && (
-              <SessionScreen data={data} analysis={analysis} setData={setData} updateSession={updateSession} setScreen={setScreen} finishSession={finishSession} />
+              <SessionScreen
+                data={data}
+                analysis={analysis}
+                setData={setData}
+                updateSession={updateSession}
+                setScreen={setScreen}
+                finishSession={finishSession}
+                onAddExercise={() => {
+                  setAddExerciseReturnScreen('session');
+                  setScreen('addExercise');
+                }}
+              />
+            )}
+            {screen === 'performanceSession' && (
+              <SessionScreen
+                data={data}
+                analysis={analysis}
+                setData={setData}
+                updateSession={updateSession}
+                setScreen={setScreen}
+                finishSession={() => finishSession({ syncPlanned: true, preserveId: true })}
+                savePerformanceDraft={savePerformanceDraft}
+                performanceSaveStatus={performanceSaveStatus}
+                onAddExercise={() => {
+                  setAddExerciseReturnScreen('performanceSession');
+                  setScreen('addExercise');
+                }}
+                mode="performance"
+              />
             )}
             {screen === 'addExercise' && (
-              <AddExerciseScreen draft={exerciseDraft} setDraft={setExerciseDraft} addExercise={addExercise} setScreen={setScreen} />
+              <AddExerciseScreen draft={exerciseDraft} setDraft={setExerciseDraft} addExercise={addExercise} setScreen={setScreen} returnScreen={addExerciseReturnScreen} />
             )}
             {screen === 'review' && (
               <ReviewScreen data={data} analysis={analysis} setScreen={setScreen} />
@@ -1702,6 +1858,7 @@ export default function App() {
                 onSignIn={handleSignIn}
                 onSignOut={handleSignOut}
                 onChangePassword={handleChangePassword}
+                startTodayPerformance={startTodayPerformance}
               />
             )}
           </ScrollView>
@@ -1748,7 +1905,7 @@ function TodayScreen({ data, analysis, setScreen, startTodayPerformance }) {
 
       <View style={styles.twoCol}>
         <ActionButton title="Log Check-in" tone="green" onPress={() => setScreen('checkin')} />
-        <ActionButton title={hasPlannedSession ? 'Log Performance' : 'Create in Calendar'} tone="black" onPress={hasPlannedSession ? startTodayPerformance : () => setScreen('calendar')} />
+        <ActionButton title="Log Performance" tone="black" onPress={startTodayPerformance} />
       </View>
       <ActionButton title="View Insights" tone="outline" onPress={() => setScreen('insights')} />
     </View>
@@ -1805,7 +1962,7 @@ function OnboardingScreen({
 
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>How Impuls works</Text>
-        <OnboardingInfoCard title="Programme or log training" body="Capture sessions, exercises, sets, reps, contacts, intent, and intensity." />
+        <OnboardingInfoCard title="Programme or log performance" body="Capture sessions, exercises, sets, reps, contacts, intent, and intensity." />
         <OnboardingInfoCard title="Check in with recovery, pain, and performance" body="Log the response state that belongs to the training you did." />
         <OnboardingInfoCard title="Learn your response patterns over time" body="Repeated session + check-in pairs become evidence for trends and relationships." />
       </View>
@@ -2233,8 +2390,20 @@ function ReviewLineSvg({ series, height = 150, compact = false }) {
   );
 }
 
-function SessionScreen({ data, analysis, setData, updateSession, setScreen, finishSession }) {
+function SessionScreen({
+  data,
+  analysis,
+  setData,
+  updateSession,
+  setScreen,
+  finishSession,
+  savePerformanceDraft,
+  performanceSaveStatus,
+  onAddExercise,
+  mode = 'training',
+}) {
   const load = analysis?.activeSessionLoad;
+  const isPerformance = mode === 'performance';
 
   function updateExercise(exerciseId, key, value) {
     setData((current) => ({
@@ -2258,32 +2427,85 @@ function SessionScreen({ data, analysis, setData, updateSession, setScreen, fini
     }));
   }
 
+  function updatePerformanceAttempt(exerciseId, attemptId, key, value) {
+    setData((current) => ({
+      ...current,
+      activeSession: {
+        ...current.activeSession,
+        exercises: current.activeSession.exercises.map((exercise) => {
+          if (exercise.id !== exerciseId) return exercise;
+          const rows = plannedAttemptRows(exercise);
+          const nextRows = rows.map((attempt) => {
+            if (attempt.id !== attemptId) return attempt;
+            if (key === 'metric_type') {
+              return {
+                ...attempt,
+                metric_type: value,
+                metrics: emptyActualMetrics(value, attempt.metrics || {}),
+              };
+            }
+            const nextMetrics = { ...(attempt.metrics || {}), [key]: value };
+            if (key === 'ft') nextMetrics.ft_unit = 'milliseconds';
+            if (key === 'gct') nextMetrics.gct_unit = 'milliseconds';
+            return { ...attempt, metrics: emptyActualMetrics(attempt.metric_type, nextMetrics) };
+          });
+          const plannedKeys = new Set(nextRows.map(actualMetricRowKey));
+          const preservedRows = (exercise.actual_metrics || []).filter((attempt) => !plannedKeys.has(actualMetricRowKey(attempt)));
+          return { ...exercise, actual_metrics: [...nextRows, ...preservedRows] };
+        }),
+      },
+    }));
+  }
+
   return (
     <View style={styles.screen}>
-      <Header title="Training Session" onBack={() => setScreen('today')} right="check" onRight={finishSession} />
+      <Header title={isPerformance ? 'Log Performance' : 'Training Session'} onBack={() => setScreen('today')} right="check" onRight={finishSession} />
       <Input label="Session Name" value={data.activeSession.session_name} onChangeText={(value) => updateSession('session_name', value)} />
       <Text style={styles.sectionTitle}>Session Exercises</Text>
       {data.activeSession.exercises.map((exercise, index) => (
-        <View key={exercise.id} style={styles.exerciseRow}>
-          <View style={styles.orderBadge}><Text style={styles.orderBadgeText}>{exercise.order || index + 1}</Text></View>
+        <View key={exercise.id} style={isPerformance ? styles.performanceExerciseLog : styles.exerciseRow}>
+          <View style={styles.exerciseHeaderRow}>
+            <View style={styles.orderBadge}><Text style={styles.orderBadgeText}>{exercise.order || index + 1}</Text></View>
             <View style={styles.exerciseEdit}>
               <Input label="Exercise" value={exercise.exercise_name} onChangeText={(value) => updateExercise(exercise.id, 'exercise_name', value)} />
-            <Text style={styles.muted}>{exercise.movement_type.replace('_', ' ')} / {exercisePrescription(exercise)}</Text>
+              <Text style={styles.muted}>{exercise.movement_type.replace('_', ' ')} / {exercisePrescription(exercise)}</Text>
+            </View>
+            <Pressable style={styles.deleteButton} onPress={() => removeExercise(exercise.id)}>
+              <Text style={styles.deleteButtonText}>Delete</Text>
+            </Pressable>
           </View>
-          <Pressable style={styles.deleteButton} onPress={() => removeExercise(exercise.id)}>
-            <Text style={styles.deleteButtonText}>Delete</Text>
-          </Pressable>
+          {isPerformance ? (
+            <CalendarExerciseMetrics
+              exercise={exercise}
+              onChangeAttempt={(attemptId, key, value) => updatePerformanceAttempt(exercise.id, attemptId, key, value)}
+            />
+          ) : null}
         </View>
       ))}
-      <ActionButton title="Add Exercise" tone="outline" onPress={() => setScreen('addExercise')} />
+      <ActionButton title="Add Exercise" tone="outline" onPress={onAddExercise || (() => setScreen('addExercise'))} />
+      {isPerformance ? (
+        <View style={styles.savePerformancePanel}>
+          <ActionButton title="Save Performance" tone="green" onPress={savePerformanceDraft} />
+          {performanceSaveStatus ? <Text style={styles.muted}>{performanceSaveStatus}</Text> : null}
+        </View>
+      ) : null}
+      {isPerformance ? (
+        <View style={styles.card}>
+          <SliderField
+            label="Performance score (0-10)"
+            value={data.activeSession.performance_score ?? 0}
+            onChange={(value) => updateSession('performance_score', value)}
+          />
+        </View>
+      ) : null}
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Training Notes</Text>
+        <Text style={styles.sectionTitle}>{isPerformance ? 'Performance Notes' : 'Training Notes'}</Text>
         <TextInput
           style={[styles.input, styles.noteInput]}
           multiline
           value={data.activeSession.notes || ''}
           onChangeText={(value) => updateSession('notes', value)}
-          placeholder="Notes as you train"
+          placeholder={isPerformance ? 'Notes about actual performance' : 'Notes as you train'}
         />
       </View>
       <View style={styles.summaryRow}>
@@ -2300,12 +2522,12 @@ function SessionScreen({ data, analysis, setData, updateSession, setScreen, fini
   );
 }
 
-function AddExerciseScreen({ draft, setDraft, addExercise, setScreen }) {
+function AddExerciseScreen({ draft, setDraft, addExercise, setScreen, returnScreen = 'session' }) {
   const movementLabel = movementOptions.find(([id]) => id === draft.movement_type)?.[1] || 'Movement';
   const update = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
   return (
     <View style={styles.screen}>
-      <Header title="Add Exercise" onBack={() => setScreen('session')} />
+      <Header title="Add Exercise" onBack={() => setScreen(returnScreen)} />
       <Text style={styles.label}>Movement Type</Text>
       <SelectLike value={movementLabel} />
       <Input label="Exercise Name" value={draft.exercise_name} onChangeText={(value) => update('exercise_name', value)} />
@@ -4916,6 +5138,7 @@ function ProfileScreen({
   onSignIn,
   onSignOut,
   onChangePassword,
+  startTodayPerformance,
 }) {
   const [showManualPbNotes, setShowManualPbNotes] = useState(false);
   const [newPassword, setNewPassword] = useState('');
@@ -4925,7 +5148,7 @@ function ProfileScreen({
   const hasLoggedPb = Object.values(derivedPbs).some((best) => Number.isFinite(best?.value));
   return (
     <View style={styles.screen}>
-      <Text style={styles.h1}>Profile</Text>
+      <Text style={styles.h1}>You</Text>
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Account</Text>
         <Input label="Name" value={data.profile?.name || ''} onChangeText={updateProfileName} />
@@ -4976,9 +5199,15 @@ function ProfileScreen({
       </View>
 
       <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Quick Log</Text>
+        <Text style={styles.bodyText}>Use today’s planned session if one exists, or start a new performance log.</Text>
+        <ActionButton title="Log Performance" tone="black" onPress={startTodayPerformance} />
+      </View>
+
+      <View style={styles.card}>
         <Text style={styles.sectionTitle}>Personal Bests</Text>
         <Text style={styles.bodyText}>PBs are calculated from your stored logs.</Text>
-        <Text style={styles.muted}>Add performance metrics in check-ins or session set metrics to update PBs.</Text>
+        <Text style={styles.muted}>Add performance metrics in Calendar or Log Performance to update PBs.</Text>
         {!hasLoggedPb ? <Text style={styles.figureLimitation}>PBs collecting from stored logs.</Text> : null}
         <View style={styles.profileFieldGrid}>
           {derivedPbFields.map((field) => (
@@ -5475,6 +5704,7 @@ function BottomNav({ screen, setScreen }) {
     today: 'today',
     checkin: 'today',
     session: 'today',
+    performanceSession: 'today',
     addExercise: 'today',
     review: 'today',
     checkinReview: 'today',
@@ -5494,7 +5724,7 @@ function BottomNav({ screen, setScreen }) {
         ['calendar', '□', 'Calendar'],
         ['insights', '◧', 'Insights'],
         ['dashboard', '▤', 'Dashboard'],
-        ['profile', '○', 'Profile'],
+        ['profile', '○', 'You'],
       ].map(([id, icon, label]) => (
         <Pressable key={id} style={styles.navItem} onPress={() => setScreen(id)}>
           <Text style={[styles.navIcon, active === id && styles.navActive]}>{icon}</Text>
@@ -5770,6 +6000,7 @@ const styles = StyleSheet.create({
   chipText: { color: '#111111', fontSize: 12, fontWeight: '800' },
   chipTextActive: { color: '#FFFFFF' },
   exerciseRow: { backgroundColor: '#FFFFFF', borderBottomColor: '#E8E8E4', borderBottomWidth: 1, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between' },
+  exerciseHeaderRow: { alignItems: 'flex-start', flex: 1, flexDirection: 'row', justifyContent: 'space-between' },
   exerciseEdit: { flex: 1, gap: 6, paddingRight: 8 },
   exerciseNameWithOrder: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: 8 },
   exerciseNameText: { color: '#111111', flex: 1, fontSize: 12, fontWeight: '900' },
@@ -5886,6 +6117,8 @@ const styles = StyleSheet.create({
   miniButtonText: { color: '#111111', fontSize: 12, fontWeight: '900' },
   miniButtonTextLight: { color: '#FFFFFF' },
   programmeFocusedPanel: { backgroundColor: '#F7F7F5', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 12, padding: 12 },
+  performanceExerciseLog: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E4', borderRadius: 12, borderWidth: 1, gap: 12, padding: 12 },
+  savePerformancePanel: { backgroundColor: '#F7F7F5', borderColor: '#DCEBDD', borderRadius: 12, borderWidth: 1, gap: 8, padding: 10 },
   performanceSetCard: { backgroundColor: '#F7F7F5', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, gap: 8, padding: 8 },
   attemptCard: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E4', borderRadius: 8, borderWidth: 1, gap: 7, padding: 8 },
   rangeSummaryText: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '800', lineHeight: 18 },

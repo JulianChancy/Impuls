@@ -44,6 +44,7 @@ async function deleteUserRowsNotIn(table, userId, ids) {
 }
 
 function exerciseRow(userId, parentKey, parentId, exercise, position = 0) {
+  const actualMetrics = Array.isArray(exercise.actual_metrics) ? exercise.actual_metrics : null;
   return stripUndefined({
     id: uuidOrUndefined(exercise.id),
     user_id: userId,
@@ -58,13 +59,19 @@ function exerciseRow(userId, parentKey, parentId, exercise, position = 0) {
     intensity_unit: exercise.intensity_unit || '%',
     intent_percent: numberOrNull(exercise.intent_percent),
     rom: exercise.rom || null,
-    set_metrics: exercise.set_metrics || [],
+    // Store attempt-level metrics in the existing JSON column too, so older Supabase schemas still round-trip them.
+    set_metrics: actualMetrics || exercise.set_metrics || [],
     position: exercise.position ?? exercise.order ?? position,
   });
 }
 
 function exerciseFromRow(row) {
   const movementType = row.movement_type || 'skill';
+  const storedMetrics = Array.isArray(row.actual_metrics)
+    ? row.actual_metrics
+    : Array.isArray(row.set_metrics)
+      ? row.set_metrics
+      : [];
   return {
     id: row.id,
     exercise_name: row.exercise_name || '',
@@ -78,6 +85,7 @@ function exerciseFromRow(row) {
     intent_percent: row.intent_percent ?? '',
     rom: row.rom || (movementType === 'strength' ? 'full' : ''),
     set_metrics: row.set_metrics || [],
+    actual_metrics: storedMetrics,
     order: row.position ?? 0,
   };
 }
@@ -170,10 +178,53 @@ function plannedSessionFromRow(row, exercises = []) {
     focus: row.focus || '',
     duration: row.duration || '',
     notes: row.notes || '',
+    performance_score: row.performance_score ?? '',
+    performance_notes: row.performance_notes || '',
+    performance_logged_at: row.performance_logged_at || null,
     completed: !!row.completed,
     position: row.position ?? 0,
     exercises: exercises.sort((a, b) => (a.order || 0) - (b.order || 0)),
   };
+}
+
+async function upsertPlannedSessionRow(userId, weekId, session) {
+  const fullPayload = stripUndefined({
+    id: uuidOrUndefined(session.id),
+    user_id: userId,
+    week_id: weekId,
+    date: session.date || null,
+    session_name: session.session_name || '',
+    focus: session.focus || '',
+    duration: session.duration || '',
+    notes: session.notes || '',
+    performance_score: numberOrNull(session.performance_score),
+    performance_notes: session.performance_notes || null,
+    performance_logged_at: session.performance_logged_at || null,
+    completed: !!session.completed,
+    position: session.position ?? 0,
+  });
+
+  try {
+    return await singleOrThrow(upsertRow('planned_sessions', fullPayload, 'week_id,position'));
+  } catch (error) {
+    const schemaMessage = `${error?.message || ''} ${error?.details || ''}`;
+    if (!/performance_score|performance_notes|performance_logged_at/i.test(schemaMessage)) throw error;
+    console.warn('[SUPABASE SAVE] Planned session performance columns missing. Run the planned-session performance migration in supabase/schema.sql.', error);
+    return singleOrThrow(
+      upsertRow('planned_sessions', stripUndefined({
+        id: uuidOrUndefined(session.id),
+        user_id: userId,
+        week_id: weekId,
+        date: session.date || null,
+        session_name: session.session_name || '',
+        focus: session.focus || '',
+        duration: session.duration || '',
+        notes: session.notes || '',
+        completed: !!session.completed,
+        position: session.position ?? 0,
+      }), 'week_id,position')
+    );
+  }
 }
 
 async function createDefaultProgrammeForUser(userId) {
@@ -396,20 +447,7 @@ export async function saveProgramme(userId, programme) {
 
 export async function savePlannedSession(userId, weekId, session, savedIds) {
   requireUserId(userId);
-  const sessionRow = await singleOrThrow(
-    upsertRow('planned_sessions', stripUndefined({
-      id: uuidOrUndefined(session.id),
-      user_id: userId,
-      week_id: weekId,
-      date: session.date || null,
-      session_name: session.session_name || '',
-      focus: session.focus || '',
-      duration: session.duration || '',
-      notes: session.notes || '',
-      completed: !!session.completed,
-      position: session.position ?? 0,
-    }), 'week_id,position')
-  );
+  const sessionRow = await upsertPlannedSessionRow(userId, weekId, session);
   savedIds?.plannedSessions?.push(sessionRow.id);
 
   for (const [index, exercise] of (session.exercises || []).entries()) {
