@@ -588,6 +588,43 @@ function findPlannedSession(programme, sessionId) {
   return null;
 }
 
+function findPlannedSessionOnDate(programme, dateValue) {
+  const block = currentBlock(programme);
+  for (const week of block?.weeks || []) {
+    const session = (week.sessions || []).find((item) => item.date === dateValue);
+    if (session) return { block, week, session };
+  }
+
+  for (const macro of programme.macro_blocks || []) {
+    for (const block of macro.blocks || []) {
+      for (const week of block.weeks || []) {
+        const session = (week.sessions || []).find((item) => item.date === dateValue);
+        if (session) return { macro, block, week, session };
+      }
+    }
+  }
+  return null;
+}
+
+function matchLoggedExercise(plannedExercise, loggedExercises = [], index = 0, usedIds = new Set()) {
+  const candidates = [
+    (exercise) => exercise.planned_exercise_id && exercise.planned_exercise_id === plannedExercise.id,
+    (exercise) => exercise.id && exercise.id === plannedExercise.id,
+    (exercise) => Number(exercise.order) === Number(plannedExercise.order || index + 1),
+    (exercise) => String(exercise.exercise_name || '').trim()
+      && String(exercise.exercise_name || '').trim() === String(plannedExercise.exercise_name || '').trim(),
+  ];
+
+  for (const predicate of candidates) {
+    const match = loggedExercises.find((exercise) => !usedIds.has(exercise) && predicate(exercise));
+    if (match) {
+      usedIds.add(match);
+      return match;
+    }
+  }
+  return null;
+}
+
 function mergePerformanceSessionIntoProgramme(programme, performanceSession) {
   const plannedSessionId = performanceSession?.planned_session_id;
   if (!plannedSessionId) return programme;
@@ -595,19 +632,95 @@ function mergePerformanceSessionIntoProgramme(programme, performanceSession) {
   const target = findPlannedSession(programme, plannedSessionId)?.session;
   if (!target) return programme;
 
+  const loggedExercises = performanceSession.exercises || [];
+  const usedLoggedIds = new Set();
   target.performance_score = performanceSession.performance_score ?? target.performance_score ?? 0;
   target.performance_notes = performanceSession.notes || target.performance_notes || '';
   target.performance_logged_at = new Date().toISOString();
-  target.exercises = (target.exercises || []).map((plannedExercise) => {
-    const loggedExercise = (performanceSession.exercises || []).find((exercise) => exercise.planned_exercise_id === plannedExercise.id);
+  target.exercises = (target.exercises || []).map((plannedExercise, index) => {
+    const loggedExercise = matchLoggedExercise(plannedExercise, loggedExercises, index, usedLoggedIds);
     if (!loggedExercise) return plannedExercise;
     return {
       ...plannedExercise,
       actual_metrics: loggedExercise.actual_metrics || plannedExercise.actual_metrics || [],
     };
   });
+  const appendedExercises = loggedExercises
+    .filter((exercise) => !usedLoggedIds.has(exercise))
+    .map((exercise, index) => ({
+      ...exercise,
+      id: exercise.planned_exercise_id || createId('planned_exercise'),
+      planned_exercise_id: undefined,
+      actual_metrics: exercise.actual_metrics || [],
+      order: (target.exercises || []).length + index + 1,
+    }));
+  if (appendedExercises.length) {
+    target.exercises = [...(target.exercises || []), ...appendedExercises];
+  }
 
   return programme;
+}
+
+function attachPerformanceSessionToCalendar(programme, performanceSession) {
+  const sessionDate = isoDate(performanceSession.session_datetime || new Date());
+  let target = performanceSession.planned_session_id
+    ? findPlannedSession(programme, performanceSession.planned_session_id)?.session
+    : findPlannedSessionOnDate(programme, sessionDate)?.session;
+
+  if (!target) {
+    const week = ensureProgrammeWeek(programme, sessionDate);
+    target = {
+      id: createId('planned_session'),
+      date: sessionDate,
+      session_name: performanceSession.session_name || 'Performance Log',
+      focus: 'Logged performance',
+      duration: '',
+      notes: '',
+      performance_score: performanceSession.performance_score ?? 0,
+      performance_notes: performanceSession.notes || '',
+      performance_logged_at: new Date().toISOString(),
+      exercises: [],
+      position: (week.sessions || []).length,
+    };
+    week.sessions = [...(week.sessions || []), target];
+  }
+
+  const targetExercises = target.exercises || [];
+  const baseExerciseCount = targetExercises.length;
+  const linkedExercises = (performanceSession.exercises || []).map((exercise, index) => {
+    const existing = exercise.planned_exercise_id
+      ? targetExercises.find((plannedExercise) => plannedExercise.id === exercise.planned_exercise_id)
+      : null;
+    const matched = existing
+      || targetExercises.find((plannedExercise) => Number(plannedExercise.order) === Number(exercise.order || index + 1))
+      || targetExercises.find((plannedExercise) => String(plannedExercise.exercise_name || '').trim()
+        && String(plannedExercise.exercise_name || '').trim() === String(exercise.exercise_name || '').trim());
+    if (matched) return { ...exercise, planned_exercise_id: matched.id };
+
+    const plannedExercise = {
+      ...exercise,
+      id: createId('planned_exercise'),
+      planned_exercise_id: undefined,
+      actual_metrics: exercise.actual_metrics || [],
+      order: baseExerciseCount + index + 1,
+    };
+    targetExercises.push(plannedExercise);
+    return { ...exercise, planned_exercise_id: plannedExercise.id };
+  });
+  target.exercises = targetExercises;
+
+  return {
+    programme: mergePerformanceSessionIntoProgramme(programme, {
+      ...performanceSession,
+      planned_session_id: target.id,
+      exercises: linkedExercises,
+    }),
+    session: {
+      ...performanceSession,
+      planned_session_id: target.id,
+      exercises: linkedExercises,
+    },
+  };
 }
 
 function defaultMetricTypeForExercise(exercise = {}) {
@@ -1433,7 +1546,6 @@ export default function App() {
       pain_location: data.checkInDraft.pain_location,
       freshness_score: data.checkInDraft.freshness_score,
       soreness_score: data.checkInDraft.soreness_score,
-      performance_score: data.checkInDraft.performance_score,
     };
     setLastSavedCheckInId(checkIn.id);
     setData((current) => ({ ...current, checkIns: [checkIn, ...current.checkIns] }));
@@ -1452,22 +1564,26 @@ export default function App() {
     const sessionId = options.preserveId && isUuid(data.activeSession.id)
       ? data.activeSession.id
       : createId('session');
-    const session = {
+    let session = {
       ...data.activeSession,
       id: sessionId,
       session_datetime: new Date().toISOString(),
     };
-    const programmeForDirectSave = options.syncPlanned
-      ? mergePerformanceSessionIntoProgramme(JSON.parse(JSON.stringify(data.programme)), session)
+    const attachedForDirectSave = options.syncPlanned
+      ? attachPerformanceSessionToCalendar(JSON.parse(JSON.stringify(data.programme)), session)
       : null;
+    if (attachedForDirectSave) session = attachedForDirectSave.session;
+    const programmeForDirectSave = attachedForDirectSave?.programme || null;
     setData((current) => {
-      const nextProgramme = options.syncPlanned
-        ? mergePerformanceSessionIntoProgramme(JSON.parse(JSON.stringify(current.programme)), session)
-        : current.programme;
+      const attached = options.syncPlanned
+        ? attachPerformanceSessionToCalendar(JSON.parse(JSON.stringify(current.programme)), session)
+        : null;
+      const nextProgramme = attached?.programme || current.programme;
+      const nextSession = attached?.session || session;
       return {
         ...current,
         programme: nextProgramme,
-        sessions: [session, ...current.sessions.filter((item) => item.id !== session.id)],
+        sessions: [nextSession, ...current.sessions.filter((item) => item.id !== nextSession.id)],
         activeSession: { ...current.activeSession, id: createId('draft'), exercises: [] },
       };
     });
@@ -1500,15 +1616,15 @@ export default function App() {
     const snapshot = latestDataRef.current;
     if (!snapshot?.activeSession) return null;
     const stableSessionId = isUuid(snapshot.activeSession.id) ? snapshot.activeSession.id : createPersistentSessionId();
-    const session = {
+    const sessionDraft = {
       ...snapshot.activeSession,
       id: stableSessionId,
       session_datetime: snapshot.activeSession.session_datetime || new Date().toISOString(),
       performance_saved_at: new Date().toISOString(),
     };
-    const nextProgramme = session.planned_session_id
-      ? mergePerformanceSessionIntoProgramme(JSON.parse(JSON.stringify(snapshot.programme)), session)
-      : snapshot.programme;
+    const attached = attachPerformanceSessionToCalendar(JSON.parse(JSON.stringify(snapshot.programme)), sessionDraft);
+    const session = attached.session;
+    const nextProgramme = attached.programme;
     const nextData = {
       ...snapshot,
       programme: nextProgramme,
@@ -1522,6 +1638,8 @@ export default function App() {
     setPerformanceSaveStatus('Saving...');
     latestDataRef.current = nextData;
     setData(nextData);
+    setSelectedCalendarDate(isoDate(session.session_datetime));
+    setSelectedPlannedSessionId(session.planned_session_id);
 
     try {
       await saveAppData(nextData);
@@ -2001,7 +2119,7 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSee
       <TutorialHint
         visible={!tutorialSeen}
         title="Check-in response state"
-        body="Check-ins capture today’s response state: pain, freshness, soreness, and an optional whole-session performance score. Rep-level outputs live in Performance Log."
+        body="Check-ins capture today’s response state: pain, freshness, and soreness. Performance scores and rep-level outputs live in Performance Log."
         onDismiss={onDismissTutorial}
       />
       <FormSection number="1." title="Pain">
@@ -2011,10 +2129,6 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSee
       <FormSection number="2." title="Recovery">
         <SliderField label="Freshness (0-10)" value={draft.freshness_score} onChange={(value) => updateDraft('freshness_score', value)} />
         <SliderField label="Soreness (0-10)" value={draft.soreness_score} onChange={(value) => updateDraft('soreness_score', value)} />
-      </FormSection>
-      <FormSection number="3." title="Subjective performance">
-        <SliderField label="Whole-session performance score (0-10)" value={draft.performance_score} onChange={(value) => updateDraft('performance_score', value)} />
-        <Text style={styles.smallCopy}>Optional. Detailed attempt metrics are logged from the planned session in Performance Log.</Text>
       </FormSection>
       <ActionButton title="Save Check-in" tone="black" onPress={saveCheckIn} />
     </View>

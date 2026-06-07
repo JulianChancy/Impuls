@@ -61,7 +61,6 @@ export const defaultData = {
     pain_location: '',
     freshness_score: 0,
     soreness_score: 0,
-    performance_score: 0,
   },
   sessions: [],
   checkIns: [],
@@ -176,7 +175,6 @@ function migrateCheckInDraft(checkInDraft = {}, version) {
     pain_location: checkInDraft.pain_location ?? defaultData.checkInDraft.pain_location,
     freshness_score: checkInDraft.freshness_score ?? defaultData.checkInDraft.freshness_score,
     soreness_score: checkInDraft.soreness_score ?? defaultData.checkInDraft.soreness_score,
-    performance_score: checkInDraft.performance_score ?? defaultData.checkInDraft.performance_score,
   };
 }
 
