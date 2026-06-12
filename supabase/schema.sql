@@ -98,6 +98,9 @@ create table if not exists public.planned_sessions (
   focus text,
   duration text,
   notes text,
+  performance_score numeric,
+  performance_notes text,
+  performance_logged_at timestamptz,
   completed boolean not null default false,
   position integer not null default 0,
   created_at timestamptz not null default now(),
@@ -221,6 +224,12 @@ comment on column public.check_ins.weight_unit is 'Unit chosen by user for lift 
 comment on column public.check_ins.bar_velocity_unit is 'Unit chosen by user for bar velocity (m/s).';
 alter table if exists public.planned_exercises alter column intensity_unit set default '%';
 alter table if exists public.session_exercises alter column intensity_unit set default '%';
+alter table if exists public.planned_sessions add column if not exists performance_score numeric;
+alter table if exists public.planned_sessions add column if not exists performance_notes text;
+alter table if exists public.planned_sessions add column if not exists performance_logged_at timestamptz;
+comment on column public.planned_sessions.performance_score is 'Whole-session subjective performance score entered from Log Performance or Calendar.';
+comment on column public.planned_sessions.performance_notes is 'Notes about actual performance for the planned session.';
+comment on column public.planned_sessions.performance_logged_at is 'Timestamp for the latest performance log against the planned session.';
 
 create table if not exists public.check_in_insight_history (
   id uuid primary key default gen_random_uuid(),

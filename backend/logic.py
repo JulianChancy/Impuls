@@ -734,13 +734,17 @@ def _actual_metric_value(attempt, metric_name):
             metrics.get("gct_unit"),
         )
     if metric_name in ["ft", "gct", "sprint_time"]:
-        return normalise_time(metrics.get(metric_name), metrics.get(f"{metric_name}_unit"))
+        value = normalise_time(metrics.get(metric_name), metrics.get(f"{metric_name}_unit"))
+        return value if is_positive_number(value) else None
     if metric_name in ["height_or_distance", "distance"]:
-        return normalise_distance(metrics.get(metric_name), metrics.get(f"{metric_name}_unit"))
+        value = normalise_distance(metrics.get(metric_name), metrics.get(f"{metric_name}_unit"))
+        return value if is_positive_number(value) else None
     if metric_name == "weight":
-        return normalise_weight(metrics.get("weight"), metrics.get("weight_unit"))
+        value = normalise_weight(metrics.get("weight"), metrics.get("weight_unit"))
+        return value if is_positive_number(value) else None
 
-    return _number_or_none(metrics.get(metric_name))
+    value = _number_or_none(metrics.get(metric_name))
+    return value if is_positive_number(value) else None
 
 
 def _best_mode(metric_name):
@@ -1045,23 +1049,35 @@ def calculate_rolling_metrics(values, window_size=None):
 # ----------------------------
 
 def get_check_in_pain(check_in):
-    pain = check_in.get("pain")
-    if pain is None:
+    if check_in is None:
         return None
+    pain = check_in.get("pain")
+    if isinstance(pain, (int, float)):
+        return pain
+    if pain is None:
+        return check_in.get("pain_score")
     return pain.get("pain_score")
 
 
 def get_check_in_freshness(check_in):
-    recovery = check_in.get("recovery")
-    if recovery is None:
+    if check_in is None:
         return None
+    recovery = check_in.get("recovery")
+    if check_in.get("freshness") is not None:
+        return check_in.get("freshness")
+    if recovery is None:
+        return check_in.get("freshness_score")
     return recovery.get("freshness_score")
 
 
 def get_check_in_soreness(check_in):
-    recovery = check_in.get("recovery")
-    if recovery is None:
+    if check_in is None:
         return None
+    recovery = check_in.get("recovery")
+    if check_in.get("soreness") is not None:
+        return check_in.get("soreness")
+    if recovery is None:
+        return check_in.get("soreness_score")
     return recovery.get("soreness_score")
 
 
@@ -2959,7 +2975,7 @@ APP_METRIC_META = {
     "height_or_distance": {"label": "Height / distance", "tone": "positive"},
     "rsi": {"label": "RSI", "tone": "positive"},
     "ft": {"label": "FT", "tone": "positive"},
-    "gct": {"label": "GCT", "tone": "positive"},
+    "gct": {"label": "GCT", "tone": "risk"},
     "sprint_time": {"label": "Sprint time", "tone": "risk"},
     "bar_velocity": {"label": "Bar velocity", "tone": "positive"},
     "weight": {"label": "Weight", "tone": "neutral"},
@@ -2974,7 +2990,7 @@ APP_METRIC_META = {
     "fatigue": {"label": "Fatigue", "tone": "risk"},
     "readiness": {"label": "Readiness", "tone": "positive"},
     "pain": {"label": "Pain", "tone": "risk"},
-    "pain_delta": {"label": "Irritation delta", "tone": "risk"},
+    "pain_delta": {"label": "Pain change", "tone": "risk"},
 }
 
 APP_RELATIONSHIP_SPECS = [
@@ -3173,12 +3189,22 @@ def app_session_has_actual_outputs(session):
     return any(exercise.get("actual_metrics") for exercise in (session or {}).get("exercises", []))
 
 
+def app_check_in_metric(check_in, score_key, fallback_key):
+    check_in = check_in or {}
+    return check_in.get(score_key) if check_in.get(score_key) is not None else check_in.get(fallback_key)
+
+
 def app_fatigue(check_in):
-    return ((10 - _num(check_in.get("freshness_score"))) + _num(check_in.get("soreness_score"))) / 2
+    freshness = _num(app_check_in_metric(check_in, "freshness_score", "freshness"))
+    soreness = _num(app_check_in_metric(check_in, "soreness_score", "soreness"))
+    return ((10 - freshness) + soreness) / 2
 
 
 def app_readiness(check_in):
-    return _num(check_in.get("freshness_score")) - (_num(check_in.get("soreness_score")) + _num(check_in.get("pain_score"))) / 2
+    freshness = _num(app_check_in_metric(check_in, "freshness_score", "freshness"))
+    soreness = _num(app_check_in_metric(check_in, "soreness_score", "soreness"))
+    pain = _num(app_check_in_metric(check_in, "pain_score", "pain"))
+    return freshness - (soreness + pain) / 2
 
 
 def app_rsi(check_in):
@@ -3211,6 +3237,49 @@ def app_slope(values):
     y_mean = sum(clean) / len(clean)
     numerator = sum((index - x_mean) * (value - y_mean) for index, value in enumerate(clean))
     denominator = sum((index - x_mean) ** 2 for index, _ in enumerate(clean))
+    return numerator / denominator if denominator else None
+
+
+def _median(values):
+    clean = sorted(value for value in values if _finite(value))
+    if not clean:
+        return None
+    mid = len(clean) // 2
+    if len(clean) % 2:
+        return clean[mid]
+    return (clean[mid - 1] + clean[mid]) / 2
+
+
+def app_slope_over_time(points):
+    """Slope of value vs time, scaled to 'per typical interval'.
+
+    x is days-since-first divided by the median gap between observations, so
+    regularly spaced logs reproduce the old per-observation slope while
+    irregular gaps (missed days) no longer distort the trend. Falls back to
+    index spacing when dates are missing or unparseable.
+    """
+    clean = [point for point in points if _finite(point.get("value"))]
+    if len(clean) < 2:
+        return None
+    parsed = []
+    for point in clean:
+        dt = _parse_dt(point.get("date"))
+        parsed.append(None if dt == datetime.min else dt)
+    if any(dt is None for dt in parsed):
+        xs = list(range(len(clean)))
+    else:
+        base = parsed[0]
+        days = [(dt - base).total_seconds() / 86400.0 for dt in parsed]
+        gaps = [days[i] - days[i - 1] for i in range(1, len(days)) if days[i] - days[i - 1] > 0]
+        median_gap = _median(gaps) or 1.0
+        if median_gap <= 0:
+            median_gap = 1.0
+        xs = [day / median_gap for day in days]
+    values = [point.get("value") for point in clean]
+    x_mean = sum(xs) / len(xs)
+    y_mean = sum(values) / len(values)
+    numerator = sum((x - x_mean) * (value - y_mean) for x, value in zip(xs, values))
+    denominator = sum((x - x_mean) ** 2 for x in xs)
     return numerator / denominator if denominator else None
 
 
@@ -3265,19 +3334,79 @@ def app_relationship_strength(r):
     return "Weak"
 
 
+def _betacf(a, b, x):
+    # Continued-fraction expansion for the incomplete beta function (Lentz's method).
+    max_iterations = 200
+    eps = 3.0e-12
+    tiny = 1.0e-30
+    qab = a + b
+    qap = a + 1.0
+    qam = a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < tiny:
+        d = tiny
+    d = 1.0 / d
+    h = d
+    for m in range(1, max_iterations + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < eps:
+            break
+    return h
+
+
+def _incomplete_beta(a, b, x):
+    # Regularised incomplete beta function I_x(a, b).
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    log_beta = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+    front = math.exp(log_beta + a * math.log(x) + b * math.log(1.0 - x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
 def app_correlation_p_value(r, n):
+    # Two-sided p-value for a Pearson correlation, via the exact Student-t
+    # distribution. The previous normal approximation understated p at small n,
+    # making weak relationships look more significant than they are.
     if r is None or not _finite(r) or n < 4 or abs(r) >= 1:
         return None
-    t_value = abs(r) * math.sqrt((n - 2) / (1 - r * r))
-    return max(0.001, min(0.999, 2 * (1 - (0.5 * (1 + math.erf(t_value / math.sqrt(2)))))))
+    df = n - 2
+    t_value = abs(r) * math.sqrt(df / (1 - r * r))
+    p_value = _incomplete_beta(df / 2.0, 0.5, df / (df + t_value * t_value))
+    return max(0.001, min(0.999, p_value))
 
 
 def app_confidence_label(count):
     if count >= 12:
-        return "More stable"
+        return "High Confidence"
     if count >= 6:
-        return "Exploratory"
-    return "Collecting"
+        return "Moderate Confidence"
+    if count >= 3:
+        return "Low Confidence"
+    return "Collecting Evidence"
 
 
 def app_trend_state(value, count):
@@ -3288,6 +3417,93 @@ def app_trend_state(value, count):
     if value < -0.05:
         return "decreasing"
     return "stable"
+
+
+def app_direction_state(value, count, positive_label, negative_label, stable_label="Stable", strong_positive_label=None, strong_negative_label=None):
+    if count < 2 or not _finite(value):
+        return "Collecting"
+    if value >= 0.18:
+        return strong_positive_label or positive_label
+    if value > 0.05:
+        return positive_label
+    if value <= -0.18:
+        return strong_negative_label or negative_label
+    if value < -0.05:
+        return negative_label
+    return stable_label
+
+
+def app_performance_state(value, count):
+    return app_direction_state(
+        value,
+        count,
+        "Improving",
+        "Declining",
+        stable_label="Stable",
+        strong_positive_label="Strongly Improving",
+        strong_negative_label="Strongly Declining",
+    )
+
+
+def app_irritation_state(value, count):
+    return app_direction_state(value, count, "Worsening", "Improving", stable_label="Stable")
+
+
+def app_fatigue_state(value, count):
+    return app_direction_state(value, count, "Accumulating", "Recovering", stable_label="Stable")
+
+
+def app_load_stress_state(load_trend, load_stress_ratio, count):
+    if count < 2:
+        return "Collecting"
+    if _finite(load_stress_ratio):
+        if load_stress_ratio >= 1.5:
+            return "Load Spike"
+        if load_stress_ratio >= 1.2:
+            return "Building Load"
+        if load_stress_ratio <= 0.8:
+            return "Low Load"
+        return "Steady Load"
+    return app_direction_state(load_trend, count, "Building Load", "Low Load", stable_label="Steady Load", strong_positive_label="Load Spike")
+
+
+def app_state_interpretation(kind, label):
+    interpretations = {
+        "performance": {
+            "Strongly Improving": "Output is clearly moving up.",
+            "Improving": "Output is moving in the right direction.",
+            "Stable": "Output is being maintained.",
+            "Declining": "Output is slipping.",
+            "Strongly Declining": "Output is dropping enough to take seriously.",
+            "Collecting": "Log more performance outputs to read this clearly.",
+        },
+        "irritation": {
+            "Improving": "Pain is settling.",
+            "Stable": "Pain is not changing much.",
+            "Worsening": "Pain is trending up.",
+            "Collecting": "Log more pain check-ins to read this clearly.",
+        },
+        "fatigue": {
+            "Recovering": "Recovery is catching up.",
+            "Stable": "Recovery cost is steady.",
+            "Accumulating": "Fatigue is building.",
+            "Collecting": "Log more recovery check-ins to read this clearly.",
+        },
+        "loadTolerance": {
+            "Improving": "You are handling the training dose better over time.",
+            "Stable": "You are handling a similar dose, but tolerance is not clearly improving.",
+            "Declining": "The dose is costing more through pain, fatigue, or lower output.",
+            "Collecting": "Log more paired training and check-in days to read tolerance.",
+        },
+        "loadStress": {
+            "Load Spike": "Recent load is much higher than your normal.",
+            "Building Load": "Recent load is rising. The response over the next sessions matters.",
+            "Steady Load": "Recent load is close to your normal.",
+            "Low Load": "Recent load is low. Feeling fresh does not always mean you are adapting.",
+            "Collecting": "Plan or log more sessions to read load stress.",
+        },
+    }
+    return interpretations.get(kind, {}).get(label, "State interpretation is collecting.")
 
 
 def app_format_metric_name(key):
@@ -3357,7 +3573,7 @@ def app_metric_stats(points):
     return {
         "avg": _json_num(app_mean(values)),
         "sd": _json_num(app_sd(values)),
-        "trend": _json_num(app_slope(values)),
+        "trend": _json_num(app_slope_over_time(finite_points)),
         "volatility": _json_num(app_sd(values)),
         "count": len(values),
         "min": _json_num(min(values) if values else None),
@@ -3755,38 +3971,149 @@ def app_build_change_insight(metric_key, points):
 
 def app_build_adaptation_insight(ordered, performance_trend, load_trend, irritation_trend, fatigue_trend):
     count = len(ordered)
-    perf_state = app_trend_state(performance_trend, count)
+
+    # Standardise each component trend to per-SD units before combining. The
+    # incoming trends are slope-per-interval in each metric's raw units, so
+    # without this the high-magnitude load trend dominates the composite and
+    # the "adaptation" score is essentially just "is load going up". Dividing by
+    # the metric's own SD puts performance, load, pain and fatigue on equal
+    # footing so each contributes meaningfully. Component direction labels below
+    # use the same standardised trends, keeping the whole card internally
+    # consistent in SD-per-interval units.
+    def _std_trend(trend, key):
+        if not _finite(trend):
+            return None
+        sd = app_sd([row.get(key) for row in ordered])
+        if not _finite(sd) or sd <= 1e-9:
+            return 0.0
+        return trend / sd
+
+    performance_trend = _std_trend(performance_trend, "performance")
+    load_trend = _std_trend(load_trend, "load")
+    irritation_trend = _std_trend(irritation_trend, "pain")
+    fatigue_trend = _std_trend(fatigue_trend, "fatigue")
+
     load_state = app_trend_state(load_trend, count)
-    irritation_state = app_trend_state(irritation_trend, count)
-    fatigue_state = app_trend_state(fatigue_trend, count)
-    label = "Unclear"
-    summary = "Signals are mixed; collect more paired logs before calling the block."
-    if count < 2:
-        label = "Collecting"
-        summary = "Adaptation state cannot yet be estimated because fewer than two observations are available."
-    elif perf_state == "increasing" and load_state == "increasing" and irritation_state != "increasing":
-        label = "Adapting"
-        summary = "Performance and load are rising without a clear irritation rise."
-    elif irritation_state == "increasing":
-        label = "Irritation accumulating"
-        summary = "Pain is rising, so the block may warrant closer monitoring."
-    elif fatigue_state == "increasing" and perf_state != "increasing":
-        label = "Fatigue accumulating"
-        summary = "Fatigue is rising without a clear performance lift yet."
-    elif perf_state != "increasing" and load_state != "increasing":
-        label = "Stable"
-        summary = "The block is currently stable rather than strongly adapting."
+    load_tolerance_trend = None
+    if all(_finite(value) for value in [load_trend, performance_trend, irritation_trend, fatigue_trend]):
+        load_tolerance_trend = load_trend + performance_trend - irritation_trend - fatigue_trend
+    adaptation_score = None
+    if all(_finite(value) for value in [performance_trend, load_tolerance_trend, irritation_trend, fatigue_trend]):
+        adaptation_score = performance_trend + load_tolerance_trend - irritation_trend - fatigue_trend
+
+    performance_label = app_performance_state(performance_trend, count)
+    irritation_label = app_irritation_state(irritation_trend, count)
+    fatigue_label = app_fatigue_state(fatigue_trend, count)
+    load_tolerance_label = app_direction_state(load_tolerance_trend, count, "Improving", "Declining", stable_label="Stable") if _finite(load_tolerance_trend) else "Collecting"
+
+    load_values = [row.get("load") for row in ordered if _finite(row.get("load"))]
+    recent_load = app_mean(load_values[-3:])
+    baseline_source = load_values[:-3] if len(load_values) > 3 else load_values
+    baseline_load = app_mean(baseline_source)
+    load_stress_ratio = recent_load / baseline_load if is_positive_number(recent_load) and is_positive_number(baseline_load) else None
+    load_stress_label = app_load_stress_state(load_trend, load_stress_ratio, count)
+    load_dose_is_productive = load_stress_label in ["Building Load", "Steady Load"] and load_tolerance_label in ["Improving", "Stable"]
+    load_dose_is_low = load_stress_label == "Low Load"
+    load_dose_is_spiking = load_stress_label == "Load Spike"
+
+    label = "Adaptation Unclear"
+    summary = "Signals are mixed or contradictory, so adaptation cannot yet be called confidently."
+    interpretation = "There is currently not enough evidence to confidently determine adaptation status."
+    if count < 2 or not _finite(adaptation_score):
+        label = "Adaptation Unclear"
+        summary = "Adaptation state cannot yet be estimated because there are not enough paired observations."
+        interpretation = "There is currently not enough evidence to confidently determine adaptation status."
+    elif (
+        adaptation_score >= 0.18
+        and _finite(performance_trend) and performance_trend > 0.05
+        and _finite(load_tolerance_trend) and load_tolerance_trend > 0.03
+        and load_dose_is_productive
+        and irritation_label in ["Improving", "Stable"]
+        and fatigue_label in ["Recovering", "Stable"]
+    ):
+        label = "Strong Positive Adaptation"
+        summary = "Performance is improving while load stress and load tolerance look supportive."
+        interpretation = "The athlete appears to be responding exceptionally well to the current training exposure."
+    elif (
+        adaptation_score >= 0.08
+        and performance_label in ["Improving", "Strongly Improving"]
+        and load_stress_label != "Low Load"
+        and load_tolerance_label != "Declining"
+        and irritation_label != "Worsening"
+        and fatigue_label != "Accumulating"
+    ):
+        label = "Positive Adaptation"
+        summary = "Performance and load tolerance are generally improving while the training dose remains manageable."
+        interpretation = "Current training appears productive."
+    elif (
+        adaptation_score <= -0.08
+        or load_dose_is_spiking
+        or load_tolerance_label == "Declining"
+        or (fatigue_label == "Accumulating" and performance_label not in ["Improving", "Strongly Improving"])
+        or (irritation_label == "Worsening" and performance_label not in ["Strongly Improving"])
+    ):
+        label = "Adaptation At Risk"
+        summary = "Load stress, fatigue, pain, or falling tolerance may be rising faster than performance."
+        interpretation = "Current adaptation may not be sustainable if trends continue."
+    elif (
+        (abs(adaptation_score) <= 0.08 or load_dose_is_low)
+        and performance_label == "Stable"
+        and (load_dose_is_low or (_finite(load_trend) and load_trend >= 0.03))
+    ):
+        label = "Adaptation Plateau"
+        summary = "Recovery may look okay, but load stress or performance change is not enough to show clear adaptation."
+        interpretation = "Current training may be maintaining readiness without clearly building performance."
+    elif (
+        performance_label == "Stable"
+        and irritation_label in ["Improving", "Stable"]
+        and fatigue_label in ["Recovering", "Stable"]
+        and load_tolerance_label != "Declining"
+    ):
+        label = "Stable Adaptation"
+        summary = "The athlete may feel fresh and tolerate the work, but performance is not clearly moving yet."
+        interpretation = "Current training appears to be maintaining readiness and tolerance rather than clearly building performance."
+    elif (
+        abs(adaptation_score) <= 0.08
+        and performance_label == "Stable"
+        and irritation_label == "Stable"
+        and fatigue_label == "Stable"
+    ):
+        label = "Stable Adaptation"
+        summary = "Performance, load stress, fatigue, pain and load tolerance are relatively unchanged."
+        interpretation = "Current training appears to be maintaining rather than developing performance."
+
     return {
         "label": label,
         "summary": summary,
-        "evidenceStatement": ("Adaptation component trends cannot yet be estimated because fewer than two observations are available." if count < 2 else f"Adaptation state was {label.lower()} across {count} logged observations; performance {perf_state}, load {load_state}, irritation {irritation_state}, and fatigue {fatigue_state}."),
-        "trainingInterpretation": f"{summary} This is a block-level interpretation from stored logs, not a prescription.",
-        "bringForward": "Bring forward sessions that coincide with favourable performance, stable irritation, and manageable fatigue as comparison context.",
-        "preventMonitor": "Sessions where fatigue, soreness, or pain are elevated may be worth monitoring because those states may change how load is interpreted.",
-        "limitation": "Small sample; treat as exploratory. Adaptation state reflects stored logs only." if count < 6 else "Adaptation state reflects stored logs only.",
+        "score": _json_num(adaptation_score),
+        "loadToleranceTrend": _json_num(load_tolerance_trend),
+        "loadStressRatio": _json_num(load_stress_ratio),
+        "recentLoad": _json_num(recent_load),
+        "baselineLoad": _json_num(baseline_load),
+        "evidenceStatement": ("Adaptation component trends cannot yet be estimated because there are not enough paired observations." if count < 2 else f"Adaptation score {_pretty(adaptation_score, 2)} mapped to {label}; performance {performance_label.lower()}, load stress {load_stress_label.lower()}, load tolerance {load_tolerance_label.lower()}, pain {irritation_label.lower()}, and fatigue {fatigue_label.lower()}."),
+        "trainingInterpretation": f"{interpretation} This is a block-level interpretation from stored logs, not a prescription.",
+        "performanceMeaning": f"For performance, this means: {app_state_interpretation('performance', performance_label)}",
+        "loadMeaning": f"For training load, this means: {app_state_interpretation('loadStress', load_stress_label)} {app_state_interpretation('loadTolerance', load_tolerance_label)}",
+        "bringForward": "Bring forward sessions where performance improves while load stress is appropriate and pain or fatigue stay manageable.",
+        "preventMonitor": "Watch sessions where load spikes, tolerance declines, or performance stays flat even if the athlete feels fresh.",
+        "limitation": "Small sample; treat as exploratory. Load-stress bands are monitoring guides, not injury cut-offs." if count < 6 else "Adaptation state reflects stored logs only. Load-stress bands are monitoring guides, not injury cut-offs.",
         "confidence": app_confidence_label(count),
         "status": app_confidence_label(count),
-        "componentStates": {"performance": perf_state, "load": load_state, "irritation": irritation_state, "fatigue": fatigue_state},
+        "componentStates": {
+            "performance": performance_label,
+            "load": load_state,
+            "loadStress": load_stress_label,
+            "loadTolerance": load_tolerance_label,
+            "irritation": irritation_label,
+            "fatigue": fatigue_label,
+        },
+        "componentInterpretations": {
+            "performance": app_state_interpretation("performance", performance_label),
+            "irritation": app_state_interpretation("irritation", irritation_label),
+            "fatigue": app_state_interpretation("fatigue", fatigue_label),
+            "loadStress": app_state_interpretation("loadStress", load_stress_label),
+            "loadTolerance": app_state_interpretation("loadTolerance", load_tolerance_label),
+        },
     }
 
 
@@ -3840,14 +4167,16 @@ def app_build_max_intent_insight(sessions):
 def app_build_insight_summary(section_id, trend_insights, relationships, adaptation_insight, likely_response_insight, latest, avg_load):
     performance = next((item for item in sorted([r for r in relationships if r.get("yKey") == "performance" and _finite(r.get("r"))], key=lambda item: abs(item.get("r")), reverse=True)), None)
     irritation = next((item for item in sorted([r for r in relationships if r.get("yKey") == "pain" and _finite(r.get("r"))], key=lambda item: abs(item.get("r")), reverse=True)), None)
+    components = adaptation_insight.get("componentStates", {})
+    component_interpretations = adaptation_insight.get("componentInterpretations", {})
     summaries = {
-        "overview": f"Current read: performance {trend_insights['performance']['state']}, irritation {trend_insights['pain']['state']}, fatigue {trend_insights['fatigue']['state']}.",
-        "performance": f"{trend_insights['performance']['evidenceStatement']} {performance['insight']['evidenceStatement'] if performance else 'Performance relationships are collecting.'}",
-        "irritation": f"{trend_insights['pain']['evidenceStatement']} {irritation['insight']['evidenceStatement'] if irritation else 'Irritation relationships are collecting.'}",
-        "recovery": f"{trend_insights['fatigue']['evidenceStatement']} Readiness is {_pretty(latest.get('readiness'), 1)} in the latest stored log.",
-        "load": f"{trend_insights['load']['evidenceStatement']} Mean session load is {'-' if avg_load is None else _pretty(avg_load, 1)}.",
-        "adaptation": adaptation_insight["summary"],
-        "likely_response": likely_response_insight["evidenceStatement"],
+        "overview": f"{adaptation_insight['label']}: {adaptation_insight['summary']} {adaptation_insight.get('performanceMeaning', '')}",
+        "performance": f"{components.get('performance', 'Collecting')}: {component_interpretations.get('performance', 'Performance meaning is collecting.')}",
+        "irritation": f"{components.get('irritation', 'Collecting')}: {component_interpretations.get('irritation', 'Pain meaning is collecting.')}",
+        "recovery": f"{components.get('fatigue', 'Collecting')}: {component_interpretations.get('fatigue', 'Recovery meaning is collecting.')} Readiness is {_pretty(latest.get('readiness'), 1)} in the latest stored log.",
+        "load": f"{components.get('loadStress', 'Collecting')}: {adaptation_insight.get('loadMeaning', 'Load stress and load tolerance are collecting.')} Mean session load is {'-' if avg_load is None else _pretty(avg_load, 1)}.",
+        "adaptation": f"{adaptation_insight['summary']} {adaptation_insight.get('loadMeaning', '')} {adaptation_insight.get('performanceMeaning', '')}",
+        "likely_response": f"Exploratory forecast: {likely_response_insight['evidenceStatement']}",
         "metric_explorer": "Open a reusable metric dashboard: time series, rolling stats, changes, relationships, and calendar markers.",
     }
     statuses = {
@@ -3923,7 +4252,7 @@ def app_checkin_frame(latest, previous, strongest, trend_insights, adaptation_in
     readiness = latest.get("readiness")
     performance = latest.get("performance")
     load_rel = app_checkin_load_relationship(relationships, strongest)
-    fatigue_state = (trend_insights.get("fatigue") or {}).get("state")
+    fatigue_state = ((adaptation_insight or {}).get("componentStates") or {}).get("fatigue") or (trend_insights.get("fatigue") or {}).get("state")
     irritation_state = (trend_insights.get("pain") or {}).get("state")
     performance_state = (trend_insights.get("performance") or {}).get("state")
 
@@ -3937,7 +4266,7 @@ def app_checkin_frame(latest, previous, strongest, trend_insights, adaptation_in
         return "pain-limited"
     if _finite(soreness) and soreness >= 5 and soreness >= _num(pain) and soreness >= _num(fatigue):
         return "soreness-limited"
-    if (_finite(fatigue) and fatigue >= 5 and fatigue >= _num(pain) and fatigue >= _num(soreness)) or fatigue_state == "increasing" or (adaptation_insight or {}).get("label") == "Fatigue accumulating":
+    if (_finite(fatigue) and fatigue >= 5 and fatigue >= _num(pain) and fatigue >= _num(soreness)) or fatigue_state in ["increasing", "Accumulating"] or (adaptation_insight or {}).get("label") == "Adaptation At Risk":
         return "fatigue-limited"
     if _finite(freshness) and freshness >= 7 and _finite(readiness) and readiness >= 5 and _num(pain) < 4:
         return "freshness-supported"
@@ -3949,40 +4278,23 @@ def app_checkin_frame(latest, previous, strongest, trend_insights, adaptation_in
 
 
 def app_checkin_theme(latest, previous, strongest, current_read, adaptation_insight, trend_insights=None, relationships=None):
-    frame = app_checkin_frame(latest, previous, strongest, trend_insights or {}, adaptation_insight, relationships or [])
-    deltas = app_checkin_deltas(latest, previous)
-    pain = latest.get("pain")
-    freshness = latest.get("freshness")
-    soreness = latest.get("soreness")
-    fatigue = latest.get("fatigue")
-    readiness = latest.get("readiness")
-    performance = latest.get("performance")
-
-    titles = {
-        "pain-limited": "Pain-Limited Check-in",
-        "fatigue-limited": "Fatigue-Limited State",
-        "soreness-limited": "Soreness-Limited State",
-        "freshness-supported": "Freshness-Supported Day",
-        "performance-supported": "Performance-Supported Day",
-        "load-response signal": "Load-Response Signal",
-        "irritation-response signal": "Irritation-Response Signal",
-        "stable response": "Stable Response Day",
-        "collecting": "Context Collecting",
-    }
-    signals = {
-        "pain-limited": f"Pain is {_pretty(pain, 1)}, which is the dominant limiter in the latest check-in.",
-        "fatigue-limited": f"Fatigue is {_pretty(fatigue, 1)} with readiness at {_pretty(readiness, 1)}.",
-        "soreness-limited": f"Soreness is {_pretty(soreness, 1)}, making it the clearest recovery cost in the latest check-in.",
-        "freshness-supported": f"Freshness is {_pretty(freshness, 1)} with readiness at {_pretty(readiness, 1)}.",
-        "performance-supported": f"Performance is {_pretty(performance, 1)} while readiness is {_pretty(readiness, 1)}.",
-        "load-response signal": f"Session load is {_pretty(latest.get('load'), 1)} and changed by {_pretty(deltas.get('load'), 1)} from the previous paired check-in.",
-        "irritation-response signal": f"Pain changed by {_pretty(deltas.get('pain'), 1)} from the previous check-in.",
-        "stable response": "Pain and readiness were broadly stable compared with the previous check-in.",
-        "collecting": "No dominant response frame is stable yet; more paired logs will sharpen the read.",
-    }
     if not latest.get("id"):
-        return {"title": "Context Collecting", "signal": "No saved check-in is available yet.", "frame": "collecting"}
-    return {"title": titles.get(frame, "Check-in Response"), "signal": signals.get(frame, "Current response context is collecting."), "frame": frame}
+        return {
+            "title": "Context collecting",
+            "signal": "No check-in saved yet.",
+            "meaning": "Save a quick check-in after training so Impuls can connect your body response to the programme.",
+            "frame": "collecting",
+            "tone": "neutral",
+        }
+    return app_checkin_theme_copy(
+        {},
+        latest,
+        previous,
+        strongest,
+        trend_insights or {},
+        adaptation_insight,
+        relationships or [],
+    )
 
 
 def app_checkin_evidence_summary(latest, previous, strongest):
@@ -4016,8 +4328,14 @@ def app_checkin_evidence_summary(latest, previous, strongest):
 def app_checkin_context(data, latest):
     context = app_selected_programme_context(data)
     session = latest.get("session") or {}
+    macro_name = session.get("macro_name") or context["macroBlock"]
+    block_name = session.get("block_name") or context["trainingBlock"]
+    week_name = session.get("week_name") or context["week"]
     return {
         **context,
+        "macroBlock": macro_name,
+        "trainingBlock": block_name,
+        "week": week_name,
         "sessionName": session.get("session_name") or "Session context is collecting.",
         "movementTypes": app_movement_summary(session),
         "exercises": app_exercise_detail_summary(session),
@@ -4026,51 +4344,155 @@ def app_checkin_context(data, latest):
 
 def app_checkin_context_sentence(data, latest):
     context = app_checkin_context(data, latest)
-    return f"{context['macroBlock']} / {context['trainingBlock']} / {context['week']} / {context['sessionName']}"
+    parts = [
+        value for value in [
+            context.get("trainingBlock"),
+            context.get("week"),
+            context.get("sessionName"),
+        ]
+        if value and "collecting" not in str(value).lower()
+    ]
+    return " / ".join(parts) if parts else "your current programme"
+
+
+def app_checkin_programme_meaning(frame, adaptation_insight, context):
+    adaptation_insight = adaptation_insight or {}
+    label = adaptation_insight.get("label") or "Adaptation Unclear"
+    states = adaptation_insight.get("componentStates") or {}
+    block_name = context.get("trainingBlock")
+    block_clause = f" in {block_name}" if block_name and "collecting" not in str(block_name).lower() else " in this block"
+
+    if states.get("loadStress") == "Low Load" and frame in ["freshness-supported", "stable response", "collecting"]:
+        return f"Across the programme{block_clause}, load is low. Feeling good today may mean you are recovered, not necessarily building adaptation."
+    if states.get("loadStress") == "Load Spike":
+        return f"Across the programme{block_clause}, load has spiked. The next useful signal is whether pain, soreness, or output worsens."
+    if states.get("loadTolerance") == "Declining":
+        return f"Across the programme{block_clause}, tolerance is slipping. Treat today's signal as a warning until the body response settles."
+    if label in ["Strong Positive Adaptation", "Positive Adaptation"]:
+        return f"Across the programme{block_clause}, adaptation is trending well. Keep confirming that this response stays repeatable."
+    if label == "Adaptation At Risk":
+        return f"Across the programme{block_clause}, adaptation is at risk. Today's body response matters more than chasing extra output."
+    if label in ["Stable Adaptation", "Adaptation Plateau"]:
+        return f"Across the programme{block_clause}, training looks more like holding than building. Use today's signal to decide whether the next step should change."
+    return f"Across the programme{block_clause}, Impuls is still learning what this pattern means."
+
+
+def app_checkin_theme_tone(frame, latest, previous, deltas, adaptation_insight):
+    states = (adaptation_insight or {}).get("componentStates") or {}
+    if not latest.get("id"):
+        return "neutral"
+    if frame in ["pain-limited"]:
+        return "bad"
+    if frame == "irritation-response signal":
+        pain_delta = deltas.get("pain")
+        if _finite(pain_delta) and pain_delta < 0:
+            return "good"
+        return "bad"
+    if frame in ["fatigue-limited", "soreness-limited", "load-response signal"]:
+        return "warning"
+    if frame in ["freshness-supported", "performance-supported"]:
+        if states.get("loadStress") in ["Low Load", "Load Spike"] or states.get("loadTolerance") == "Declining":
+            return "warning"
+        return "good"
+    if frame == "stable response":
+        return "neutral"
+    return "neutral"
+
+
+def app_checkin_theme_copy(data, latest, previous, strongest, trend_insights, adaptation_insight, relationships):
+    frame = app_checkin_frame(latest, previous, strongest, trend_insights or {}, adaptation_insight, relationships or [])
+    deltas = app_checkin_deltas(latest, previous)
+    context = app_checkin_context(data, latest)
+    programme_meaning = app_checkin_programme_meaning(frame, adaptation_insight, context)
+    pain = latest.get("pain")
+    soreness = latest.get("soreness")
+    fatigue = latest.get("fatigue")
+    freshness = latest.get("freshness")
+    performance = latest.get("performance")
+    load = latest.get("load")
+    pain_delta = deltas.get("pain")
+    load_delta = deltas.get("load")
+
+    if not latest.get("id"):
+        return {
+            "title": "Context collecting",
+            "signal": "No check-in saved yet.",
+            "meaning": "Save a quick check-in after training so Impuls can connect your body response to the programme.",
+            "frame": "collecting",
+            "tone": "neutral",
+        }
+
+    titles = {
+        "pain-limited": "Pain is the limiter",
+        "fatigue-limited": "Recovery is under pressure",
+        "soreness-limited": "Soreness is the main cost",
+        "freshness-supported": "You feel ready",
+        "performance-supported": "Output is holding",
+        "load-response signal": "Load response showing",
+        "irritation-response signal": "Pain response changed",
+        "stable response": "Holding steady",
+        "collecting": "Still learning today's pattern",
+    }
+
+    if frame == "pain-limited":
+        signal = f"Pain is {_pretty(pain, 1)}, higher than the other body-response scores."
+        meaning = f"Make pain the main decision point today. {programme_meaning}"
+    elif frame == "fatigue-limited":
+        signal = f"Fatigue is {_pretty(fatigue, 1)}, the clearest recovery cost today."
+        meaning = f"This is a recovery-pressure day. {programme_meaning}"
+    elif frame == "soreness-limited":
+        signal = f"Soreness is {_pretty(soreness, 1)}, the strongest body-cost signal today."
+        meaning = f"Treat soreness as the main limiter before judging performance. {programme_meaning}"
+    elif frame == "freshness-supported":
+        signal = f"Freshness is {_pretty(freshness, 1)} and pain is not the main limiter."
+        meaning = f"You look ready today, but freshness alone is not adaptation. {programme_meaning}"
+    elif frame == "performance-supported":
+        signal = f"Performance score is {_pretty(performance, 1)} and output is holding."
+        meaning = f"Use this as a useful performance day if pain and fatigue stay controlled. {programme_meaning}"
+    elif frame == "load-response signal":
+        load_change = f" Load changed {load_delta:+.1f} from the previous paired day." if _finite(load_delta) and abs(load_delta) >= 1 else ""
+        signal = f"Training load is {_pretty(load, 1)} and body response is moving with the dose.{load_change}"
+        meaning = f"Do not read this from freshness alone. Watch whether similar load creates pain, soreness, fatigue, or output drop-off. {programme_meaning}"
+    elif frame == "irritation-response signal":
+        if _finite(pain_delta):
+            direction = "up" if pain_delta > 0 else "down"
+            signal = f"Pain moved {direction} by {abs(pain_delta):.1f} since the last check-in."
+        else:
+            signal = f"Pain is {_pretty(pain, 1)} and is the clearest body-response signal."
+        if _finite(pain_delta) and pain_delta < 0:
+            meaning = f"Pain is settling. Keep using similar sessions as reference points if output also holds. {programme_meaning}"
+        else:
+            meaning = f"Pain is the signal to watch. Judge the next session by body response first, not readiness or output alone. {programme_meaning}"
+    elif frame == "stable response":
+        signal = "Pain and recovery scores have not moved much since the last check-in."
+        meaning = f"This is useful holding-context, not a big warning or a big green light. {programme_meaning}"
+    else:
+        signal = "No single signal is dominant yet."
+        meaning = f"Keep logging check-ins and performance after sessions so Impuls can separate signal from noise. {programme_meaning}"
+
+    return {
+        "title": titles.get(frame, "Check-in response"),
+        "signal": signal,
+        "meaning": meaning,
+        "frame": frame,
+        "tone": app_checkin_theme_tone(frame, latest, previous, deltas, adaptation_insight),
+        "programmeMeaning": programme_meaning,
+    }
 
 
 def app_checkin_interpretation(data, latest, previous, strongest, trend_insights, adaptation_insight, relationships):
     if not latest.get("id"):
-        return "User interpretation is collecting because no saved check-in is available yet."
+        return "Save a quick check-in after training so Impuls can connect your body response to the programme."
 
-    frame = app_checkin_frame(latest, previous, strongest, trend_insights, adaptation_insight, relationships)
-    context = app_checkin_context(data, latest)
-    context_label = app_checkin_context_sentence(data, latest)
-    pain = latest.get("pain")
-    freshness = latest.get("freshness")
-    soreness = latest.get("soreness")
-    fatigue = latest.get("fatigue")
-    readiness = latest.get("readiness")
-    performance = latest.get("performance")
-    load = latest.get("load")
-    deltas = app_checkin_deltas(latest, previous)
-    exercise_clause = "" if "collecting" in context["exercises"].lower() else f" The linked exercise detail is {context['exercises']}."
-    change_parts = []
-    for label, key in [("pain", "pain"), ("readiness", "readiness"), ("performance", "performance"), ("load", "load")]:
-        if _finite(deltas.get(key)):
-            change_parts.append(f"{label} {deltas[key]:+0.1f}")
-    change_clause = f" Compared with the previous check-in, {'; '.join(change_parts)}." if change_parts else ""
-
-    if frame == "pain-limited":
-        lead = f"Today’s check-in suggests a pain-limited state: pain is {_pretty(pain, 1)} while soreness is {_pretty(soreness, 1)} and fatigue is {_pretty(fatigue, 1)}, leaving readiness at {_pretty(readiness, 1)}."
-    elif frame == "fatigue-limited":
-        lead = f"Today’s check-in suggests a fatigue-limited state rather than a pain-limited state: freshness is {_pretty(freshness, 1)} while soreness is {_pretty(soreness, 1)}, which places fatigue at {_pretty(fatigue, 1)} and readiness at {_pretty(readiness, 1)}."
-    elif frame == "soreness-limited":
-        lead = f"Today’s check-in points to a soreness-limited state: soreness is {_pretty(soreness, 1)} with pain at {_pretty(pain, 1)}, and that recovery cost is pulling readiness to {_pretty(readiness, 1)}."
-    elif frame == "freshness-supported":
-        lead = f"Today’s check-in suggests a freshness-supported state: freshness is {_pretty(freshness, 1)} while pain is {_pretty(pain, 1)} and soreness is {_pretty(soreness, 1)}, supporting readiness of {_pretty(readiness, 1)}."
-    elif frame == "performance-supported":
-        lead = f"Today’s check-in points to a performance-supported response: performance is {_pretty(performance, 1)} with readiness at {_pretty(readiness, 1)}, so output is holding against the current recovery state."
-    elif frame == "load-response signal":
-        lead = f"Today’s check-in suggests a load-response signal: linked session load is {_pretty(load, 1)}, pain is {_pretty(pain, 1)}, and readiness is {_pretty(readiness, 1)}."
-    elif frame == "irritation-response signal":
-        lead = f"Today’s check-in points to an irritation-response signal: pain is {_pretty(pain, 1)} after changing by {_pretty(deltas.get('pain'), 1)} from the previous check-in, with readiness now {_pretty(readiness, 1)}."
-    elif frame == "stable response":
-        lead = f"Today’s check-in suggests a stable response: pain is {_pretty(pain, 1)} and readiness is {_pretty(readiness, 1)}, with no large change from the previous check-in."
-    else:
-        lead = f"Today’s check-in is still collecting a clear response frame: pain is {_pretty(pain, 1)}, freshness is {_pretty(freshness, 1)}, soreness is {_pretty(soreness, 1)}, fatigue is {_pretty(fatigue, 1)}, and readiness is {_pretty(readiness, 1)}."
-
-    return f"{lead}{change_clause} Because this check-in is linked to {context_label} with session load {_pretty(load, 1)}, it becomes evidence for how that session structure is affecting recovery and performance.{exercise_clause}"
+    return app_checkin_theme_copy(
+        data,
+        latest,
+        previous,
+        strongest,
+        trend_insights,
+        adaptation_insight,
+        relationships,
+    )["meaning"]
 
 
 def app_chart_point(point, key="value"):
@@ -4093,11 +4515,12 @@ def app_checkin_state_radar(latest):
     ]
     return {
         "type": "checkin_state_radar",
-        "title": "Check-in State Radar",
-        "xLabel": "State metric",
+        "title": "Today's check-in scores",
+        "xLabel": "Body signal",
         "yLabel": "Score, 0-10",
         "axes": axes,
-        "evidence": "Latest check-in state values are plotted on a 0-10 scale.",
+        "evidence": "Latest check-in values are plotted on a 0-10 scale.",
+        "interpretation": "Farther from the centre means a higher score. Green is helpful; red or orange is a body cost to watch.",
         "emptyState": "Needs a saved check-in with pain, freshness, soreness, fatigue, and readiness.",
     }
 
@@ -4112,43 +4535,46 @@ def app_checkin_visual(latest, previous, strongest, metric_series, relationships
     if frame in ["fatigue-limited", "soreness-limited", "freshness-supported"]:
         return {
             "type": "readiness_decomposition_bar",
-            "title": "Readiness Decomposition",
-            "xLabel": "Contribution to readiness",
-            "yLabel": "Freshness minus pain and soreness cost",
+            "title": "What shaped readiness",
+            "xLabel": "Green helps, red/orange costs",
+            "yLabel": "0-10 check-in score",
             "freshness": _json_num(latest.get("freshness")),
             "painCost": _json_num(_num(latest.get("pain")) / 2),
             "sorenessCost": _json_num(_num(latest.get("soreness")) / 2),
             "readiness": _json_num(latest.get("readiness")),
-            "evidence": f"Readiness = {_pretty(latest.get('readiness'), 1)} from freshness {_pretty(latest.get('freshness'), 1)} minus pain and soreness cost.",
+            "evidence": f"Freshness {_pretty(latest.get('freshness'), 1)} is balanced against pain and soreness cost.",
+            "interpretation": "The green bar is what helps you feel ready. The red and orange bars are what pull readiness down.",
             "emptyState": "Needs freshness, pain, and soreness to decompose readiness.",
         }
 
     if previous and _finite(deltas.get("pain")) and abs(deltas["pain"]) >= 1:
         return {
             "type": "pain_delta_bar",
-            "title": "Pain Delta Bar",
-            "xLabel": "Check-in date",
-            "yLabel": "Pain score",
+            "title": "Pain change",
+            "xLabel": "Last check-in vs today",
+            "yLabel": "Pain score, 0-10",
             "bars": [
                 {"label": _date_short(previous.get("date")), "date": previous.get("date"), "value": _json_num(previous.get("pain"))},
                 {"label": _date_short(latest.get("date")), "date": latest.get("date"), "value": _json_num(latest.get("pain"))},
             ],
             "delta": _json_num(deltas["pain"]),
-            "evidence": f"Irritation delta: {deltas['pain']:+.1f} pain score.",
+            "evidence": f"Pain changed {deltas['pain']:+.1f} points.",
+            "interpretation": "The second bar is today. Red means pain rose; green means pain eased.",
             "emptyState": "Needs a previous check-in before pain delta can be displayed.",
         }
 
     if load_rel and len(load_rel.get("points", [])) >= 3:
         return {
             "type": "load_response_scatter",
-            "title": load_rel.get("title") or "Load Response Scatter",
+            "title": load_rel.get("title") or "Load response",
             "xLabel": load_rel.get("xLabel") or "Session load",
             "yLabel": load_rel.get("yLabel") or "Outcome",
             "points": [{"date": point.get("date"), "x": _json_num(point.get("x")), "y": _json_num(point.get("y"))} for point in load_rel.get("points", []) if _finite(point.get("x")) and _finite(point.get("y"))],
             "r": _json_num(load_rel.get("r")),
             "n": len(load_rel.get("points", [])),
             "pValueText": app_p_value_text(load_rel.get("pValue")),
-            "evidence": f"r = {_pretty(load_rel.get('r'), 2)} / n = {len(load_rel.get('points', []))} / p-value: {app_p_value_text(load_rel.get('pValue'))}.",
+            "evidence": f"{len(load_rel.get('points', []))} paired logs compare training load with body response.",
+            "interpretation": "Each dot is a logged training day. If dots climb as load rises, higher load is tending to come with a higher response cost.",
             "emptyState": "Needs at least three paired load-response observations.",
         }
 
@@ -4156,7 +4582,7 @@ def app_checkin_visual(latest, previous, strongest, metric_series, relationships
         paired_count = min(len(metric_series.get("performance", [])), len(metric_series.get("readiness", [])))
         return {
             "type": "performance_readiness_dual_line",
-            "title": "Performance and Readiness",
+            "title": "Output and readiness",
             "xLabel": "Date",
             "yLabel": "Score",
             "series": [
@@ -4164,15 +4590,16 @@ def app_checkin_visual(latest, previous, strongest, metric_series, relationships
                 app_chart_series(metric_series, "readiness", "Readiness", "#2D9A68", 6),
             ],
             "evidence": f"Recent performance and readiness are shown across {paired_count} stored observations.",
+            "interpretation": "Use the direction of the lines, not tiny day-to-day wiggles. Best case: output holds or rises while readiness does not collapse.",
             "emptyState": "Needs at least two performance and readiness observations.",
         }
 
     if len(ordered) >= 3:
         return {
             "type": "block_state_small_multiples",
-            "title": "Block State Small Multiples",
+            "title": "Recent training signals",
             "xLabel": "Date",
-            "yLabel": "Metric value",
+            "yLabel": "Each chart uses its own scale",
             "series": [
                 app_chart_series(metric_series, "performance", "Performance", "#24883B", 6),
                 app_chart_series(metric_series, "load", "Load", "#1F7A40", 6),
@@ -4181,6 +4608,7 @@ def app_checkin_visual(latest, previous, strongest, metric_series, relationships
                 app_chart_series(metric_series, "readiness", "Readiness", "#2D9A68", 6),
             ],
             "evidence": f"Block-state small multiples use the latest {min(len(ordered), 6)} stored observations per metric where available.",
+            "interpretation": "Each mini chart is scaled separately, so compare direction, not bar height. You want performance and load to build without pain or fatigue climbing too fast.",
             "emptyState": "Needs at least three stored check-ins for block-state small multiples.",
         }
 
@@ -4192,7 +4620,7 @@ def app_build_checkin_review(data, ordered, rows_desc, metric_series, trend_insi
     previous = ordered[-2] if len(ordered) >= 2 else None
     strongest = next(iter(sorted([item for item in relationships if _finite(item.get("r"))], key=lambda item: abs(item.get("r", 0)), reverse=True)), None)
     frame = app_checkin_frame(latest, previous, strongest, trend_insights, adaptation_insight, relationships)
-    theme = app_checkin_theme(latest, previous, strongest, current_read, adaptation_insight, trend_insights, relationships)
+    theme = app_checkin_theme_copy(data, latest, previous, strongest, trend_insights, adaptation_insight, relationships)
     return {
         "checkInId": latest.get("id"),
         "status": "Ready" if latest.get("id") else "Collecting",
@@ -4206,10 +4634,13 @@ def app_build_checkin_review(data, ordered, rows_desc, metric_series, trend_insi
 
 def analyze_app_data(data):
     sessions = [*(data.get("sessions") or []), *app_all_planned_sessions(data)]
-    check_ins = data.get("checkIns") or []
+    check_ins = data.get("checkIns") or data.get("check_ins") or []
     active_session = data.get("activeSession") or {}
     session_by_id = {session.get("id"): session for session in sessions if session.get("id")}
     rows = []
+
+    def check_in_value(check_in, primary_key, fallback_key):
+        return check_in.get(primary_key) if check_in.get(primary_key) is not None else check_in.get(fallback_key)
 
     def build_session_row(session, check_in=None):
         exercises = (session or {}).get("exercises", [])
@@ -4239,9 +4670,9 @@ def analyze_app_data(data):
             "reps": sum((_num(exercise.get("sets"), 1) or 1) * _num(exercise.get("reps")) for exercise in exercises),
             "duration": sum(_num(exercise.get("duration_minutes")) for exercise in exercises),
             "average_intent": app_mean(intents),
-            "pain": _num(check_in.get("pain_score"), None) if has_check_in else None,
-            "freshness": _num(check_in.get("freshness_score"), None) if has_check_in else None,
-            "soreness": _num(check_in.get("soreness_score"), None) if has_check_in else None,
+            "pain": _num(check_in_value(check_in, "pain_score", "pain"), None) if has_check_in else None,
+            "freshness": _num(check_in_value(check_in, "freshness_score", "freshness"), None) if has_check_in else None,
+            "soreness": _num(check_in_value(check_in, "soreness_score", "soreness"), None) if has_check_in else None,
             "fatigue": app_fatigue(check_in) if has_check_in else None,
             "readiness": app_readiness(check_in) if has_check_in else None,
             "performance": actual_values["performance"] if _finite(actual_values["performance"]) else _num(check_in.get("performance_score"), None),
@@ -4322,7 +4753,14 @@ def analyze_app_data(data):
     likely_response_insight = app_build_likely_response_insight(ordered)
     avg_load = app_mean([row.get("load") for row in rows])
     insight_summaries = {section_id: app_build_insight_summary(section_id, trend_insights, relationships, adaptation_insight, likely_response_insight, latest, avg_load) for section_id in ["overview", "performance", "irritation", "recovery", "load", "adaptation", "likely_response", "metric_explorer"]}
-    current_read = {"performance": trend_insights["performance"]["state"], "irritation": trend_insights["pain"]["state"], "fatigue": trend_insights["fatigue"]["state"], "adaptation": adaptation_insight["label"]}
+    current_read = {
+        "performance": adaptation_insight.get("componentStates", {}).get("performance", trend_insights["performance"]["state"]),
+        "loadStress": adaptation_insight.get("componentStates", {}).get("loadStress", trend_insights["load"]["state"]),
+        "loadTolerance": adaptation_insight.get("componentStates", {}).get("loadTolerance", "Collecting"),
+        "irritation": adaptation_insight.get("componentStates", {}).get("irritation", trend_insights["pain"]["state"]),
+        "fatigue": adaptation_insight.get("componentStates", {}).get("fatigue", trend_insights["fatigue"]["state"]),
+        "adaptation": adaptation_insight["label"],
+    }
     load_performance = next((item.get("r") for item in relationships if item.get("id") == "performance_load"), None)
     freshness_performance = next((item.get("r") for item in relationships if item.get("id") == "performance_freshness"), None)
     fatigue_performance = next((item.get("r") for item in relationships if item.get("id") == "performance_fatigue"), None)

@@ -38,14 +38,16 @@ import {
 } from './src/database';
 import { Circle, G, Line, Path, Rect, Svg, Text as SvgText } from 'react-native-svg';
 
-function analysisUrlFromEnv() {
+function analysisUrlsFromEnv() {
   const fallbackUrl = 'https://impuls-chl1.onrender.com';
   const isHttpsPage = typeof window !== 'undefined' && window.location?.protocol === 'https:';
   const candidates = [
     process.env.EXPO_PUBLIC_ANALYSIS_API_URL,
     process.env.EXPO_PUBLIC_ANALYSIS_API_BASE_URL,
+    'http://127.0.0.1:8000',
     fallbackUrl,
   ].filter(Boolean);
+  const urls = [];
 
   for (const candidate of candidates) {
     const cleanedUrl = String(candidate).trim().replace(/\/+$/, '');
@@ -54,13 +56,38 @@ function analysisUrlFromEnv() {
       console.warn('[LOCAL FALLBACK] Ignoring insecure analysis API URL on HTTPS page.', cleanedUrl);
       continue;
     }
-    return cleanedUrl.endsWith('/analyze') ? cleanedUrl : `${cleanedUrl}/analyze`;
+    const url = cleanedUrl.endsWith('/analyze') ? cleanedUrl : `${cleanedUrl}/analyze`;
+    if (!urls.includes(url)) urls.push(url);
   }
 
-  return `${fallbackUrl}/analyze`;
+  return urls.length ? urls : [`${fallbackUrl}/analyze`];
 }
 
-const ANALYSIS_API_URL = analysisUrlFromEnv();
+const ANALYSIS_API_URLS = analysisUrlsFromEnv();
+const ANALYSIS_API_URL = ANALYSIS_API_URLS[0];
+
+async function fetchAnalysisWithFallback(data) {
+  const errors = [];
+  for (const url of ANALYSIS_API_URLS) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(body || `Analysis request failed (${response.status})`);
+      }
+      if (url !== ANALYSIS_API_URL) console.log('[ANALYSIS] Fallback backend used', url);
+      return response.json();
+    } catch (error) {
+      errors.push(`${url}: ${error.message || 'Failed to fetch'}`);
+      console.warn('[ANALYSIS] Backend unavailable, trying next candidate.', url, error);
+    }
+  }
+  throw new Error(errors.join('\n'));
+}
 
 function programmeSignature(programme) {
   return JSON.stringify(programme || {});
@@ -126,23 +153,42 @@ const romOptions = [
   ['partial', 'Partial'],
 ];
 
+// Fast single-output capture for the daily check-in. Each maps to a check-in
+// field the engine + Supabase already read (see analyze_app_data / saveCheckIn).
+const quickOutputOptions = [
+  ['performance_score', 'Effort / score'],
+  ['height_or_distance', 'Jump height'],
+  ['sprint_time', 'Sprint time'],
+  ['ft', 'Flight time'],
+];
+const quickOutputUnitOptions = {
+  height_or_distance: jumpDistanceUnitOptions,
+  sprint_time: sprintTimeUnitOptions,
+  ft: sprintTimeUnitOptions,
+};
+const quickOutputDefaultUnit = {
+  height_or_distance: 'cm',
+  sprint_time: 'seconds',
+  ft: 'seconds',
+};
+
 const insightSections = [
   { id: 'overview', title: 'Overview', color: '#111111' },
   { id: 'performance', title: 'Performance', color: '#24883B' },
-  { id: 'irritation', title: 'Irritation', color: '#E13F32' },
+  { id: 'irritation', title: 'Pain', color: '#E13F32' },
   { id: 'recovery', title: 'Recovery', color: '#6656E8' },
   { id: 'load', title: 'Load', color: '#1F7A40' },
   { id: 'adaptation', title: 'Adaptation', color: '#2F8F6B' },
-  { id: 'likely_response', title: 'Likely Response', color: '#B86B18' },
-  { id: 'metric_explorer', title: 'Metric Explorer', color: '#3A6EA5' },
+  { id: 'likely_response', title: 'What Usually Happens', color: '#B86B18' },
+  { id: 'metric_explorer', title: 'Evidence', color: '#3A6EA5' },
 ];
 
 const dashboardMetrics = [
   { key: 'performance', label: 'Performance Score', category: 'Performance', color: '#24883B' },
   { key: 'height_or_distance', label: 'Height / Distance', category: 'Performance', color: '#24924A' },
   { key: 'rsi', label: 'RSI', category: 'Performance', color: '#1F7A40' },
-  { key: 'ft', label: 'FT', category: 'Performance', color: '#2E8B57' },
-  { key: 'gct', label: 'GCT', category: 'Performance', color: '#6AA84F' },
+  { key: 'ft', label: 'Flight Time', category: 'Performance', color: '#2E8B57' },
+  { key: 'gct', label: 'Ground Contact', category: 'Performance', color: '#6AA84F' },
   { key: 'sprint_time', label: 'Sprint Time', category: 'Performance', color: '#B86B18' },
   { key: 'bar_velocity', label: 'Bar Velocity', category: 'Performance', color: '#2F8F6B' },
   { key: 'weight', label: 'Weight', category: 'Performance', color: '#33332F' },
@@ -156,8 +202,8 @@ const dashboardMetrics = [
   { key: 'soreness', label: 'Soreness', category: 'Recovery', color: '#7C63E6' },
   { key: 'fatigue', label: 'Fatigue', category: 'Recovery', color: '#6656E8' },
   { key: 'readiness', label: 'Readiness', category: 'Recovery', color: '#2D9A68' },
-  { key: 'pain', label: 'Pain', category: 'Irritation', color: '#E13F32' },
-  { key: 'pain_delta', label: 'Irritation Delta', category: 'Irritation', color: '#C73A2E' },
+  { key: 'pain', label: 'Pain', category: 'Pain', color: '#E13F32' },
+  { key: 'pain_delta', label: 'Pain Change', category: 'Pain', color: '#C73A2E' },
 ];
 
 const performanceMetricKeys = ['performance', 'height_or_distance', 'ft', 'gct', 'rsi', 'sprint_time', 'bar_velocity', 'weight'];
@@ -550,7 +596,7 @@ function todayPlannedSession(programme) {
   return blockSessions.find((session) => session.date === today) || {
     id: 'empty_plan',
     session_name: 'No session planned',
-    focus: 'No planned session today. Create one in Calendar.',
+    focus: 'No planned session today. Create one in Programme.',
     duration: '',
     exercises: [],
   };
@@ -793,6 +839,12 @@ function plannedAttemptRows(exercise = {}) {
   return rows;
 }
 
+function attemptHasLoggedMetrics(attempt = {}) {
+  return Object.entries(attempt.metrics || {}).some(([key, value]) =>
+    !String(key).endsWith('_unit') && value !== null && value !== undefined && value !== ''
+  );
+}
+
 function normaliseTimeClient(value, unit) {
   const numeric = storedNumber(value);
   if (!Number.isFinite(numeric)) return null;
@@ -816,10 +868,15 @@ function actualMetricValue(attempt = {}, metric) {
     return Number.isFinite(ft) && Number.isFinite(gct) && ft > 0 && gct > 0 ? ft / gct : null;
   }
   if (metric === 'ft' || metric === 'gct' || metric === 'sprint_time') {
-    return normaliseTimeClient(metrics[metric], metrics[`${metric}_unit`]);
+    const value = normaliseTimeClient(metrics[metric], metrics[`${metric}_unit`]);
+    return Number.isFinite(value) && value > 0 ? value : null;
   }
-  if (metric === 'height_or_distance') return normaliseDistanceClient(metrics.height_or_distance, metrics.height_or_distance_unit);
-  return storedNumber(metrics[metric]);
+  if (metric === 'height_or_distance') {
+    const value = normaliseDistanceClient(metrics.height_or_distance, metrics.height_or_distance_unit);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  const value = storedNumber(metrics[metric]);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function bestModeForMetric(metric) {
@@ -983,6 +1040,23 @@ function dashboardMetricConfig(key) {
   return dashboardMetrics.find((item) => item.key === key) || { key, label: formatMetricName(key), category: 'Performance', color: '#24883B' };
 }
 
+function metricUnitLabel(key) {
+  if (['ft', 'gct'].includes(key)) return 'ms';
+  if (key === 'sprint_time') return 's';
+  if (['height_or_distance', 'distance'].includes(key)) return key === 'height_or_distance' ? 'cm' : 'm';
+  if (key === 'weight') return 'kg';
+  if (key === 'bar_velocity') return 'm/s';
+  return '';
+}
+
+function displayMetricValue(key, value, digits = 1) {
+  if (!Number.isFinite(value)) return '-';
+  const displayValue = ['ft', 'gct'].includes(key) ? value * 1000 : value;
+  const precision = ['ft', 'gct'].includes(key) ? 0 : digits;
+  const unit = metricUnitLabel(key);
+  return `${pretty(displayValue, precision)}${unit ? ` ${unit}` : ''}`;
+}
+
 function metricTrendFromPerformanceAnalysis(analysis, key) {
   return analysis?.performanceMetricAnalysis?.metricTrends?.[key] || analysis?.trendInsights?.[key];
 }
@@ -1024,17 +1098,50 @@ function metricStats(analysis, key) {
   };
 }
 
+// Slope of value vs time, scaled to "per typical interval": x is days-since-first
+// divided by the median gap between observations, so missed days no longer distort
+// the trend. Mirrors app_slope_over_time in backend/logic.py. Falls back to index
+// spacing when dates are missing/unparseable.
+function slopeOverTime(points = []) {
+  const clean = points.filter((point) => Number.isFinite(point.value));
+  if (clean.length < 2) return null;
+  const times = clean.map((point) => {
+    const parsed = point.date ? Date.parse(point.date) : NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  });
+  let xs;
+  if (times.some((time) => time === null)) {
+    xs = clean.map((_point, index) => index);
+  } else {
+    const base = times[0];
+    const days = times.map((time) => (time - base) / 86400000);
+    const gaps = [];
+    for (let i = 1; i < days.length; i += 1) {
+      const gap = days[i] - days[i - 1];
+      if (gap > 0) gaps.push(gap);
+    }
+    const sorted = [...gaps].sort((a, b) => a - b);
+    let medianGap = 1;
+    if (sorted.length) {
+      const mid = Math.floor(sorted.length / 2);
+      medianGap = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+    if (!(medianGap > 0)) medianGap = 1;
+    xs = days.map((day) => day / medianGap);
+  }
+  const vals = clean.map((point) => point.value);
+  const xMean = xs.reduce((sum, x) => sum + x, 0) / xs.length;
+  const yMean = vals.reduce((sum, value) => sum + value, 0) / vals.length;
+  const numerator = xs.reduce((sum, x, index) => sum + (x - xMean) * (vals[index] - yMean), 0);
+  const denominator = xs.reduce((sum, x) => sum + (x - xMean) ** 2, 0);
+  return denominator ? numerator / denominator : null;
+}
+
 function metricStatsFromPoints(points = []) {
   const values = points.map((point) => point.value).filter((value) => Number.isFinite(value));
   const avg = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
   const sd = avg === null ? null : Math.sqrt(values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / values.length);
-  const trend = values.length < 2 ? null : (() => {
-    const xMean = (values.length - 1) / 2;
-    const yMean = avg;
-    const numerator = values.reduce((sum, value, index) => sum + (index - xMean) * (value - yMean), 0);
-    const denominator = values.reduce((sum, _value, index) => sum + (index - xMean) ** 2, 0);
-    return denominator ? numerator / denominator : null;
-  })();
+  const trend = slopeOverTime(points);
   const changes = points.slice(1).map((point, index) => ({
     ...point,
     previous: points[index],
@@ -1161,6 +1268,264 @@ function strongestRelationship(analysis, predicate = () => true) {
   return [...(analysis.relationships || [])]
     .filter((relationship) => relationship.r !== null && predicate(relationship))
     .sort((a, b) => Math.abs(b.r) - Math.abs(a.r))[0] || null;
+}
+
+function confidenceLabel(value) {
+  const text = String(value || 'Collecting').toLowerCase();
+  if (text.includes('high')) return 'High Confidence';
+  if (text.includes('moderate') || text.includes('medium')) return 'Moderate Confidence';
+  if (text.includes('low')) return 'Low Confidence';
+  if (text.includes('collect')) return 'Collecting Evidence';
+  return value;
+}
+
+function toneFromText(value = '') {
+  const text = String(value || '').toLowerCase();
+  if (['collect', 'unclear', 'learning', 'not enough', 'no clear'].some((word) => text.includes(word))) return 'collecting';
+  if (['good', 'positive', 'improving', 'recovering', 'supported', 'adapting'].some((word) => text.includes(word))) return 'good';
+  if (['bad', 'risk', 'worsening', 'declining', 'accumulating', 'limited'].some((word) => text.includes(word))) return 'bad';
+  if (['watch', 'spike', 'building', 'pressure', 'low load', 'response'].some((word) => text.includes(word))) return 'warning';
+  if (['stable', 'steady', 'holding', 'plateau', 'neutral'].some((word) => text.includes(word))) return 'neutral';
+  return 'collecting';
+}
+
+function themeToneStyles(tone = 'neutral') {
+  const cleanTone = ['good', 'bad', 'warning', 'neutral', 'collecting'].includes(tone) ? tone : toneFromText(tone);
+  return {
+    good: styles.toneGood,
+    bad: styles.toneBad,
+    warning: styles.toneWarning,
+    neutral: styles.toneNeutral,
+    collecting: styles.toneCollecting,
+  }[cleanTone] || styles.toneCollecting;
+}
+
+function toneAccentColor(tone = 'collecting') {
+  const cleanTone = ['good', 'bad', 'warning', 'neutral', 'collecting'].includes(tone) ? tone : toneFromText(tone);
+  return {
+    good: '#2FA044',
+    bad: '#E13F32',
+    warning: '#D9822B',
+    neutral: '#E7B33C',
+    collecting: '#9B9B94',
+  }[cleanTone] || '#9B9B94';
+}
+
+function toneLabel(tone = 'collecting') {
+  const cleanTone = ['good', 'bad', 'warning', 'neutral', 'collecting'].includes(tone) ? tone : toneFromText(tone);
+  return {
+    good: 'Good',
+    bad: 'Risk',
+    warning: 'Watch',
+    neutral: 'Holding',
+    collecting: 'Learning',
+  }[cleanTone] || 'Learning';
+}
+
+function insightToneCardStyle(tone = 'collecting') {
+  const color = toneAccentColor(tone);
+  return { borderColor: color, borderLeftColor: color, borderLeftWidth: 6 };
+}
+
+function stateTone(value = '', category = '') {
+  const text = String(value || '').toLowerCase();
+  if (['collect', 'unclear', 'learning', 'not enough', 'no clear'].some((word) => text.includes(word))) return 'collecting';
+  if (category === 'loadStress' && text.includes('low load')) return 'warning';
+  if (category === 'loadStress' && text.includes('spike')) return 'warning';
+  if (category === 'loadStress' && (text.includes('building') || text.includes('steady'))) return 'good';
+  if (category === 'irritation' && text.includes('improving')) return 'good';
+  if (category === 'fatigue' && text.includes('recovering')) return 'good';
+  if (text.includes('strong positive') || text.includes('positive') || text.includes('improving') || text.includes('supported')) return 'good';
+  if (text.includes('at risk') || text.includes('worsening') || text.includes('declining') || text.includes('accumulating') || text.includes('strongly declining')) return 'bad';
+  if (text.includes('plateau') || text.includes('stable') || text.includes('steady') || text.includes('holding')) return 'neutral';
+  return 'collecting';
+}
+
+function trendDirectionLabel(metricKey, analysis) {
+  const insight = analysis?.trendInsights?.[metricKey];
+  const trend = metricStats(analysis, metricKey).trend;
+  if (!Number.isFinite(trend)) return 'Collecting';
+  if (Math.abs(trend) < 0.03) return 'Stable';
+  const improving = ['pain', 'pain_delta', 'fatigue', 'soreness', 'gct', 'sprint_time'].includes(metricKey)
+    ? trend < 0
+    : trend > 0;
+  if (Math.abs(trend) > 0.18) return improving ? 'Strongly Improving' : 'Strongly Declining';
+  return improving ? 'Improving' : 'Declining';
+}
+
+function currentReadItems(analysis = {}) {
+  const adaptation = analysis.adaptationInsight?.label || analysis.currentRead?.adaptation || 'Adaptation Unclear';
+  return [
+    ['Performance', analysis.currentRead?.performance || trendDirectionLabel('performance', analysis)],
+    ['Load stress', analysis.currentRead?.loadStress || trendDirectionLabel('load', analysis)],
+    ['Load tolerance', analysis.currentRead?.loadTolerance || 'Collecting'],
+    ['Pain', analysis.currentRead?.irritation || trendDirectionLabel('pain', analysis)],
+    ['Fatigue', analysis.currentRead?.fatigue || trendDirectionLabel('fatigue', analysis)],
+    ['Adaptation', adaptation],
+  ];
+}
+
+function athleteAdaptationCopy(adaptation = {}) {
+  const label = adaptation.label || 'Adaptation Unclear';
+  const states = adaptation.componentStates || {};
+  if (states.loadStress === 'Low Load' && !label.includes('Positive')) {
+    return {
+      headline: 'Fresh is not the same as adapting',
+      body: 'Recovery may look fine, but the recent training dose is low or flat. That can maintain readiness without building performance.',
+      action: 'If the goal is progress, look for a sensible load build while keeping pain and fatigue controlled.',
+    };
+  }
+  if (states.loadStress === 'Load Spike') {
+    return {
+      headline: 'Load is the main thing to watch',
+      body: 'Recent training load is much higher than your recent baseline. Adaptation depends on whether you tolerate that dose without pain, fatigue, or output drop-off.',
+      action: 'Do not judge the next session by freshness alone. Watch performance, pain, and fatigue together.',
+    };
+  }
+  if (states.loadTolerance === 'Declining') {
+    return {
+      headline: 'Tolerance is slipping',
+      body: 'The training dose is costing more than it was: pain, fatigue, or output are moving the wrong way for the load being done.',
+      action: 'Keep the next step conservative until output and body response line up again.',
+    };
+  }
+  if (label.includes('Strong Positive')) {
+    return {
+      headline: 'Training is landing well',
+      body: 'Performance is moving up, the training dose looks useful, and recovery signals look manageable. This is the kind of response you want to protect.',
+      action: 'Keep the rhythm. Do not chase extra volume just because today looks good.',
+    };
+  }
+  if (label.includes('Positive')) {
+    return {
+      headline: 'You are adapting',
+      body: 'The current dose looks productive: performance and load tolerance are moving in the right direction without a clear recovery cost.',
+      action: 'Repeat what is working and keep logging pain and performance.',
+    };
+  }
+  if (label.includes('At Risk')) {
+    return {
+      headline: 'Adaptation needs attention',
+      body: 'Load stress, fatigue, pain, or tolerance are moving faster than performance. The next session should be judged by how you respond, not just by output.',
+      action: 'Keep the quality high, but be ready to reduce load if pain or soreness climbs.',
+    };
+  }
+  if (label.includes('Plateau')) {
+    return {
+      headline: 'Progress may be flattening',
+      body: 'Training is continuing, but performance is not clearly moving with it.',
+      action: 'Look for one simple change: more recovery, cleaner intent, or a small programme adjustment.',
+    };
+  }
+  if (label.includes('Stable')) {
+    return {
+      headline: 'You are holding steady',
+      body: 'Your current training looks more like maintenance than a clear push forward. Feeling recovered can be useful, but it does not prove adaptation is building.',
+      action: 'Useful if the goal is to consolidate. If you want progress, check the programme focus.',
+    };
+  }
+  return {
+    headline: 'Still learning your pattern',
+    body: 'There is not enough clean training, recovery, and performance data yet to call adaptation confidently.',
+    action: 'Log check-ins and performance after sessions so the app can separate signal from noise.',
+  };
+}
+
+function stateNeedsAttention(state) {
+  return ['Worsening', 'Accumulating', 'Declining', 'Strongly Declining', 'Adaptation At Risk', 'Load Spike', 'Low Load'].includes(state);
+}
+
+function athleteSectionCopy(section, analysis = {}) {
+  const adaptation = analysis.adaptationInsight || {};
+  const states = adaptation.componentStates || {};
+  const copy = {
+    performance: {
+      title: states.performance || 'Performance',
+      body: adaptation.performanceMeaning?.replace(/^For performance, this means:\s*/i, '') || 'See whether outputs are moving in the right direction.',
+      metric: 'performance',
+    },
+    irritation: {
+      title: states.irritation === 'Worsening' ? 'Pain is rising' : states.irritation === 'Improving' ? 'Pain is settling' : 'Pain check',
+      body: adaptation.componentInterpretations?.irritation || 'Track whether pain is staying manageable around training.',
+      metric: 'pain',
+    },
+    recovery: {
+      title: states.fatigue === 'Accumulating' ? 'Recovery is under pressure' : states.fatigue === 'Recovering' ? 'Recovery is improving' : 'Recovery check',
+      body: adaptation.componentInterpretations?.fatigue || 'Freshness and soreness show how ready your body is for the next hit.',
+      metric: 'fatigue',
+    },
+    load: {
+      title: states.loadStress || 'Training load',
+      body: adaptation.loadMeaning?.replace(/^For training load, this means:\s*/i, '') || 'Load is the training dose. It only becomes useful adaptation when performance, pain, and recovery show you are tolerating it.',
+      metric: 'load',
+    },
+    adaptation: {
+      title: adaptation.label || 'Adaptation',
+      body: athleteAdaptationCopy(adaptation).body,
+      metric: 'performance',
+    },
+    likely_response: {
+      title: 'Usual response',
+      body: analysis.likelyResponseInsight?.evidenceStatement || 'The app is learning what usually happens after different sessions.',
+      metric: 'performance',
+    },
+  };
+  return copy[section.id] || { title: section.title, body: analysis.insightSummaries?.[section.id]?.summary || '', metric: 'performance' };
+}
+
+function relevantInsightSections(analysis = {}) {
+  const sectionsById = Object.fromEntries(insightSections.map((section) => [section.id, section]));
+  const states = analysis.adaptationInsight?.componentStates || {};
+  const latest = analysis.latest || {};
+  const ids = ['adaptation'];
+  if (states.loadStress && states.loadStress !== 'Collecting') ids.push('load');
+  if (states.loadTolerance && stateNeedsAttention(states.loadTolerance)) ids.push('load');
+  if (stateNeedsAttention(states.fatigue) || (Number.isFinite(latest.readiness) && latest.readiness < 4)) ids.push('recovery');
+  if (stateNeedsAttention(states.irritation) || (Number.isFinite(latest.pain) && latest.pain >= 4)) ids.push('irritation');
+  if (states.performance && states.performance !== 'Collecting') ids.push('performance');
+  if (!ids.includes('performance')) ids.push('performance');
+  if (!ids.includes('load')) ids.splice(1, 0, 'load');
+  return [...new Set(ids)].map((id) => sectionsById[id]).filter(Boolean).slice(0, 3);
+}
+
+function priorityInsight(analysis = {}) {
+  return strongestRelationship(analysis)
+    || strongestRelationship(analysis, (item) => item.yKey === 'performance')
+    || strongestRelationship(analysis, (item) => item.yKey === 'pain');
+}
+
+function priorityInsightCopy(relationship) {
+  if (!relationship) {
+    return {
+      title: 'Collecting your priority insight',
+      finding: 'Log more check-ins, performance outputs, and programme sessions to reveal the clearest current pattern.',
+      interpretation: 'Once enough paired logs exist, Home will surface one priority finding rather than a wall of metrics.',
+      confidence: 'Collecting Evidence',
+    };
+  }
+  return {
+    title: formatRelationshipName(relationship.title),
+    finding: relationship.insight?.evidenceStatement || 'This is currently the clearest relationship in your stored data.',
+    interpretation: relationship.insight?.trainingInterpretation || relationship.insight?.whatSuggestsThis || 'Use this as a practical monitoring signal, not a causal claim.',
+    confidence: confidenceLabel(relationship.insight?.confidence),
+  };
+}
+
+function keyActionCards(analysis = {}) {
+  const relationships = [...(analysis.relationships || [])]
+    .filter((relationship) => Number.isFinite(relationship.r))
+    .sort((a, b) => Math.abs(b.r) - Math.abs(a.r));
+  const actions = relationships.slice(0, 3).map((relationship) => ({
+    title: formatRelationshipName(relationship.title),
+    body: relationship.insight?.bringForward || relationship.insight?.trainingInterpretation || relationship.insight?.evidenceStatement || 'Monitor this pattern over the next training block.',
+    confidence: confidenceLabel(relationship.insight?.confidence),
+  }));
+  if (actions.length) return actions;
+  return [
+    { title: 'Keep logging consistently', body: 'Pair check-ins with performance logs so Impuls can separate useful patterns from noise.', confidence: 'Collecting Evidence' },
+    { title: 'Plan training in Programme', body: 'Programme structure gives performance and recovery signals context.', confidence: 'Collecting Evidence' },
+    { title: 'Use Log Performance after sessions', body: 'Rep-level outputs are the best source for performance insights.', confidence: 'Collecting Evidence' },
+  ];
 }
 
 function dateShort(value) {
@@ -1340,18 +1705,7 @@ export default function App() {
     setAnalysisLoading(true);
     setAnalysisError(null);
 
-    fetch(ANALYSIS_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          const body = await response.text();
-          throw new Error(body || `Analysis request failed (${response.status})`);
-        }
-        return response.json();
-      })
+    fetchAnalysisWithFallback(data)
       .then((nextAnalysis) => {
         if (!cancelled) setAnalysis(nextAnalysis);
       })
@@ -1538,17 +1892,42 @@ export default function App() {
   }
 
   function saveCheckIn() {
+    const draft = data.checkInDraft;
     const checkIn = {
       id: createId('checkin'),
       check_in_datetime: new Date().toISOString(),
       linked_session_id: data.activeSession.id,
-      pain_score: data.checkInDraft.pain_score,
-      pain_location: data.checkInDraft.pain_location,
-      freshness_score: data.checkInDraft.freshness_score,
-      soreness_score: data.checkInDraft.soreness_score,
+      pain_score: draft.pain_score,
+      pain_location: draft.pain_location,
+      freshness_score: draft.freshness_score,
+      soreness_score: draft.soreness_score,
     };
+    // Optional single output captured in the fast check-in. Only attach a real
+    // value: a slider score must be > 0, and typed metrics must be non-empty,
+    // so an untouched field never logs a spurious 0.
+    const primaryMetric = draft.primary_metric || 'performance_score';
+    const numericValue = toNumber(draft.primary_value, NaN);
+    const hasTypedValue = String(draft.primary_value ?? '').trim() !== '' && Number.isFinite(numericValue);
+    if (primaryMetric === 'performance_score') {
+      if (Number.isFinite(numericValue) && numericValue > 0) checkIn.performance_score = numericValue;
+    } else if (hasTypedValue) {
+      if (primaryMetric === 'height_or_distance') {
+        checkIn.height_or_distance = numericValue;
+        checkIn.height_or_distance_unit = draft.primary_unit || 'cm';
+      } else if (primaryMetric === 'sprint_time') {
+        checkIn.sprint_time = numericValue;
+        checkIn.sprint_time_unit = draft.primary_unit || 'seconds';
+      } else if (primaryMetric === 'ft') {
+        checkIn.ft = numericValue;
+        checkIn.ft_unit = draft.primary_unit || 'seconds';
+      }
+    }
     setLastSavedCheckInId(checkIn.id);
-    setData((current) => ({ ...current, checkIns: [checkIn, ...current.checkIns] }));
+    setData((current) => ({
+      ...current,
+      checkIns: [checkIn, ...current.checkIns],
+      checkInDraft: { ...current.checkInDraft, primary_value: '' },
+    }));
     if (currentUser) {
       saveCheckInToSupabase(currentUser.id, checkIn)
         .then(() => console.log('[SUPABASE SAVE] Check-in saved'))
@@ -1822,7 +2201,14 @@ export default function App() {
         <View style={styles.appShell}>
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
             {screen === 'today' && (
-              <TodayScreen data={data} analysis={analysis} setScreen={setScreen} startTodayPerformance={startTodayPerformance} />
+              <HomeScreen
+                data={data}
+                analysis={analysis}
+                setScreen={setScreen}
+                setSelectedInsight={setSelectedInsight}
+                setSelectedDashboardMetric={setSelectedDashboardMetric}
+                startTodayPerformance={startTodayPerformance}
+              />
             )}
             {screen === 'checkin' && (
               <CheckInScreen
@@ -1946,7 +2332,7 @@ export default function App() {
             {screen === 'detail' && (
               <InsightDetailScreen data={data} analysis={analysis} insightId={selectedInsight} setScreen={setScreen} setSelectedDashboardMetric={setSelectedDashboardMetric} />
             )}
-            {screen === 'dashboard' && (
+            {(screen === 'dashboard' || screen === 'evidence') && (
               <DashboardScreen
                 data={data}
                 analysis={analysis}
@@ -1977,6 +2363,8 @@ export default function App() {
                 onSignOut={handleSignOut}
                 onChangePassword={handleChangePassword}
                 startTodayPerformance={startTodayPerformance}
+                setSelectedDashboardMetric={setSelectedDashboardMetric}
+                setScreen={setScreen}
               />
             )}
           </ScrollView>
@@ -1987,45 +2375,73 @@ export default function App() {
   );
 }
 
-function TodayScreen({ data, analysis, setScreen, startTodayPerformance }) {
+function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelectedDashboardMetric, startTodayPerformance }) {
   const planned = todayPlannedSession(data.programme);
   const hasPlannedSession = planned.id !== 'empty_plan';
-  const last = analysis.strongest;
   const displayName = String(data.profile?.name || '').trim();
+
+  const initials = (displayName || 'You').split(' ').filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase() || 'YOU';
+  const readinessNum = toNumber(analysis.latest?.readiness);
+  const readinessPct = Math.max(0, Math.min(1, readinessNum / 10));
+  const ringDash = `${(readinessPct * 314).toFixed(1)} 314`;
+  const readline = readinessNum >= 7.5 ? "You're primed to train" : readinessNum >= 5 ? 'Train, but manage the load' : 'Recovery comes first today';
+  const noticed = analysis?.adaptationInsight?.label || 'Keep logging to surface your patterns';
+  const sessionMeta = hasPlannedSession ? exercisePrescriptionSummary(planned) : 'No session planned for today';
+
   return (
     <View style={styles.screen}>
-      <Text style={styles.h1}>{displayName ? `Hello, ${displayName}` : 'Hello'}</Text>
-      <Text style={styles.date}>{todayLabel()}</Text>
-
-      <View style={styles.heroCard}>
-        <Text style={styles.heroLabel}>Readiness</Text>
-        <Text style={styles.heroScore}>{pretty(analysis.latest.readiness, 1)} <Text style={styles.heroScale}>/10</Text></Text>
-        <Gauge value={analysis.latest.readiness} />
-      </View>
-
-      <View style={styles.panelAttached}>
-        <Text style={styles.label}>Planned Session</Text>
-        <View style={styles.rowBetween}>
-          <View>
-            <Text style={styles.cardTitle}>{planned.session_name}</Text>
-            {planned.focus ? <Text style={styles.muted}>{planned.focus}</Text> : null}
-            {hasPlannedSession ? <Text style={styles.calendarMetaText}>{exercisePrescriptionSummary(planned)}</Text> : null}
-          </View>
+      <View style={styles.greetingRow}>
+        <View style={styles.flex}>
+          <Text style={styles.date}>{todayLabel()}</Text>
+          <Text style={styles.h1}>{displayName ? `Morning, ${displayName}` : 'Welcome back'}</Text>
         </View>
+        <View style={styles.avatar}><Text style={styles.avatarText}>{initials}</Text></View>
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.label}>Last Insight</Text>
-        <Text style={styles.bodyText}>
-          {last ? `${last.finding} Relationship strength: ${last.strength} (${pretty(last.r, 2)}).` : 'Add more logs to unlock relationship insights.'}
-        </Text>
+        <View style={styles.readRow}>
+          <View style={styles.ringWrap}>
+            <Svg width={104} height={104} viewBox="0 0 120 120">
+              <Circle cx="60" cy="60" r="50" stroke="#E6E4DC" strokeWidth="11" fill="none" />
+              <Circle cx="60" cy="60" r="50" stroke="#1F8A3E" strokeWidth="11" fill="none" strokeLinecap="round" strokeDasharray={ringDash} transform="rotate(-90 60 60)" />
+            </Svg>
+            <View style={styles.ringValue}>
+              <Text style={styles.ringNum}>{pretty(analysis.latest?.readiness, 1)}</Text>
+              <Text style={styles.ringScale}>/10</Text>
+            </View>
+          </View>
+          <View style={styles.readMain}>
+            <Text style={styles.label}>Readiness</Text>
+            <Text style={styles.readline}>{readline}</Text>
+          </View>
+        </View>
+        <View style={styles.statRow}>
+          <View style={styles.statCell}><Text style={styles.statCellLabel}>Recovery</Text><Text style={styles.statCellValue}>{pretty(analysis.latest?.freshness, 1)}</Text></View>
+          <View style={styles.statCell}><Text style={styles.statCellLabel}>Load</Text><Text style={styles.statCellValue}>{pretty(analysis.latest?.load, 0)}</Text></View>
+          <View style={styles.statCell}><Text style={styles.statCellLabel}>Pain</Text><Text style={styles.statCellValue}>{pretty(analysis.latest?.pain, 0)}</Text></View>
+        </View>
       </View>
 
-      <View style={styles.twoCol}>
-        <ActionButton title="Log Check-in" tone="green" onPress={() => setScreen('checkin')} />
-        <ActionButton title="Log Performance" tone="black" onPress={startTodayPerformance} />
+      <Pressable style={styles.primaryBtn} onPress={() => setScreen('checkin')}><Text style={styles.primaryBtnText}>Check in</Text></Pressable>
+
+      <View style={styles.card}>
+        <Text style={styles.label}>Today's session</Text>
+        <Text style={styles.cardTitle}>{planned.session_name}</Text>
+        <Text style={styles.calendarMetaText}>{sessionMeta}</Text>
+        <View style={styles.twoCol}>
+          <Pressable style={styles.ghostBtn} onPress={startTodayPerformance}><Text style={styles.ghostBtnText}>Start session</Text></Pressable>
+          <Pressable style={styles.ghostBtn} onPress={startTodayPerformance}><Text style={styles.ghostBtnText}>Quick log</Text></Pressable>
+        </View>
       </View>
-      <ActionButton title="View Insights" tone="outline" onPress={() => setScreen('insights')} />
+
+      <Pressable style={styles.noticedCard} onPress={() => setScreen('insights')}>
+        <View style={styles.noticedIcon}><Text style={styles.noticedMark}>↗</Text></View>
+        <View style={styles.flex}>
+          <Text style={styles.label}>What we noticed</Text>
+          <Text style={styles.noticedText} numberOfLines={1}>{noticed}</Text>
+        </View>
+        <Text style={styles.chevron}>›</Text>
+      </Pressable>
     </View>
   );
 }
@@ -2113,24 +2529,87 @@ function TutorialHint({ visible, title, body, onDismiss }) {
 }
 
 function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSeen, onDismissTutorial }) {
+  const primaryMetric = draft.primary_metric || 'performance_score';
+  const metricLabel = (quickOutputOptions.find(([id]) => id === primaryMetric) || [])[1] || 'Result';
+  const unitOptions = quickOutputUnitOptions[primaryMetric];
+  const primaryUnit = draft.primary_unit || quickOutputDefaultUnit[primaryMetric] || '';
+
+  function selectMetric(metric) {
+    updateDraft('primary_metric', metric);
+    updateDraft('primary_unit', quickOutputDefaultUnit[metric] || '');
+    updateDraft('primary_value', '');
+  }
+
+  const painYes = Number(draft.pain_score) > 0;
+
+  function Scale10({ field, tone }) {
+    const value = Number(draft[field]) || 0;
+    return (
+      <View style={styles.scale5}>
+        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => {
+          const on = value === n;
+          return (
+            <Pressable key={n} style={[styles.scaleBtn, on && (tone === 'warn' ? styles.scaleBtnWarn : styles.scaleBtnSel)]} onPress={() => updateDraft(field, n)}>
+              <Text style={[styles.scaleBtnText, on && styles.scaleBtnTextSel]}>{n}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    );
+  }
+
   return (
     <View style={styles.screen}>
-      <Header title="Daily Check-in" subtitle={todayLabel()} onBack={() => setScreen('today')} />
-      <TutorialHint
-        visible={!tutorialSeen}
-        title="Check-in response state"
-        body="Check-ins capture today’s response state: pain, freshness, and soreness. Performance scores and rep-level outputs live in Performance Log."
-        onDismiss={onDismissTutorial}
-      />
-      <FormSection number="1." title="Pain">
-        <SliderField label="Pain (0-10)" value={draft.pain_score} onChange={(value) => updateDraft('pain_score', value)} />
-        <Input label="Location (optional)" value={String(draft.pain_location || '')} onChangeText={(value) => updateDraft('pain_location', value)} />
-      </FormSection>
-      <FormSection number="2." title="Recovery">
-        <SliderField label="Freshness (0-10)" value={draft.freshness_score} onChange={(value) => updateDraft('freshness_score', value)} />
-        <SliderField label="Soreness (0-10)" value={draft.soreness_score} onChange={(value) => updateDraft('soreness_score', value)} />
-      </FormSection>
-      <ActionButton title="Save Check-in" tone="black" onPress={saveCheckIn} />
+      <View style={styles.checkinTop}>
+        <Pressable style={styles.iconBack} onPress={() => setScreen('today')}><Text style={styles.iconBackText}>‹</Text></Pressable>
+        <Text style={[styles.h1, styles.flex]}>Check in</Text>
+        <Text style={styles.label}>~15s</Text>
+      </View>
+
+      <View style={styles.qGroup}>
+        <Text style={styles.q}>How recovered do you feel?</Text>
+        <Scale10 field="freshness_score" />
+        <View style={styles.scaleEnds}><Text style={styles.label}>Drained</Text><Text style={styles.label}>Fully fresh</Text></View>
+      </View>
+
+      <View style={styles.qGroup}>
+        <Text style={styles.q}>Any soreness?</Text>
+        <Scale10 field="soreness_score" tone="warn" />
+        <View style={styles.scaleEnds}><Text style={styles.label}>None</Text><Text style={styles.label}>Very sore</Text></View>
+      </View>
+
+      <View style={styles.qGroup}>
+        <Text style={styles.q}>Any pain today?</Text>
+        <View style={styles.toggleRow}>
+          <Pressable style={[styles.toggleBtn, !painYes && styles.toggleBtnSel]} onPress={() => { updateDraft('pain_score', 0); updateDraft('pain_location', ''); }}>
+            <Text style={[styles.toggleBtnText, !painYes && styles.toggleBtnTextSel]}>No, all good</Text>
+          </Pressable>
+          <Pressable style={[styles.toggleBtn, painYes && styles.toggleBtnSel]} onPress={() => { if (!painYes) updateDraft('pain_score', 5); }}>
+            <Text style={[styles.toggleBtnText, painYes && styles.toggleBtnTextSel]}>Yes</Text>
+          </Pressable>
+        </View>
+        {painYes ? (
+          <View style={styles.painExtra}>
+            <Scale10 field="pain_score" tone="warn" />
+            <Input label="Where? (optional)" value={String(draft.pain_location || '')} onChangeText={(value) => updateDraft('pain_location', value)} />
+          </View>
+        ) : null}
+      </View>
+
+      <View style={styles.qGroup}>
+        <Text style={styles.q}>Today's result (optional)</Text>
+        <ChipWrap options={quickOutputOptions} value={primaryMetric} onChange={selectMetric} />
+        {primaryMetric === 'performance_score' ? (
+          <Input label="Effort / score (0–10)" value={String(draft.primary_value ?? '')} onChangeText={(value) => updateDraft('primary_value', value)} />
+        ) : (
+          <View style={styles.painExtra}>
+            <Input label={`${metricLabel} value`} value={String(draft.primary_value ?? '')} onChangeText={(value) => updateDraft('primary_value', value)} />
+            {unitOptions ? <ChipWrap options={unitOptions} value={primaryUnit} onChange={(value) => updateDraft('primary_unit', value)} /> : null}
+          </View>
+        )}
+      </View>
+
+      <Pressable style={styles.primaryBtn} onPress={saveCheckIn}><Text style={styles.primaryBtnText}>Done</Text></Pressable>
     </View>
   );
 }
@@ -2143,22 +2622,18 @@ function CheckInReviewScreen({ analysis, expectedCheckInId, analysisLoading, set
     return (
       <View style={styles.screen}>
         <Header title="Check-in Review" onBack={() => setScreen('today')} />
-        <View style={styles.checkInThemeCard}>
+        <View style={[styles.checkInThemeCard, themeToneStyles('neutral')]}>
           <Text style={styles.reviewHeroLabel}>Today’s Theme</Text>
           <Text style={styles.reviewHeroTitle}>Analysis updating</Text>
           <Text style={styles.reviewHeroBody}>
             {analysisLoading ? 'The backend is refreshing this check-in response.' : 'Analysis is waiting for the latest saved check-in.'}
           </Text>
         </View>
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Academic Evidence Summary</Text>
-          <Text style={styles.bodyText}>analysis updating.</Text>
-        </View>
         <View style={styles.twoCol}>
           <ActionButton title="Log Performance" tone="black" onPress={startTodayPerformance} />
           <ActionButton title="View Insights" tone="outline" onPress={() => setScreen('insights')} />
         </View>
-        <ActionButton title="Back to Today" tone="outline" onPress={() => setScreen('today')} />
+        <ActionButton title="Back to Home" tone="outline" onPress={() => setScreen('today')} />
       </View>
     );
   }
@@ -2171,26 +2646,21 @@ function CheckInReviewScreen({ analysis, expectedCheckInId, analysisLoading, set
         <ActionButton title="Log Performance" tone="black" onPress={startTodayPerformance} />
         <ActionButton title="View Insights" tone="outline" onPress={() => setScreen('insights')} />
       </View>
-      <ActionButton title="Back to Today" tone="outline" onPress={() => setScreen('today')} />
+      <ActionButton title="Back to Home" tone="outline" onPress={() => setScreen('today')} />
     </View>
   );
 }
 
 function CheckInReviewSnapshot({ review, showDate = false }) {
+  const theme = review?.theme || {};
+  const toneStyle = themeToneStyles(theme.tone || theme.frame || theme.title);
   return (
     <>
-      <View style={styles.checkInThemeCard}>
+      <View style={[styles.checkInThemeCard, toneStyle]}>
         <Text style={styles.reviewHeroLabel}>{showDate && review?.savedAt ? dateShort(review.savedAt) : 'Today’s Theme'}</Text>
-        <Text style={styles.reviewHeroTitle}>{review?.theme?.title || 'Context collecting'}</Text>
-        <Text style={styles.reviewHeroBody}>{review?.theme?.signal || 'context collecting.'}</Text>
-      </View>
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Summary</Text>
-        <Text style={styles.figureResult}>{review?.evidenceSummary || 'context collecting.'}</Text>
-      </View>
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>User Interpretation</Text>
-        <Text style={styles.bodyText}>{review?.interpretation || 'context collecting.'}</Text>
+        <Text style={styles.reviewHeroTitle}>{theme.title || 'Context collecting'}</Text>
+        {theme.signal ? <Text style={styles.reviewHeroSignal}>{theme.signal}</Text> : null}
+        <Text style={styles.reviewHeroBody}>{theme.meaning || review?.interpretation || 'Keep logging after sessions so Impuls can learn your response pattern.'}</Text>
       </View>
       <CheckInReviewVisual visual={review?.visual} />
     </>
@@ -2236,14 +2706,18 @@ function reviewScalePoint(value, index, total, min, range, width, height, paddin
 function ReviewChartShell({ visual, children }) {
   return (
     <View style={styles.reviewVisualCard}>
-      <Text style={styles.sectionTitle}>Review Chart</Text>
       <Text style={styles.chartTitle}>{visual.title || 'Check-in Chart'}</Text>
       {children}
       <View style={styles.axisFooter}>
         <Text style={styles.axisLabel}>X: {visual.xLabel || 'Metric'}</Text>
         <Text style={styles.axisLabel}>Y: {visual.yLabel || 'Value'}</Text>
       </View>
-      {visual.evidence ? <Text style={styles.smallCopy}>{visual.evidence}</Text> : null}
+      {visual.interpretation || visual.evidence ? (
+        <View style={styles.visualInterpretationBox}>
+          <Text style={styles.figureEvidenceLabel}>How to read this</Text>
+          <Text style={styles.figureInterpretationText}>{visual.interpretation || visual.evidence}</Text>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -2575,6 +3049,16 @@ function SessionScreen({
     <View style={styles.screen}>
       <Header title={isPerformance ? 'Log Performance' : 'Training Session'} onBack={() => setScreen('today')} right="check" onRight={finishSession} />
       <Input label="Session Name" value={data.activeSession.session_name} onChangeText={(value) => updateSession('session_name', value)} />
+      {isPerformance ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Whole-session score</Text>
+          <SliderField
+            label="Performance score (0-10)"
+            value={data.activeSession.performance_score ?? 0}
+            onChange={(value) => updateSession('performance_score', value)}
+          />
+        </View>
+      ) : null}
       <Text style={styles.sectionTitle}>Session Exercises</Text>
       {data.activeSession.exercises.map((exercise, index) => (
         <View key={exercise.id} style={isPerformance ? styles.performanceExerciseLog : styles.exerciseRow}>
@@ -2601,15 +3085,6 @@ function SessionScreen({
         <View style={styles.savePerformancePanel}>
           <ActionButton title="Save Performance" tone="green" onPress={savePerformanceDraft} />
           {performanceSaveStatus ? <Text style={styles.muted}>{performanceSaveStatus}</Text> : null}
-        </View>
-      ) : null}
-      {isPerformance ? (
-        <View style={styles.card}>
-          <SliderField
-            label="Performance score (0-10)"
-            value={data.activeSession.performance_score ?? 0}
-            onChange={(value) => updateSession('performance_score', value)}
-          />
         </View>
       ) : null}
       <View style={styles.card}>
@@ -2709,6 +3184,13 @@ function CalendarScreen({
   const blockSessions = plannedSessionsInCurrentBlock(programme);
   const selectedDaySessions = plannedSessionsOnDate(programme, selectedDate);
   const [calendarMode, setCalendarMode] = useState('week');
+  const [openExerciseId, setOpenExerciseId] = useState(null);
+  const [editingExId, setEditingExId] = useState(null);
+  const [addingSessionId, setAddingSessionId] = useState(null);
+  const [exDraft, setExDraft] = useState(emptyExercise);
+  const [showAddSession, setShowAddSession] = useState(false);
+  const [newSessionName, setNewSessionName] = useState('');
+  const [editSessionId, setEditSessionId] = useState(null);
   const weekDays = weekDayLabels(startOfWeekIso(selectedDate));
   const monthDays = monthCalendarDays(selectedDate);
   const yearMonths = monthsInYear(selectedDate);
@@ -2829,13 +3311,89 @@ function CalendarScreen({
     setScreen('editPlannedSession');
   }
 
+  function addSession() {
+    const name = newSessionName.trim() || 'New session';
+    commitProgramme((draft) => {
+      ensureProgrammeWeek(draft, selectedDate).sessions.push({
+        id: createId('planned_session'),
+        session_name: name,
+        focus: '',
+        duration: '',
+        date: selectedDate,
+        exercises: [],
+      });
+    });
+    setNewSessionName('');
+    setShowAddSession(false);
+  }
+
+  function addExerciseToSession(sessionId) {
+    const exercise = {
+      ...exDraft,
+      id: createId('planned_exercise'),
+      sets: toNumber(exDraft.sets),
+      contacts: toNumber(exDraft.contacts),
+      reps: toNumber(exDraft.reps),
+      duration_minutes: toNumber(exDraft.duration_minutes),
+      intensity_value: toNumber(exDraft.intensity_value),
+      intent_percent: toNumber(exDraft.intent_percent),
+    };
+    commitProgramme((draft) => {
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (!target) return;
+      target.exercises = [...(target.exercises || []), { ...exercise, order: (target.exercises || []).length + 1 }];
+    });
+    setExDraft({ ...emptyExercise, movement_type: exDraft.movement_type });
+    setAddingSessionId(null);
+  }
+
+  function removeExercise(sessionId, exerciseId) {
+    commitProgramme((draft) => {
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (!target) return;
+      target.exercises = numberExercises((target.exercises || []).filter((exercise) => exercise.id !== exerciseId));
+    });
+  }
+
+  function setSessionField(sessionId, key, value) {
+    commitProgramme((draft) => {
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (target) target[key] = value;
+    });
+  }
+
+  function deleteSession(sessionId) {
+    commitProgramme((draft) => {
+      (draft.macro_blocks || []).forEach((macroItem) => (macroItem.blocks || []).forEach((blockItem) => (blockItem.weeks || []).forEach((weekItem) => {
+        weekItem.sessions = (weekItem.sessions || []).filter((session) => session.id !== sessionId);
+      })));
+    });
+    setEditSessionId(null);
+  }
+
+  function duplicateSession(sessionId) {
+    commitProgramme((draft) => {
+      (draft.macro_blocks || []).forEach((macroItem) => (macroItem.blocks || []).forEach((blockItem) => (blockItem.weeks || []).forEach((weekItem) => {
+        const index = (weekItem.sessions || []).findIndex((session) => session.id === sessionId);
+        if (index >= 0) {
+          const copy = JSON.parse(JSON.stringify(weekItem.sessions[index]));
+          copy.id = createId('planned_session');
+          copy.session_name = `${weekItem.sessions[index].session_name || 'Session'} (copy)`;
+          copy.exercises = (copy.exercises || []).map((exercise) => ({ ...exercise, id: createId('planned_exercise') }));
+          weekItem.sessions.splice(index + 1, 0, copy);
+        }
+      })));
+    });
+    setEditSessionId(null);
+  }
+
   return (
     <View style={styles.screen}>
-      <Header title="Programme" onBack={() => setScreen('today')} />
+      <Header title="Plan" onBack={() => setScreen('today')} />
       <TutorialHint
         visible={!tutorialSeen}
-        title="Programme context"
-        body="Programme structure gives context to your response patterns. Sessions, exercises, sets, reps, contacts, intent, and intensity make insights more specific."
+        title="Build your programme"
+        body="Pick a day, add a session, then add exercises. Tap a session to log sets, contacts, and outputs."
         onDismiss={onDismissTutorial}
       />
       <View style={styles.calendarTitleRow}>
@@ -2923,78 +3481,106 @@ function CalendarScreen({
           })}
         </View>
       )}
-      <View style={styles.card}>
-        <Text style={styles.label}>Selected Day ({selectedDate})</Text>
-        <Text style={styles.sectionTitle}>Training Programme</Text>
-        {selectedDaySessions.length === 0 ? (
-          <View style={styles.emptyDay}>
-            <Text style={styles.bodyText}>No session planned for this date.</Text>
-            <ActionButton title={week ? 'Create Session' : 'Create Programme'} tone="outline" onPress={() => setScreen(week ? 'editBlockCalendar' : 'editCalendar')} />
+      <Text style={styles.daySectionLabel}>{new Date(`${selectedDate}T00:00:00`).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' })}</Text>
+
+      {selectedDaySessions.length === 0 && !showAddSession ? (
+        <View style={styles.card}>
+          <Text style={styles.bodyText}>Rest day — nothing planned.</Text>
+          <Pressable style={styles.adds} onPress={() => setShowAddSession(true)}><Text style={styles.addsText}>+ Add a session</Text></Pressable>
+        </View>
+      ) : null}
+
+      {selectedDaySessions.map((session) => (
+        <View key={session.id} style={styles.card}>
+          <View style={styles.rowBetween}>
+            <Text style={[styles.cardTitle, styles.flex]}>{session.session_name}</Text>
+            <Pressable onPress={() => analysePlannedSession(session)}><Text style={styles.textLink}>Analyse</Text></Pressable>
+            <Pressable style={styles.editGap} onPress={() => setEditSessionId(editSessionId === session.id ? null : session.id)}><Text style={styles.textLink}>{editSessionId === session.id ? 'Done' : 'Edit'}</Text></Pressable>
           </View>
-        ) : (
-          selectedDaySessions.map((session) => {
+          {editSessionId === session.id ? (
+            <View style={styles.painExtra}>
+              <Input label="Session name" value={session.session_name} onChangeText={(value) => setSessionField(session.id, 'session_name', value)} />
+              <View style={styles.twoCol}>
+                <Input label="Focus" value={session.focus || ''} onChangeText={(value) => setSessionField(session.id, 'focus', value)} />
+                <Input label="Duration" value={session.duration || ''} onChangeText={(value) => setSessionField(session.id, 'duration', value)} />
+              </View>
+              <View style={styles.twoCol}>
+                <Pressable style={styles.ghostBtn} onPress={() => duplicateSession(session.id)}><Text style={styles.ghostBtnText}>Duplicate</Text></Pressable>
+                <Pressable style={styles.ghostBtn} onPress={() => deleteSession(session.id)}><Text style={[styles.ghostBtnText, styles.dangerText]}>Delete</Text></Pressable>
+              </View>
+            </View>
+          ) : null}
+          {(session.exercises || []).length === 0 ? <Text style={styles.muted}>No exercises yet — add your first below.</Text> : null}
+          {(session.exercises || []).map((exercise, index) => {
+            const open = openExerciseId === exercise.id;
+            const editing = editingExId === exercise.id;
             return (
-              <View key={session.id} style={styles.todayTrainingCard}>
-                <View style={styles.rowBetween}>
-                  <Text style={styles.cardTitle}>{session.session_name}</Text>
-                  <Pressable style={styles.smallPill} onPress={() => openPlannedSessionFromCalendar(session)}>
-                    <Text style={styles.smallPillText}>Edit Session</Text>
-                  </Pressable>
-                </View>
-                <Text style={styles.calendarMetaText}>{session.week_name ? `${session.week_name} / ` : ''}{session.focus} / {session.duration}</Text>
-                <ActionButton title="Analyse Session" tone="outline" onPress={() => analysePlannedSession(session)} />
-                <Text style={styles.label}>Exercises</Text>
-                {(session.exercises || []).length === 0 ? (
-                  <Text style={styles.calendarMetaText}>No exercises added yet.</Text>
-                ) : (
-                  (session.exercises || []).map((exercise, index) => {
-                    return (
-                      <View key={`${session.id}:${exercise.id}`} style={styles.exerciseMetricCard}>
-                        <View style={styles.exerciseBulletRow}>
-                          <View style={styles.exerciseNameWithOrder}>
-                            <View style={styles.orderBadge}><Text style={styles.orderBadgeText}>{exercise.order || index + 1}</Text></View>
-                            <Text style={styles.exerciseNameText}>{exercise.exercise_name || ''}</Text>
-                          </View>
-                          <Text style={styles.calendarMetaText}>{exercise.movement_type.replace('_', ' ')}</Text>
-                        </View>
-                        <Text style={styles.exercisePrescription}>{exercisePrescription(exercise)}</Text>
-                        <CalendarExerciseMetrics
-                          exercise={exercise}
-                          onChangeAttempt={(attemptId, key, value) => updatePlannedAttempt(session.id, exercise.id, attemptId, key, value)}
-                        />
+              <View key={exercise.id} style={styles.exItem}>
+                <Pressable style={styles.exHeader} onPress={() => setOpenExerciseId(open ? null : exercise.id)}>
+                  <View style={styles.flex}>
+                    <Text style={styles.exName}>{index + 1}. {exercise.exercise_name || 'Exercise'}</Text>
+                    <Text style={styles.exPrescription}>{exercisePrescription(exercise)}</Text>
+                  </View>
+                  <Text style={styles.chevron}>{open ? '⌃' : '⌄'}</Text>
+                </Pressable>
+                {open ? (
+                  <View style={styles.painExtra}>
+                    <CalendarExerciseMetrics
+                      exercise={exercise}
+                      onChangeAttempt={(attemptId, key, value) => updatePlannedAttempt(session.id, exercise.id, attemptId, key, value)}
+                    />
+                    <Pressable onPress={() => setEditingExId(editing ? null : exercise.id)}><Text style={styles.textLink}>{editing ? 'Hide edit' : 'Edit sets / reps'}</Text></Pressable>
+                    {editing ? (
+                      <View style={styles.painExtra}>
+                        <Input label="Name" value={exercise.exercise_name} onChangeText={(value) => updatePlannedExercise(session.id, exercise.id, 'exercise_name', value)} />
+                        <ChipWrap options={movementOptions} value={exercise.movement_type} onChange={(value) => updatePlannedExercise(session.id, exercise.id, 'movement_type', value)} />
+                        <ExerciseFields draft={exercise} update={(key, value) => updatePlannedExercise(session.id, exercise.id, key, value)} />
+                        <Pressable style={styles.deleteButton} onPress={() => removeExercise(session.id, exercise.id)}><Text style={styles.deleteButtonText}>Remove exercise</Text></Pressable>
                       </View>
-                    );
-                  })
-                )}
-                <View style={styles.analysisSubcard}>
-                  <Text style={styles.sectionTitle}>Whole-session outputs</Text>
-                  <SliderField
-                    label="Performance score (0-10)"
-                    value={session.performance_score ?? 0}
-                    onChange={(value) => updatePlannedSessionPerformance(session.id, 'performance_score', value)}
-                  />
-                  <TextInput
-                    style={[styles.input, styles.noteInput]}
-                    multiline
-                    value={session.performance_notes || ''}
-                    onChangeText={(value) => updatePlannedSessionPerformance(session.id, 'performance_notes', value)}
-                    placeholder="Notes about actual performance"
-                  />
-                </View>
+                    ) : null}
+                  </View>
+                ) : null}
               </View>
             );
-          })
-        )}
-      </View>
+          })}
+          {addingSessionId === session.id ? (
+            <View style={styles.builderCard}>
+              <ChipWrap options={movementOptions} value={exDraft.movement_type} onChange={(value) => setExDraft((c) => ({ ...c, movement_type: value }))} />
+              <Input label="Exercise name" value={exDraft.exercise_name} onChangeText={(value) => setExDraft((c) => ({ ...c, exercise_name: value }))} />
+              <ExerciseFields draft={exDraft} update={(key, value) => setExDraft((c) => ({ ...c, [key]: value }))} />
+              <View style={styles.twoCol}>
+                <Pressable style={styles.ghostBtn} onPress={() => setAddingSessionId(null)}><Text style={styles.ghostBtnText}>Cancel</Text></Pressable>
+                <Pressable style={[styles.primaryBtn, styles.flex]} onPress={() => addExerciseToSession(session.id)}><Text style={styles.primaryBtnText}>Add</Text></Pressable>
+              </View>
+            </View>
+          ) : (
+            <Pressable style={styles.adds} onPress={() => { setExDraft({ ...emptyExercise }); setAddingSessionId(session.id); }}><Text style={styles.addsText}>+ Add exercise</Text></Pressable>
+          )}
+        </View>
+      ))}
+
+      {selectedDaySessions.length > 0 || showAddSession ? (
+        showAddSession ? (
+          <View style={styles.builderCard}>
+            <Input label="Session name" value={newSessionName} onChangeText={setNewSessionName} />
+            <View style={styles.twoCol}>
+              <Pressable style={styles.ghostBtn} onPress={() => setShowAddSession(false)}><Text style={styles.ghostBtnText}>Cancel</Text></Pressable>
+              <Pressable style={[styles.primaryBtn, styles.flex]} onPress={addSession}><Text style={styles.primaryBtnText}>Add session</Text></Pressable>
+            </View>
+          </View>
+        ) : (
+          <Pressable style={styles.adds} onPress={() => setShowAddSession(true)}><Text style={styles.addsText}>+ Add another session</Text></Pressable>
+        )
+      ) : null}
+
       <View style={styles.card}>
-        <Text style={styles.label}>Selected Day ({selectedDate})</Text>
-        <Text style={styles.sectionTitle}>Session Notes</Text>
+        <Text style={styles.label}>Notes for this day</Text>
         <TextInput
           style={[styles.input, styles.noteInput]}
           multiline
           value={(programme.day_notes || {})[selectedDate] || ''}
           onChangeText={updateDayNote}
-          placeholder="Notes for this training day"
+          placeholder="Optional notes for this training day"
         />
       </View>
     </View>
@@ -3014,6 +3600,136 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
       updater(nextProgramme);
       return { ...current, programme: nextProgramme };
     });
+  }
+
+  const [openBlockId, setOpenBlockId] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [newBlock, setNewBlock] = useState({ name: '', weeks: '4' });
+
+  function ensureMacroDraft(draft) {
+    draft.macro_blocks = draft.macro_blocks || [];
+    let macroItem = currentMacro(draft);
+    if (!macroItem) {
+      macroItem = { id: createId('macro'), macro_block_name: '', start_date: isoDate(), end_date: '', blocks: [] };
+      draft.macro_blocks.push(macroItem);
+      draft.selected_macro_id = macroItem.id;
+    }
+    return macroItem;
+  }
+
+  function setMacroName(value) {
+    commitProgramme((draft) => { ensureMacroDraft(draft).macro_block_name = value; });
+  }
+
+  function addMacro() {
+    commitProgramme((draft) => {
+      const id = createId('macro');
+      draft.macro_blocks = draft.macro_blocks || [];
+      draft.macro_blocks.push({ id, macro_block_name: '', start_date: isoDate(), end_date: '', blocks: [] });
+      draft.selected_macro_id = id;
+      draft.selected_block_id = null;
+      draft.selected_week_id = null;
+    });
+  }
+
+  function selectMacroById(id) {
+    commitProgramme((draft) => {
+      const macroItem = (draft.macro_blocks || []).find((item) => item.id === id);
+      if (!macroItem) return;
+      draft.selected_macro_id = id;
+      draft.selected_block_id = macroItem.blocks?.[0]?.id || null;
+      draft.selected_week_id = macroItem.blocks?.[0]?.weeks?.[0]?.id || null;
+    });
+  }
+
+  function addBlock() {
+    const weeks = Math.max(1, Math.min(16, Math.round(toNumber(newBlock.weeks, 4)) || 4));
+    const name = newBlock.name.trim() || 'New block';
+    commitProgramme((draft) => {
+      const macroItem = ensureMacroDraft(draft);
+      macroItem.blocks = macroItem.blocks || [];
+      const last = macroItem.blocks[macroItem.blocks.length - 1];
+      const lastEnd = last?.weeks?.[last.weeks.length - 1]?.end_date;
+      const start = lastEnd ? addDays(lastEnd, 1) : (macroItem.start_date || isoDate());
+      const weekObjs = [];
+      let cursor = start;
+      for (let i = 0; i < weeks; i += 1) {
+        weekObjs.push({ id: createId('week'), week_name: `Week ${i + 1}`, start_date: cursor, end_date: addDays(cursor, 6), sessions: [] });
+        cursor = addDays(cursor, 7);
+      }
+      const id = createId('block');
+      macroItem.blocks.push({ id, block_name: name, start_date: start, end_date: addDays(start, weeks * 7 - 1), weeks: weekObjs });
+      draft.selected_block_id = id;
+      draft.selected_week_id = weekObjs[0].id;
+    });
+    setNewBlock({ name: '', weeks: '4' });
+    setAdding(false);
+  }
+
+  function setBlockName(blockId, value) {
+    commitProgramme((draft) => {
+      const macroItem = currentMacro(draft);
+      const blockItem = macroItem?.blocks?.find((item) => item.id === blockId);
+      if (blockItem) blockItem.block_name = value;
+    });
+  }
+
+  function addWeek(blockId) {
+    commitProgramme((draft) => {
+      const macroItem = currentMacro(draft);
+      const blockItem = macroItem?.blocks?.find((item) => item.id === blockId);
+      if (!blockItem) return;
+      blockItem.weeks = blockItem.weeks || [];
+      const last = blockItem.weeks[blockItem.weeks.length - 1];
+      const cursor = last ? addDays(last.end_date, 1) : (blockItem.start_date || isoDate());
+      blockItem.weeks.push({ id: createId('week'), week_name: `Week ${blockItem.weeks.length + 1}`, start_date: cursor, end_date: addDays(cursor, 6), sessions: [] });
+      blockItem.end_date = addDays(cursor, 6);
+    });
+  }
+
+  function removeWeek(blockId) {
+    const macroItem = currentMacro(programme);
+    const blockItem = macroItem?.blocks?.find((item) => item.id === blockId);
+    const last = blockItem?.weeks?.[blockItem.weeks.length - 1];
+    if (!last) return;
+    if ((last.sessions || []).length) { Alert.alert('Week has sessions', 'Remove or move its sessions before deleting this week.'); return; }
+    commitProgramme((draft) => {
+      const macroDraft = currentMacro(draft);
+      const blockDraft = macroDraft?.blocks?.find((item) => item.id === blockId);
+      if (!blockDraft || !(blockDraft.weeks || []).length) return;
+      blockDraft.weeks.pop();
+      const newLast = blockDraft.weeks[blockDraft.weeks.length - 1];
+      blockDraft.end_date = newLast ? newLast.end_date : blockDraft.start_date;
+    });
+  }
+
+  function selectBlockById(blockId) {
+    let date = isoDate();
+    commitProgramme((draft) => {
+      const macroItem = currentMacro(draft);
+      const blockItem = macroItem?.blocks?.find((item) => item.id === blockId);
+      if (!blockItem) return;
+      draft.selected_block_id = blockItem.id;
+      const firstWeek = blockItem.weeks?.[0];
+      draft.selected_week_id = firstWeek?.id || null;
+      date = firstWeek?.start_date || isoDate();
+    });
+    setSelectedDate(date);
+  }
+
+  function deleteBlockById(blockId) {
+    Alert.alert('Delete block?', 'This removes the block and its sessions.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => commitProgramme((draft) => {
+        const macroItem = currentMacro(draft);
+        if (!macroItem) return;
+        macroItem.blocks = (macroItem.blocks || []).filter((item) => item.id !== blockId);
+        if (draft.selected_block_id === blockId) {
+          draft.selected_block_id = macroItem.blocks[0]?.id || null;
+          draft.selected_week_id = macroItem.blocks[0]?.weeks?.[0]?.id || null;
+        }
+      }) },
+    ]);
   }
 
   function selectMacro(macroId) {
@@ -3250,67 +3966,76 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
 
   return (
     <View style={styles.screen}>
-      <Header title="Edit Programme" onBack={() => setScreen('calendar')} />
-      <InlineEdit label="Calendar" value={programme.calendar_name} onChangeText={(value) => updateProgramme('calendar_name', value)} />
-
-      <View style={styles.calendarPanel}>
-        <View style={styles.rowBetween}>
-          <Text style={styles.sectionTitle}>Macro Cycles</Text>
-          <Pressable style={styles.smallPill} onPress={addMacroBlock}><Text style={styles.smallPillText}>+ Macro</Text></Pressable>
-        </View>
-        {(programme.macro_blocks || []).map((macroItem) => (
-          <View key={macroItem.id} style={styles.programmeEditRow}>
-            <View style={styles.programmeEditMain}>
-              <Text style={styles.programmeLabel}>{programme.selected_macro_id === macroItem.id ? 'Selected Macro' : 'Macro'}</Text>
-              <Text style={styles.cardTitle}>{macroItem.macro_block_name || 'Untitled macro cycle'}</Text>
-              <Text style={styles.rangeSummaryText}>{dateRangeSummary(macroItem.start_date, macroItem.end_date)}</Text>
-              <View style={styles.programmeActions}>
-                <Pressable style={styles.miniButton} onPress={() => selectMacro(macroItem.id)}>
-                  <Text style={styles.miniButtonText}>{programme.selected_macro_id === macroItem.id ? 'Selected' : 'Select'}</Text>
-                </Pressable>
-                <Pressable style={styles.miniButton} onPress={() => beginMacroEdit(macroItem)}>
-                  <Text style={styles.miniButtonText}>Edit</Text>
-                </Pressable>
-              </View>
-              {editingItem?.type === 'macro' && editingItem.id === macroItem.id ? renderEditPanel('macro', 'Edit Macro Cycle') : null}
-            </View>
-            <Pressable style={styles.deleteButton} onPress={() => deleteMacroBlock(macroItem.id)}>
-              <Text style={styles.deleteButtonText}>Delete Macro</Text>
-            </Pressable>
-          </View>
-        ))}
+      <View style={styles.checkinTop}>
+        <Pressable style={styles.iconBack} onPress={() => setScreen('calendar')}><Text style={styles.iconBackText}>‹</Text></Pressable>
+        <Text style={[styles.h1, styles.flex]}>Programme</Text>
       </View>
 
-      <View style={styles.calendarPanel}>
-        <View style={styles.rowBetween}>
-          <Text style={styles.sectionTitle}>Training Blocks</Text>
-          <Pressable style={styles.smallPill} onPress={addTrainingBlock}><Text style={styles.smallPillText}>+ Block</Text></Pressable>
-        </View>
-        {(macro?.blocks || []).map((blockItem) => (
-          <View key={blockItem.id} style={styles.programmeEditRow}>
-            <View style={styles.programmeEditMain}>
-              <Text style={styles.programmeLabel}>{programme.selected_block_id === blockItem.id ? 'Selected Block' : 'Block'}</Text>
-              <Text style={styles.cardTitle}>{blockItem.block_name || 'Untitled training block'}</Text>
-              <Text style={styles.rangeSummaryText}>{dateRangeSummary(blockItem.start_date, blockItem.end_date, 'Week/phase range: ')}</Text>
-              <View style={styles.programmeActions}>
-                <Pressable style={styles.miniButton} onPress={() => selectBlock(blockItem.id)}>
-                  <Text style={styles.miniButtonText}>{programme.selected_block_id === blockItem.id ? 'Selected' : 'Select'}</Text>
-                </Pressable>
-                <Pressable style={styles.miniButton} onPress={() => selectBlockAndOpen(blockItem.id)}>
-                  <Text style={styles.miniButtonText}>Edit Sessions</Text>
-                </Pressable>
-              </View>
-              <Pressable style={styles.miniButton} onPress={() => beginBlockEdit(blockItem)}>
-                <Text style={styles.miniButtonText}>Edit</Text>
+      <View style={styles.card}>
+        <Text style={styles.label}>Macrocycle · the overall plan</Text>
+        <Input label="Name" value={macro?.macro_block_name || ''} onChangeText={setMacroName} />
+        {(programme.macro_blocks || []).length > 1 ? (
+          <View style={styles.chips}>
+            {(programme.macro_blocks || []).map((macroItem) => (
+              <Pressable key={macroItem.id} style={[styles.chip, programme.selected_macro_id === macroItem.id && styles.chipActive]} onPress={() => selectMacroById(macroItem.id)}>
+                <Text style={[styles.chipText, programme.selected_macro_id === macroItem.id && styles.chipTextActive]}>{macroItem.macro_block_name || 'Untitled'}</Text>
               </Pressable>
-              {editingItem?.type === 'block' && editingItem.id === blockItem.id ? renderEditPanel('block', 'Edit Training Block') : null}
-            </View>
-            <Pressable style={styles.deleteButton} onPress={() => deleteTrainingBlock(blockItem.id)}>
-              <Text style={styles.deleteButtonText}>Delete Block</Text>
-            </Pressable>
+            ))}
           </View>
-        ))}
+        ) : null}
+        <Pressable style={styles.adds} onPress={addMacro}><Text style={styles.addsText}>+ New macrocycle</Text></Pressable>
       </View>
+
+      <Text style={styles.daySectionLabel}>Mesocycle blocks · training phases</Text>
+      {(macro?.blocks || []).length === 0 ? <Text style={styles.muted}>No blocks yet — add your first phase below.</Text> : null}
+      {(macro?.blocks || []).map((blockItem, index) => {
+        const open = openBlockId === blockItem.id;
+        const isCurrent = programme.selected_block_id === blockItem.id;
+        const weeks = (blockItem.weeks || []).length;
+        return (
+          <View key={blockItem.id} style={styles.card}>
+            <View style={styles.rowBetween}>
+              <View style={styles.flex}>
+                <Text style={styles.exName}>{blockItem.block_name || `Block ${index + 1}`}{isCurrent ? '  ·  current' : ''}</Text>
+                <Text style={styles.exPrescription}>{weeks} week{weeks === 1 ? '' : 's'} · {dateRangeSummary(blockItem.start_date, blockItem.end_date)}</Text>
+              </View>
+              <Pressable onPress={() => setOpenBlockId(open ? null : blockItem.id)}><Text style={styles.textLink}>{open ? 'Done' : 'Edit'}</Text></Pressable>
+            </View>
+            {open ? (
+              <View style={styles.painExtra}>
+                <Input label="Block name" value={blockItem.block_name} onChangeText={(value) => setBlockName(blockItem.id, value)} />
+                <View style={styles.rowBetween}>
+                  <Text style={styles.label}>Weeks (microcycles)</Text>
+                  <View style={styles.stepRow}>
+                    <Pressable style={styles.stepBtn} onPress={() => removeWeek(blockItem.id)}><Text style={styles.stepBtnText}>−</Text></Pressable>
+                    <Text style={styles.stepVal}>{weeks}</Text>
+                    <Pressable style={styles.stepBtn} onPress={() => addWeek(blockItem.id)}><Text style={styles.stepBtnText}>+</Text></Pressable>
+                  </View>
+                </View>
+                <View style={styles.twoCol}>
+                  <Pressable style={styles.ghostBtn} onPress={() => selectBlockById(blockItem.id)}><Text style={styles.ghostBtnText}>{isCurrent ? 'Current block' : 'Set current'}</Text></Pressable>
+                  <Pressable style={styles.ghostBtn} onPress={() => deleteBlockById(blockItem.id)}><Text style={[styles.ghostBtnText, styles.dangerText]}>Delete</Text></Pressable>
+                </View>
+              </View>
+            ) : (
+              !isCurrent ? <Pressable onPress={() => selectBlockById(blockItem.id)}><Text style={styles.textLink}>Set as current</Text></Pressable> : null
+            )}
+          </View>
+        );
+      })}
+
+      {adding ? (
+        <View style={styles.builderCard}>
+          <Input label="Block name (e.g. Power, Accumulation)" value={newBlock.name} onChangeText={(value) => setNewBlock((current) => ({ ...current, name: value }))} />
+          <Input label="Length in weeks" value={String(newBlock.weeks)} onChangeText={(value) => setNewBlock((current) => ({ ...current, weeks: value.replace(/[^0-9]/g, '') }))} />
+          <View style={styles.twoCol}>
+            <Pressable style={styles.ghostBtn} onPress={() => setAdding(false)}><Text style={styles.ghostBtnText}>Cancel</Text></Pressable>
+            <Pressable style={[styles.primaryBtn, styles.flex]} onPress={addBlock}><Text style={styles.primaryBtnText}>Add block</Text></Pressable>
+          </View>
+        </View>
+      ) : (
+        <Pressable style={styles.adds} onPress={() => setAdding(true)}><Text style={styles.addsText}>+ Add block</Text></Pressable>
+      )}
     </View>
   );
 }
@@ -3698,6 +4423,8 @@ function EditBlockCalendarScreen({
 
 function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'editBlockCalendar', setScreen }) {
   const [draftExercise, setDraftExercise] = useState(emptyExercise);
+  const [editingId, setEditingId] = useState(null);
+  const [adding, setAdding] = useState(false);
   const found = findPlannedSession(data.programme, sessionId);
   const session = found?.session;
 
@@ -3751,12 +4478,37 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
       target.exercises = [...(target.exercises || []), { ...exercise, order: (target.exercises || []).length + 1 }];
     });
     setDraftExercise({ ...emptyExercise, movement_type: draftExercise.movement_type });
+    setAdding(false);
+  }
+
+  function updatePlannedAttempt(exerciseId, attemptId, key, value) {
+    commitProgramme((draft) => {
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (!target) return;
+      target.exercises = (target.exercises || []).map((exercise) => {
+        if (exercise.id !== exerciseId) return exercise;
+        const rows = plannedAttemptRows(exercise);
+        const nextRows = rows.map((attempt) => {
+          if (attempt.id !== attemptId) return attempt;
+          if (key === 'metric_type') {
+            return { ...attempt, metric_type: value, metrics: emptyActualMetrics(value, attempt.metrics || {}) };
+          }
+          const nextMetrics = { ...(attempt.metrics || {}), [key]: value };
+          if (key === 'ft') nextMetrics.ft_unit = 'milliseconds';
+          if (key === 'gct') nextMetrics.gct_unit = 'milliseconds';
+          return { ...attempt, metrics: emptyActualMetrics(attempt.metric_type, nextMetrics) };
+        });
+        const plannedKeys = new Set(nextRows.map(actualMetricRowKey));
+        const preservedRows = (exercise.actual_metrics || []).filter((attempt) => !plannedKeys.has(actualMetricRowKey(attempt)));
+        return { ...exercise, actual_metrics: [...nextRows, ...preservedRows] };
+      });
+    });
   }
 
   if (!session) {
     return (
       <View style={styles.screen}>
-        <Header title="Edit Session" onBack={() => setScreen(returnScreen)} />
+        <Header title="Session" onBack={() => setScreen(returnScreen)} />
         <Text style={styles.bodyText}>Session not found.</Text>
       </View>
     );
@@ -3764,55 +4516,68 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
 
   const updateDraft = (key, value) => setDraftExercise((current) => ({ ...current, [key]: value }));
 
+  const exercises = session.exercises || [];
+  const sessionMeta = [session.date, session.focus, session.duration].filter(Boolean).join(' · ');
+
   return (
     <View style={styles.screen}>
-      <Header title="Edit Training Session" onBack={() => setScreen(returnScreen)} />
-      <Input label="Session Name" value={session.session_name} onChangeText={(value) => updateSessionField('session_name', value)} />
-      <View style={styles.twoCol}>
-        <Input label="Date" value={session.date} onChangeText={() => {}} editable={false} />
-        <Input label="Duration" value={session.duration} onChangeText={(value) => updateSessionField('duration', value)} />
+      <View style={styles.checkinTop}>
+        <Pressable style={styles.iconBack} onPress={() => setScreen(returnScreen)}><Text style={styles.iconBackText}>‹</Text></Pressable>
+        <View style={styles.flex}><Input label="Session name" value={session.session_name} onChangeText={(value) => updateSessionField('session_name', value)} /></View>
       </View>
-      <Input label="Focus" value={session.focus} onChangeText={(value) => updateSessionField('focus', value)} />
+      {sessionMeta ? <Text style={styles.calendarMetaText}>{sessionMeta}</Text> : null}
 
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Session Exercises</Text>
-        {(session.exercises || []).length === 0 ? <Text style={styles.muted}>No exercises yet.</Text> : null}
-        {(session.exercises || []).map((exercise, index) => (
-          <View key={exercise.id} style={styles.exerciseRow}>
-            <View style={styles.orderBadge}><Text style={styles.orderBadgeText}>{exercise.order || index + 1}</Text></View>
-            <View style={styles.exerciseEdit}>
-              <Input label="Exercise" value={exercise.exercise_name} onChangeText={(value) => updateExercise(exercise.id, 'exercise_name', value)} />
-              <ChipWrap
-                options={movementOptions}
-                value={exercise.movement_type}
-                onChange={(value) => updateExercise(exercise.id, 'movement_type', value)}
-              />
-              <ExerciseFields draft={exercise} update={(key, value) => updateExercise(exercise.id, key, value)} />
-              <Text style={styles.muted}>{exercisePrescription(exercise)}</Text>
+      {exercises.length === 0 ? (
+        <Text style={styles.muted}>No exercises yet — add your first below.</Text>
+      ) : null}
+      {exercises.map((exercise, index) => {
+        const open = editingId === exercise.id;
+        return (
+          <View key={exercise.id} style={styles.card}>
+            <View style={styles.rowBetween}>
+              <Text style={[styles.cardTitle, styles.flex]}>{index + 1}. {exercise.exercise_name || 'Exercise'}</Text>
+              <Pressable onPress={() => setEditingId(open ? null : exercise.id)}><Text style={styles.textLink}>{open ? 'Done' : 'Edit'}</Text></Pressable>
             </View>
-            <Pressable style={styles.deleteButton} onPress={() => deleteExercise(exercise.id)}>
-              <Text style={styles.deleteButtonText}>Delete</Text>
-            </Pressable>
+            <Text style={styles.calendarMetaText}>{exercise.movement_type.replace('_', ' ')} · {exercisePrescription(exercise)}</Text>
+            {open ? (
+              <View style={styles.painExtra}>
+                <Input label="Name" value={exercise.exercise_name} onChangeText={(value) => updateExercise(exercise.id, 'exercise_name', value)} />
+                <ChipWrap options={movementOptions} value={exercise.movement_type} onChange={(value) => updateExercise(exercise.id, 'movement_type', value)} />
+                <ExerciseFields draft={exercise} update={(key, value) => updateExercise(exercise.id, key, value)} />
+                <Pressable style={styles.deleteButton} onPress={() => deleteExercise(exercise.id)}><Text style={styles.deleteButtonText}>Delete exercise</Text></Pressable>
+              </View>
+            ) : null}
+            <CalendarExerciseMetrics
+              exercise={exercise}
+              onChangeAttempt={(attemptId, key, value) => updatePlannedAttempt(exercise.id, attemptId, key, value)}
+            />
           </View>
-        ))}
-      </View>
+        );
+      })}
 
-      <View style={styles.builderCard}>
-        <Text style={styles.sectionTitle}>Add Exercise</Text>
-        <ChipWrap options={movementOptions} value={draftExercise.movement_type} onChange={(value) => updateDraft('movement_type', value)} />
-        <Input label="Exercise Name" value={draftExercise.exercise_name} onChangeText={(value) => updateDraft('exercise_name', value)} />
-        <ExerciseFields draft={draftExercise} update={updateDraft} />
-        <ActionButton title="Add Exercise" tone="outline" onPress={addPlannedExercise} />
-      </View>
+      {adding ? (
+        <View style={styles.builderCard}>
+          <Text style={styles.sectionTitle}>Add exercise</Text>
+          <ChipWrap options={movementOptions} value={draftExercise.movement_type} onChange={(value) => updateDraft('movement_type', value)} />
+          <Input label="Exercise name" value={draftExercise.exercise_name} onChangeText={(value) => updateDraft('exercise_name', value)} />
+          <ExerciseFields draft={draftExercise} update={updateDraft} />
+          <View style={styles.twoCol}>
+            <Pressable style={styles.ghostBtn} onPress={() => setAdding(false)}><Text style={styles.ghostBtnText}>Cancel</Text></Pressable>
+            <Pressable style={[styles.primaryBtn, styles.flex]} onPress={addPlannedExercise}><Text style={styles.primaryBtnText}>Add</Text></Pressable>
+          </View>
+        </View>
+      ) : (
+        <Pressable style={styles.adds} onPress={() => setAdding(true)}><Text style={styles.addsText}>+ Add exercise</Text></Pressable>
+      )}
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Session Notes</Text>
+        <Text style={styles.label}>Session notes</Text>
         <TextInput
           style={[styles.input, styles.noteInput]}
           multiline
           value={session.notes || ''}
           onChangeText={(value) => updateSessionField('notes', value)}
-          placeholder="Notes for this planned session"
+          placeholder="Notes for this session"
         />
       </View>
     </View>
@@ -3820,9 +4585,11 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
 }
 
 function CalendarExerciseMetrics({ exercise, onChangeAttempt }) {
+  const [expanded, setExpanded] = useState(true);
   const rows = plannedAttemptRows(exercise);
   const sets = [...new Set(rows.map((row) => row.set_number))];
   const attemptLabel = Math.round(toNumber(exercise.contacts, 0)) > 0 ? 'Contact' : 'Rep';
+  const loggedCount = rows.filter(attemptHasLoggedMetrics).length;
 
   if (!rows.length) {
     return <Text style={styles.muted}>No attempts to log yet.</Text>;
@@ -3830,30 +4597,41 @@ function CalendarExerciseMetrics({ exercise, onChangeAttempt }) {
 
   return (
     <View style={styles.setMetricsList}>
-      {sets.map((setNumber) => {
-        const setRows = rows.filter((row) => row.set_number === setNumber);
-        if (!setRows.length) return null;
-        return (
-          <View key={`${exercise.id}-set-${setNumber}`} style={styles.performanceSetCard}>
-            <Text style={styles.setMetricTitle}>Set {setNumber}</Text>
-            {setRows.map((attempt) => (
-              <View key={attempt.id} style={styles.attemptCard}>
-                <Text style={styles.cardTitle}>{attemptLabel} {attempt.rep_number}</Text>
-                <ChipWrap
-                  options={performanceMetricOptions}
-                  value={attempt.metric_type}
-                  onChange={(value) => onChangeAttempt(attempt.id, 'metric_type', value)}
-                />
-                <MetricInputs
-                  metricType={attempt.metric_type}
-                  metrics={attempt.metrics || {}}
-                  onChangeMetric={(key, value) => onChangeAttempt(attempt.id, key, value)}
-                />
+      <Pressable style={styles.chevronRow} onPress={() => setExpanded((value) => !value)}>
+        <View>
+          <Text style={styles.chevronText}>{expanded ? 'Hide metrics' : 'Log metrics'}</Text>
+          <Text style={styles.centerLinkText}>{loggedCount}/{rows.length} {attemptLabel.toLowerCase()}s logged</Text>
+        </View>
+        <Text style={styles.chevron}>{expanded ? '⌃' : '⌄'}</Text>
+      </Pressable>
+      {expanded ? (
+        <>
+          {sets.map((setNumber) => {
+            const setRows = rows.filter((row) => row.set_number === setNumber);
+            if (!setRows.length) return null;
+            return (
+              <View key={`${exercise.id}-set-${setNumber}`} style={styles.performanceSetCard}>
+                <Text style={styles.setMetricTitle}>Set {setNumber}</Text>
+                {setRows.map((attempt) => (
+                  <View key={attempt.id} style={styles.attemptCard}>
+                    <Text style={styles.cardTitle}>{attemptLabel} {attempt.rep_number}</Text>
+                    <ChipWrap
+                      options={performanceMetricOptions}
+                      value={attempt.metric_type}
+                      onChange={(value) => onChangeAttempt(attempt.id, 'metric_type', value)}
+                    />
+                    <MetricInputs
+                      metricType={attempt.metric_type}
+                      metrics={attempt.metrics || {}}
+                      onChangeMetric={(key, value) => onChangeAttempt(attempt.id, key, value)}
+                    />
+                  </View>
+                ))}
               </View>
-            ))}
-          </View>
-        );
-      })}
+            );
+          })}
+        </>
+      ) : null}
     </View>
   );
 }
@@ -3872,9 +4650,32 @@ function SessionAnalysisScreen({ data, analysis, sessionId, setScreen }) {
   }
 
   const result = buildSessionAnalysis(session, analysis);
-  const metricKeys = ['rsi', 'ft', 'gct', 'height_or_distance', 'sprint_time', 'distance', 'weight', 'bar_velocity'];
+  const metricKeys = ['rsi', 'height_or_distance', 'gct', 'ft', 'sprint_time', 'distance', 'weight', 'bar_velocity'];
   const sessionMetricRows = metricKeys.map((key) => [key, result.sessionMetrics[key]]).filter(([, summary]) => summary);
-  const bestSessionMetric = sessionMetricRows[0]?.[1] || null;
+  const visibleSessionMetrics = sessionMetricRows.slice(0, 4);
+  const bestSessionEntry = sessionMetricRows.find(([, summary]) => summary?.best_attempt) || sessionMetricRows[0];
+  const bestSessionMetric = bestSessionEntry?.[1] || null;
+  const bestSessionMetricKey = bestSessionEntry?.[0] || null;
+  const adaptation = analysis.adaptationInsight || {};
+  const adaptationCopy = athleteAdaptationCopy(adaptation);
+  const historicalSessions = allPlannedSessions(data.programme)
+    .filter((item) => item.id !== session.id && (item.date || '') < (session.date || isoDate()))
+    .filter((item) => (item.exercises || []).some((exercise) => (exercise.actual_metrics || []).length));
+  const historicalAttempts = historicalSessions.flatMap((item) =>
+    (item.exercises || []).flatMap((exercise) =>
+      (exercise.actual_metrics || []).map((attempt) => ({ ...attempt, exercise_name: exercise.exercise_name }))
+    )
+  );
+  const historicalComparisons = metricKeys
+    .map((key) => {
+      const today = result.sessionMetrics[key];
+      const historical = summariseMetricAttempts(historicalAttempts, key);
+      if (!today || !historical) return null;
+      const better = bestModeForMetric(key) === 'min' ? today.peak <= historical.peak : today.peak >= historical.peak;
+      return { key, today: today.peak, historical: historical.peak, better };
+    })
+    .filter(Boolean)
+    .slice(0, 3);
   const chartSeries = ['rsi', 'gct', 'ft'].map((key) => ({
     key,
     label: formatMetricName(key),
@@ -3886,12 +4687,23 @@ function SessionAnalysisScreen({ data, analysis, sessionId, setScreen }) {
 
   return (
     <View style={styles.screen}>
-      <Header title="Session Analysis" subtitle={session.session_name || session.date} onBack={() => setScreen('calendar')} />
+      <Header title="Performance Review" subtitle={session.session_name || session.date} onBack={() => setScreen('calendar')} />
+      <View style={styles.priorityCard}>
+        <Text style={styles.label}>What this session means</Text>
+        <Text style={styles.priorityTitle}>{adaptationCopy.headline}</Text>
+        <Text style={styles.bodyText}>{adaptationCopy.body}</Text>
+        <Text style={styles.muted}>{adaptation.loadMeaning?.replace(/^For training load, this means:\s*/i, '') || 'Compared with your recent performance, pain, recovery, load stress, and load tolerance.'}</Text>
+        <Text style={styles.evidenceBadge}>{adaptation.confidence || adaptation.status || 'Collecting Evidence'}</Text>
+      </View>
       <View style={styles.card}>
-        <Text style={styles.label}>Session peak metrics</Text>
-        {sessionMetricRows.length === 0 ? <Text style={styles.muted}>No actual performance metrics logged yet.</Text> : null}
-        {sessionMetricRows.map(([key, summary]) => (
-          <InsightLine key={`peak-${key}`} label={formatMetricName(key)} value={`Peak ${pretty(summary.peak, 2)} / Avg ${pretty(summary.average, 2)}`} />
+        <Text style={styles.label}>Best outputs today</Text>
+        {visibleSessionMetrics.length === 0 ? <Text style={styles.muted}>No performance metrics logged yet.</Text> : null}
+        {visibleSessionMetrics.map(([key, summary]) => (
+          <InsightLine
+            key={`peak-${key}`}
+            label={formatMetricName(key)}
+            value={`Best ${displayMetricValue(key, summary.peak, 2)} / avg ${displayMetricValue(key, summary.average, 2)}`}
+          />
         ))}
       </View>
 
@@ -3900,150 +4712,164 @@ function SessionAnalysisScreen({ data, analysis, sessionId, setScreen }) {
         {bestSessionMetric?.best_attempt ? (
           <Text style={styles.bodyText}>
             Set {bestSessionMetric.best_attempt.set_number}, rep {bestSessionMetric.best_attempt.rep_number}
-            {' '}({bestSessionMetric.best_attempt.exercise_name || 'exercise'}) was the clearest best attempt.
+            {' '}({bestSessionMetric.best_attempt.exercise_name || 'exercise'}) was your best {formatMetricName(bestSessionMetricKey).toLowerCase()} attempt.
           </Text>
         ) : (
-          <Text style={styles.muted}>Best attempt is collecting.</Text>
+          <Text style={styles.muted}>Log rep metrics to identify the best attempt.</Text>
         )}
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>RSI, GCT, FT Across Attempts</Text>
+        <Text style={styles.sectionTitle}>Attempts</Text>
         <AttemptMetricChart series={chartSeries} />
       </View>
 
-      {(result.exerciseSummaries || []).map(({ exercise, metrics, best_attempt }) => (
+      {historicalComparisons.length ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Compared with previous sessions</Text>
+          {historicalComparisons.map((comparison) => (
+            <InsightLine
+              key={`history-${comparison.key}`}
+              label={formatMetricName(comparison.key)}
+              value={`${displayMetricValue(comparison.key, comparison.today, 2)} today / ${displayMetricValue(comparison.key, comparison.historical, 2)} previous best (${comparison.better ? 'matched or better' : 'below'})`}
+            />
+          ))}
+        </View>
+      ) : null}
+
+      {(result.exerciseSummaries || []).filter(({ metrics }) => Object.keys(metrics || {}).length).slice(0, 3).map(({ exercise, metrics, best_attempt }) => (
         <View key={`analysis-${exercise.id}`} style={styles.card}>
-          <Text style={styles.label}>Exercise summary</Text>
+          <Text style={styles.label}>Exercise</Text>
           <Text style={styles.sectionTitle}>{exercise.exercise_name || 'Unnamed exercise'}</Text>
-          {Object.keys(metrics).length === 0 ? <Text style={styles.muted}>No actual metrics logged for this exercise.</Text> : null}
-          {Object.entries(metrics).map(([key, summary]) => (
+          {Object.entries(metrics).slice(0, 3).map(([key, summary]) => (
             <View key={`${exercise.id}-${key}`} style={styles.analysisSubcard}>
               <Text style={styles.cardTitle}>{formatMetricName(key)}</Text>
-              <Text style={styles.muted}>Average {pretty(summary.average, 2)} / Peak {pretty(summary.peak, 2)}</Text>
-              <Text style={styles.smallCopy}>n={summary.n} / SD {summary.sd === null ? '-' : pretty(summary.sd, 2)} / Consistency {summary.consistency === null ? '-' : `${pretty(summary.consistency, 1)}%`}</Text>
+              <Text style={styles.muted}>Best {displayMetricValue(key, summary.peak, 2)} / avg {displayMetricValue(key, summary.average, 2)}</Text>
+              <Text style={styles.smallCopy}>{summary.n} attempt{summary.n === 1 ? '' : 's'} logged</Text>
             </View>
           ))}
           {best_attempt ? <Text style={styles.smallCopy}>Best attempt: set {best_attempt.set_number}, rep {best_attempt.rep_number}</Text> : null}
         </View>
       ))}
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Context comparison</Text>
-        {Object.keys(result.comparisons).length === 0 ? <Text style={styles.muted}>Load, fatigue, readiness, pain, and irritation context is collecting.</Text> : null}
-        {Object.entries(result.comparisons).map(([key, value]) => (
-          <InsightLine key={`comparison-${key}`} label={formatMetricName(key)} value={pretty(value, 1)} />
-        ))}
-      </View>
     </View>
   );
 }
 
+function TrendLine({ values = [], color = '#1F8A3E' }) {
+  const vals = values.filter((v) => Number.isFinite(v));
+  if (vals.length < 2) return null;
+  const W = 300;
+  const H = 96;
+  const pad = 10;
+  const mn = Math.min(...vals);
+  const mx = Math.max(...vals);
+  const rng = (mx - mn) || 1;
+  const x = (i) => pad + (i * (W - 2 * pad)) / (vals.length - 1);
+  const y = (v) => H - pad - ((v - mn) / rng) * (H - 2 * pad);
+  let d = `M${x(0)} ${y(vals[0])}`;
+  for (let i = 1; i < vals.length; i += 1) d += ` L${x(i)} ${y(vals[i])}`;
+  const area = `${d} L${x(vals.length - 1)} ${H} L${x(0)} ${H} Z`;
+  return (
+    <View style={{ height: H, marginTop: 12 }}>
+      <Svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`}>
+        <Path d={area} fill={color} opacity={0.1} />
+        <Path d={d} fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+        <Circle cx={x(vals.length - 1)} cy={y(vals[vals.length - 1])} r="4.5" fill={color} />
+      </Svg>
+    </View>
+  );
+}
+
+function shortState(state) {
+  const v = String(state || '').toLowerCase();
+  if (!v || v.includes('collect')) return '—';
+  if (v.includes('improv') || v.includes('increas') || v.includes('rising')) return 'Rising';
+  if (v.includes('declin') || v.includes('decreas') || v.includes('falling')) return 'Falling';
+  if (v.includes('accumulat') || v.includes('worsen') || v.includes('spike')) return 'Rising';
+  if (v.includes('recover') || v.includes('settl') || v.includes('easing') || v.includes('low load')) return 'Easing';
+  return 'Steady';
+}
+
+function stateColor(state) {
+  const v = String(state || '').toLowerCase();
+  if (v.includes('improv') || v.includes('recover') || v.includes('settl')) return { color: '#1F8A3E' };
+  if (v.includes('declin') || v.includes('accumulat') || v.includes('worsen') || v.includes('spike')) return { color: '#C2422B' };
+  return { color: '#181A14' };
+}
+
 function InsightsScreen({ data, analysis, setScreen, setSelectedInsight, setSelectedDashboardMetric, tutorialSeen, onDismissTutorial }) {
-  const [activeFilter, setActiveFilter] = useState('Overview');
   const [insightTab, setInsightTab] = useState('current');
+  const [range, setRange] = useState('week');
   const rows = orderedRows(analysis);
   const history = data.checkInInsightHistory || [];
-  const performanceRel = strongestRelationship(analysis, (item) => item.yKey === 'performance');
-  const irritationRel = strongestRelationship(analysis, (item) => item.yKey === 'pain');
-  const priority = strongestRelationship(analysis);
-  const filters = ['Overview', 'Performance', 'Irritation', 'Recovery', 'Load'];
-  const categorySections = insightSections.filter((section) => !['overview', 'metric_explorer'].includes(section.id));
-  const visibleSections = activeFilter === 'Overview'
-    ? categorySections
-    : categorySections.filter((section) => section.title === activeFilter);
-  const currentRead = [
-    ['Performance', analysis.currentRead?.performance || 'collecting'],
-    ['Irritation', analysis.currentRead?.irritation || 'collecting'],
-    ['Fatigue', analysis.currentRead?.fatigue || 'collecting'],
-    ['Adaptation', analysis.currentRead?.adaptation || 'Collecting'],
-  ];
+  const adaptation = analysis.adaptationInsight || {};
+  const adaptationCopy = athleteAdaptationCopy(adaptation);
+  const cr = analysis.currentRead || {};
+  const perfPoints = metricSeries(analysis, 'performance').map((point) => point.value);
+
+  if (insightTab === 'history') {
+    return (
+      <View style={styles.screen}>
+        <Text style={styles.h1}>Trends</Text>
+        <Pressable onPress={() => setInsightTab('current')}><Text style={styles.textLink}>← Back to trends</Text></Pressable>
+        <CheckInInsightHistory history={history} />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.screen}>
       <View style={styles.rowBetween}>
-        <Text style={styles.h1}>Insights</Text>
-        <View style={styles.filterPill}><Text style={styles.filterText}>{rows.length} logs</Text></View>
+        <Text style={styles.h1}>Trends</Text>
+        <View style={styles.segWrap}>
+          {['Week', 'Month', 'Year'].map((r) => {
+            const on = range === r.toLowerCase();
+            return (
+              <Pressable key={r} style={[styles.segBtn, on && styles.segBtnOn]} onPress={() => setRange(r.toLowerCase())}>
+                <Text style={[styles.segBtnText, on && styles.segBtnTextOn]}>{r}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
       </View>
-      <TutorialHint
-        visible={!tutorialSeen}
-        title="Insight strength"
-        body="Insights become stronger after repeated session + check-in pairs. Early patterns are exploratory."
-        onDismiss={onDismissTutorial}
-      />
-      <View style={styles.filterTabs}>
-        {[
-          ['current', 'Current'],
-          ['history', `Check-in History (${history.length})`],
-        ].map(([id, label]) => (
-          <Pressable key={id} style={[styles.filterTab, insightTab === id && styles.filterTabActive]} onPress={() => setInsightTab(id)}>
-            <Text style={[styles.filterTabText, insightTab === id && styles.filterTabTextActive]}>{label}</Text>
-          </Pressable>
-        ))}
-      </View>
-      {insightTab === 'history' ? (
-        <CheckInInsightHistory history={history} />
+
+      {rows.length < 2 ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Collecting your story</Text>
+          <Text style={styles.bodyText}>Log a check-in and a result on the same day. After a few pairs, Impuls will show how your training is trending.</Text>
+        </View>
       ) : (
         <>
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Current Read</Text>
-        <View style={styles.currentReadGrid}>
-          {currentRead.map(([label, value]) => (
-            <CurrentReadItem key={label} label={label} value={value} />
-          ))}
-        </View>
-        <CurrentReadItem label="Strongest performance relationship" value={performanceRel ? formatRelationshipName(performanceRel.title) : 'Collecting'} wide />
-        <CurrentReadItem label="Strongest irritation relationship" value={irritationRel ? formatRelationshipName(irritationRel.title) : 'Collecting'} wide />
-      </View>
-      <Pressable
-        style={styles.priorityCard}
-        onPress={() => {
-          if (priority) {
-            setSelectedInsight(priority.id);
-            setScreen('detail');
-          }
-        }}
-      >
-        <Text style={styles.label}>Priority Insight</Text>
-        <Text style={styles.priorityTitle}>{priority ? formatRelationshipName(priority.title) : 'Collecting more data'}</Text>
-        <Text style={styles.bodyText}>{priority ? priority.insight.evidenceStatement : 'Log more check-ins and sessions to generate a priority insight.'}</Text>
-        <View style={styles.evidenceRow}>
-          <Text style={styles.evidenceBadge}>r = {priority?.r === null || priority?.r === undefined ? '-' : pretty(priority.r, 2)}</Text>
-          <Text style={styles.evidenceBadge}>n = {priority?.points?.length || 0}</Text>
-          <Text style={styles.evidenceBadge}>{priority?.insight?.confidence || 'Collecting'}</Text>
-        </View>
-        <Text style={styles.pressCue}>View evidence</Text>
-      </Pressable>
-      <View style={styles.sectionHeaderRow}>
-        <Text style={styles.sectionTitle}>Explore Categories</Text>
-        <Pressable onPress={() => {
-          setSelectedDashboardMetric('performance');
-          setScreen('dashboard');
-        }}>
-          <Text style={styles.textLink}>Metric Dashboard</Text>
-        </Pressable>
-      </View>
-      <View style={styles.insightGrid}>
-        {visibleSections.map((section) => (
-          <Pressable
-            key={section.id}
-            style={styles.insightCard}
-            onPress={() => {
-              setSelectedInsight(section.id);
-              setScreen('detail');
-            }}
-          >
-            <View style={styles.categoryCardTop}>
-              <View style={[styles.insightIcon, { backgroundColor: section.color }]} />
-              <Text style={styles.tapCue}>Tap</Text>
-            </View>
-            <Text style={styles.cardTitle}>{section.title}</Text>
-            <Text style={styles.categoryFinding}>{analysis.insightSummaries?.[section.id]?.summary || ''}</Text>
-            <Text style={styles.tinyBadge}>{analysis.insightSummaries?.[section.id]?.status || 'Collecting'}</Text>
-            <MiniSpark color={section.color} values={metricSeries(analysis, section.id === 'irritation' ? 'pain' : section.id === 'load' ? 'load' : section.id === 'recovery' ? 'fatigue' : 'performance').map((point) => point.value)} />
+          <Pressable style={styles.card} onPress={() => { setSelectedInsight('adaptation'); setScreen('detail'); }}>
+            <Text style={styles.label}>This week · the story</Text>
+            <Text style={styles.storyHeadline}>{adaptationCopy.headline}</Text>
+            <TrendLine values={perfPoints} />
+            <Text style={styles.evlink}>See the evidence →</Text>
           </Pressable>
-        ))}
-      </View>
+
+          <View style={styles.statRow}>
+            <View style={styles.statCell}><Text style={styles.statCellLabel}>Performance</Text><Text style={[styles.statCellValue, stateColor(cr.performance)]}>{shortState(cr.performance)}</Text></View>
+            <View style={styles.statCell}><Text style={styles.statCellLabel}>Load</Text><Text style={styles.statCellValue}>{shortState(cr.loadStress)}</Text></View>
+            <View style={styles.statCell}><Text style={styles.statCellLabel}>Recovery</Text><Text style={[styles.statCellValue, stateColor(cr.fatigue)]}>{shortState(cr.fatigue)}</Text></View>
+          </View>
+
+          <Text style={styles.label}>More signals</Text>
+          <Pressable style={styles.signalRow} onPress={() => { setSelectedInsight('irritation'); setScreen('detail'); }}>
+            <View style={[styles.signalDot, { backgroundColor: '#C2422B' }]} />
+            <Text style={[styles.cardTitle, styles.flex]}>Pain &amp; irritation</Text>
+            <Text style={styles.chevron}>›</Text>
+          </Pressable>
+          <Pressable style={styles.signalRow} onPress={() => { setSelectedInsight('adaptation'); setScreen('detail'); }}>
+            <View style={[styles.signalDot, { backgroundColor: '#5B4FC2' }]} />
+            <Text style={[styles.cardTitle, styles.flex]}>Adaptation</Text>
+            <Text style={styles.chevron}>›</Text>
+          </Pressable>
+
+          {history.length ? (
+            <Pressable style={styles.centerLink} onPress={() => setInsightTab('history')}>
+              <Text style={styles.centerLinkText}>View saved check-in insights</Text>
+            </Pressable>
+          ) : null}
         </>
       )}
     </View>
@@ -4067,6 +4893,44 @@ function CheckInInsightHistory({ history }) {
           <CheckInReviewSnapshot review={review} showDate />
         </View>
       ))}
+    </View>
+  );
+}
+
+function AdaptationStateVisual({ adaptation = {}, analysis = {} }) {
+  const states = adaptation.componentStates || {};
+  const score = adaptation.score;
+  const scorePosition = Number.isFinite(score) ? Math.max(0, Math.min(100, ((score + 0.3) / 0.6) * 100)) : 50;
+  const recoveryLabel = states.fatigue || analysis.currentRead?.fatigue || 'Collecting';
+  const painLabel = states.irritation || analysis.currentRead?.irritation || 'Collecting';
+  const performanceLabel = states.performance || analysis.currentRead?.performance || 'Collecting';
+  const loadStressLabel = states.loadStress || analysis.currentRead?.loadStress || 'Collecting';
+  const loadToleranceLabel = states.loadTolerance || analysis.currentRead?.loadTolerance || 'Collecting';
+  return (
+    <View style={styles.card}>
+      <Text style={styles.sectionTitle}>Adaptation status</Text>
+      <Text style={styles.bodyText}>{adaptation.summary || 'Log a few sessions to see whether training is building, holding, or costing you.'}</Text>
+      <View style={styles.adaptationZoneWrap}>
+        <View style={styles.adaptationZoneTrack}>
+          <View style={[styles.adaptationZone, styles.adaptationZoneRisk]} />
+          <View style={[styles.adaptationZone, styles.adaptationZoneStable]} />
+          <View style={[styles.adaptationZone, styles.adaptationZoneGood]} />
+          <View style={[styles.adaptationMarker, { left: `${scorePosition}%` }]} />
+        </View>
+        <View style={styles.axisFooter}>
+          <Text style={styles.axisLabel}>At risk</Text>
+          <Text style={styles.axisLabel}>Holding</Text>
+          <Text style={styles.axisLabel}>Adapting</Text>
+        </View>
+      </View>
+      <View style={styles.currentReadGrid}>
+        <CurrentReadItem label="Output" value={performanceLabel} tone={stateTone(performanceLabel, 'performance')} />
+        <CurrentReadItem label="Load stress" value={loadStressLabel} tone={stateTone(loadStressLabel, 'loadStress')} />
+        <CurrentReadItem label="Load tolerance" value={loadToleranceLabel} tone={stateTone(loadToleranceLabel, 'loadTolerance')} />
+        <CurrentReadItem label="Pain / fatigue" value={`${painLabel} / ${recoveryLabel}`} tone={stateTone(`${painLabel} ${recoveryLabel}`, 'bodyCost')} />
+      </View>
+      {adaptation.loadMeaning ? <Text style={styles.smallCopy}>{adaptation.loadMeaning.replace(/^For training load, this means:\s*/i, '')}</Text> : null}
+      <Text style={styles.smallCopy}>{adaptation.confidence || adaptation.status || 'Collecting Evidence'}</Text>
     </View>
   );
 }
@@ -4140,14 +5004,12 @@ function InsightDetailScreen({ data, analysis, insightId, setScreen, setSelected
 function InsightSectionDetail({ data, analysis, section, setScreen, setSelectedDashboardMetric }) {
   const rows = orderedRows(analysis);
   const bestPerformance = [...rows].sort((a, b) => b.performance - a.performance).slice(0, 3);
-  const highestPain = [...rows].sort((a, b) => b.pain - a.pain).slice(0, 3);
-  const lowestReadiness = [...rows].sort((a, b) => a.readiness - b.readiness).slice(0, 3);
-  const painChanges = metricStats(analysis, 'pain').changes;
   const adaptation = analysis.adaptationInsight;
+  const sectionCopy = athleteSectionCopy(section, analysis);
 
   function openDashboard(metricKey) {
     setSelectedDashboardMetric(metricKey);
-    setScreen('dashboard');
+    setScreen('evidence');
   }
 
   return (
@@ -4158,7 +5020,7 @@ function InsightSectionDetail({ data, analysis, section, setScreen, setSelectedD
           <View style={styles.card}>
             <Text style={styles.sectionTitle}>Current Read</Text>
             <InsightLine label="Performance" value={analysis.currentRead?.performance || 'collecting'} />
-            <InsightLine label="Irritation" value={analysis.currentRead?.irritation || 'collecting'} />
+            <InsightLine label="Pain" value={analysis.currentRead?.irritation || 'collecting'} />
             <InsightLine label="Fatigue" value={analysis.currentRead?.fatigue || 'collecting'} />
             <InsightLine label="Adaptation" value={adaptation.label} />
           </View>
@@ -4168,49 +5030,49 @@ function InsightSectionDetail({ data, analysis, section, setScreen, setSelectedD
 
       {section.id === 'performance' && (
         <>
-          <PerformanceMetricAnalysisInsightCard
-            analysis={analysis}
-            onOpenMetric={(metricKey) => openDashboard(metricKey)}
-          />
-          <DashboardPreview title="Performance Trend" metricKey="performance" analysis={analysis} onOpen={() => openDashboard('performance')} />
-          <RelationshipBars title="Strongest Performance Relationship" relationships={analysis.relationships.filter((item) => item.yKey === 'performance')} />
-          <RankedDayCards title="Best Performance Days" points={bestPerformance} valueKey="performance" />
+          <View style={styles.priorityCard}>
+            <Text style={styles.label}>Performance</Text>
+            <Text style={styles.priorityTitle}>{sectionCopy.title}</Text>
+            <Text style={styles.bodyText}>{sectionCopy.body}</Text>
+          </View>
+          <DashboardPreview title="Performance trend" metricKey="performance" analysis={analysis} onOpen={() => openDashboard('performance')} />
+          {bestPerformance.length ? <RankedDayCards title="Best recent days" points={bestPerformance} valueKey="performance" /> : null}
         </>
       )}
 
       {section.id === 'irritation' && (
         <>
-          <DashboardPreview title="Irritation Trend" metricKey="pain" analysis={analysis} onOpen={() => openDashboard('pain')} />
           <View style={styles.card}>
-            <Text style={styles.sectionTitle}>Threshold Bands</Text>
-            <InsightLine label="0-2" value="low" />
-            <InsightLine label="3-4" value="moderate" />
-            <InsightLine label="5+" value="elevated" />
+            <Text style={styles.sectionTitle}>{sectionCopy.title}</Text>
+            <Text style={styles.bodyText}>{sectionCopy.body}</Text>
+            <Text style={styles.smallCopy}>Guide: 0-2 low, 3-4 watch, 5+ elevated.</Text>
           </View>
-          <ChangeCards title="Largest Pain Changes" changes={painChanges} metric={dashboardMetrics.find((item) => item.key === 'pain')} insight={analysis.changeInsights?.pain} />
-          <RelationshipBars title="Strongest Irritation Relationship" relationships={analysis.relationships.filter((item) => item.yKey === 'pain')} />
-          <RankedDayCards title="Highest Pain Days" points={highestPain} valueKey="pain" />
+          <DashboardPreview title="Pain trend" metricKey="pain" analysis={analysis} onOpen={() => openDashboard('pain')} />
         </>
       )}
 
       {section.id === 'recovery' && (
         <>
-          <DashboardPreview title="Fatigue Trend" metricKey="fatigue" analysis={analysis} onOpen={() => openDashboard('fatigue')} />
-          <RecoveryDualLineFigure analysis={analysis} />
-          <ReadinessStateCard analysis={analysis} />
-          <RankedDayCards title="Worst Recovery Days" points={lowestReadiness} valueKey="readiness" />
+          <View style={styles.priorityCard}>
+            <Text style={styles.label}>Recovery</Text>
+            <Text style={styles.priorityTitle}>{sectionCopy.title}</Text>
+            <Text style={styles.bodyText}>{sectionCopy.body}</Text>
+          </View>
+          <DashboardPreview title="Recovery trend" metricKey="fatigue" analysis={analysis} onOpen={() => openDashboard('fatigue')} />
         </>
       )}
 
       {section.id === 'load' && (
         <>
-          <DashboardPreview title="Load Trend" metricKey="load" analysis={analysis} onOpen={() => openDashboard('load')} />
+          <View style={styles.card}>
+            <Text style={styles.sectionTitle}>{sectionCopy.title}</Text>
+            <Text style={styles.bodyText}>{sectionCopy.body}</Text>
+          </View>
+          <DashboardPreview title="Load trend" metricKey="load" analysis={analysis} onOpen={() => openDashboard('load')} />
           <View style={styles.metricStrip}>
             <Metric label="7-day Load" value={pretty(analysis.weeklyLoad, 1)} />
             <Metric label="Avg Load" value={analysis.avgLoad === null ? '-' : pretty(analysis.avgLoad, 1)} />
           </View>
-          <MovementMix data={data} insight={analysis.loadDetailInsights?.movementMix} />
-          <MaxIntentSummary data={data} insight={analysis.loadDetailInsights?.maxIntent} />
         </>
       )}
 
@@ -4218,12 +5080,12 @@ function InsightSectionDetail({ data, analysis, section, setScreen, setSelectedD
         <>
           <View style={styles.priorityCard}>
             <Text style={styles.label}>Adaptation State</Text>
-            <Text style={styles.h1}>{adaptation.label}</Text>
-            <Text style={styles.bodyText}>{adaptation.summary}</Text>
+            <Text style={styles.h1}>{athleteAdaptationCopy(adaptation).headline}</Text>
+            <Text style={styles.bodyText}>{athleteAdaptationCopy(adaptation).body}</Text>
+            <Text style={styles.muted}>{athleteAdaptationCopy(adaptation).action}</Text>
             <Text style={styles.evidenceBadge}>{adaptation.confidence || adaptation.status || 'Collecting'}</Text>
           </View>
-          <AdaptationMetricFigure analysis={analysis} />
-          <BlockComparison data={data} analysis={analysis} />
+          <AdaptationStateVisual adaptation={adaptation} analysis={analysis} />
         </>
       )}
 
@@ -4236,9 +5098,9 @@ function InsightSectionDetail({ data, analysis, section, setScreen, setSelectedD
       )}
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Dashboard Link</Text>
-        <Text style={styles.bodyText}>Open the metric dashboard for time series, rolling stats, changes, relationships, scatterplots, and calendar markers.</Text>
-        <ActionButton title="Open Dashboard" tone="outline" onPress={() => openDashboard(section.id === 'irritation' ? 'pain' : section.id === 'load' ? 'load' : section.id === 'recovery' ? 'fatigue' : 'performance')} />
+        <Text style={styles.sectionTitle}>Want the data?</Text>
+        <Text style={styles.bodyText}>Open Evidence for charts, changes, and relationships behind this insight.</Text>
+        <ActionButton title="Open Evidence" tone="outline" onPress={() => openDashboard(sectionCopy.metric || (section.id === 'irritation' ? 'pain' : section.id === 'load' ? 'load' : section.id === 'recovery' ? 'fatigue' : 'performance'))} />
       </View>
     </View>
   );
@@ -4274,13 +5136,13 @@ function DashboardScreen({ data, analysis, metricKey, setMetricKey, setSelectedI
   return (
     <View style={styles.screen}>
       <View style={styles.rowBetween}>
-        <Text style={styles.h1}>Metric Dashboard</Text>
+        <Text style={styles.h1}>Evidence</Text>
         <View style={styles.filterPill}><Text style={styles.filterText}>{metric.category}</Text></View>
       </View>
       <TutorialHint
         visible={!tutorialSeen}
-        title="Metric evidence"
-        body="Use the dashboard to inspect one metric directly: trend, mean, SD, changes, relationships, and chart evidence."
+        title="When you want the detail"
+        body="Evidence shows the charts and stored logs behind an insight. Use it when you want to check why Impuls said something."
         onDismiss={onDismissTutorial}
       />
       <View style={styles.filterTabs}>
@@ -4412,25 +5274,25 @@ function DashboardFilterPanel({
 }
 
 function PriorityInsight({ analysis }) {
-  const priority = strongestRelationship(analysis);
+  const adaptation = analysis.adaptationInsight || {};
   return (
     <View style={styles.priorityCard}>
-      <Text style={styles.label}>Priority Insight</Text>
-      <Text style={styles.priorityTitle}>{priority ? formatRelationshipName(priority.title) : 'Collecting more data'}</Text>
-      <Text style={styles.bodyText}>{priority ? priority.insight.evidenceStatement : 'Add more paired logs to unlock the priority insight.'}</Text>
-      <View style={styles.evidenceRow}>
-        <Text style={styles.evidenceBadge}>r = {priority?.r === null || priority?.r === undefined ? '-' : pretty(priority.r, 2)}</Text>
-        <Text style={styles.evidenceBadge}>n = {priority?.points?.length || 0}</Text>
-        <Text style={styles.evidenceBadge}>{priority?.insight?.confidence || 'Collecting'}</Text>
-      </View>
+      <Text style={styles.label}>Main Insight</Text>
+      <Text style={styles.priorityTitle}>{adaptation.label || 'Adaptation Unclear'}</Text>
+      <Text style={styles.bodyText}>{adaptation.summary || 'Add more paired logs to unlock the adaptation insight.'}</Text>
+      <Text style={styles.muted}>{adaptation.performanceMeaning || adaptation.trainingInterpretation || 'Performance meaning is collecting.'}</Text>
+      <Text style={styles.evidenceBadge}>{adaptation.confidence || adaptation.status || 'Collecting Evidence'}</Text>
     </View>
   );
 }
 
-function CurrentReadItem({ label, value, wide = false }) {
+function CurrentReadItem({ label, value, wide = false, tone = 'neutral' }) {
   return (
-    <View style={[styles.currentReadItem, wide && styles.currentReadItemWide]}>
-      <Text style={styles.currentReadLabel}>{label}</Text>
+    <View style={[styles.currentReadItem, insightToneCardStyle(tone), wide && styles.currentReadItemWide]}>
+      <View style={styles.miniStateHeader}>
+        <Text style={styles.currentReadLabel}>{label}</Text>
+        <View style={[styles.miniStateDot, { backgroundColor: toneAccentColor(tone) }]} />
+      </View>
       <Text style={styles.currentReadValue}>{value}</Text>
     </View>
   );
@@ -4442,7 +5304,7 @@ function DashboardPreview({ title, metricKey, analysis, onOpen }) {
   return (
     <View style={styles.chartCard}>
       <MetricFigure title={title} metric={metric} points={points} insight={analysis.trendInsights?.[metric.key]} compact />
-      <ActionButton title="Open Metric Dashboard" tone="outline" onPress={onOpen} />
+      <ActionButton title="View Evidence" tone="outline" onPress={onOpen} />
     </View>
   );
 }
@@ -4794,7 +5656,7 @@ function RelationshipBars({ title, relationships, onSelect }) {
       <Text style={styles.figureResult}>
         {top ? top.insight.evidenceStatement : 'Relationship ranking cannot yet be estimated because paired observations are insufficient.'}
       </Text>
-      <Text style={styles.axisLabel}>X: absolute Pearson r / Y: relationship</Text>
+      <Text style={styles.axisLabel}>Longer bars mean stronger stored patterns</Text>
       {rows.length === 0 ? <Text style={styles.muted}>Needs at least three matching logs.</Text> : null}
       {rows.map((relationship) => (
         <Pressable key={relationship.id} style={styles.relationshipRow} onPress={() => onSelect?.(relationship)}>
@@ -4803,7 +5665,7 @@ function RelationshipBars({ title, relationships, onSelect }) {
               <Text style={styles.cardTitle}>{formatRelationshipName(relationship.title)}</Text>
               <Text style={relationship.r >= 0 ? styles.positive : styles.negative}>{relationship.r >= 0 ? 'positive' : 'negative'}</Text>
             </View>
-            <Text style={styles.muted}>r = {pretty(relationship.r, 2)} / n = {relationship.points.length} / {relationship.strength}</Text>
+            <Text style={styles.muted}>{relationship.strength} pattern / {relationship.points.length} matching logs</Text>
           </View>
           <View style={styles.relationshipTrack}>
             <View style={[styles.relationshipFill, { width: `${Math.min(100, Math.abs(relationship.r) * 100)}%`, backgroundColor: relationship.color }]} />
@@ -5253,6 +6115,8 @@ function ProfileScreen({
   onSignOut,
   onChangePassword,
   startTodayPerformance,
+  setSelectedDashboardMetric,
+  setScreen,
 }) {
   const [showManualPbNotes, setShowManualPbNotes] = useState(false);
   const [newPassword, setNewPassword] = useState('');
@@ -5262,7 +6126,7 @@ function ProfileScreen({
   const hasLoggedPb = Object.values(derivedPbs).some((best) => Number.isFinite(best?.value));
   return (
     <View style={styles.screen}>
-      <Text style={styles.h1}>You</Text>
+      <Text style={styles.h1}>Profile</Text>
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Account</Text>
         <Input label="Name" value={data.profile?.name || ''} onChangeText={updateProfileName} />
@@ -5316,6 +6180,19 @@ function ProfileScreen({
         <Text style={styles.sectionTitle}>Quick Log</Text>
         <Text style={styles.bodyText}>Use today’s planned session if one exists, or start a new performance log.</Text>
         <ActionButton title="Log Performance" tone="black" onPress={startTodayPerformance} />
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Evidence</Text>
+        <Text style={styles.bodyText}>Detailed charts, relationships, and raw trend checks live here when you want to inspect the numbers.</Text>
+        <ActionButton
+          title="Open Evidence"
+          tone="outline"
+          onPress={() => {
+            setSelectedDashboardMetric('performance');
+            setScreen('evidence');
+          }}
+        />
       </View>
 
       <View style={styles.card}>
@@ -5698,59 +6575,68 @@ function MetricInputs({ metricType, metrics, onChangeMetric }) {
 function AttemptMetricChart({ series }) {
   const activeSeries = series.filter((item) => item.points.length >= 2);
   const chartWidth = 320;
-  const chartHeight = 172;
-  const padding = { left: 32, right: 76, top: 18, bottom: 30 };
-  const allIndexes = [...new Set(activeSeries.flatMap((item) => item.points.map((point) => point.index)))].sort((a, b) => a - b);
+  const chartHeight = 104;
+  const padding = { left: 34, right: 12, top: 12, bottom: 22 };
 
-  if (activeSeries.length === 0 || allIndexes.length < 2) {
+  if (activeSeries.length === 0) {
     return (
       <View style={styles.timeChartEmpty}>
-        <Text style={styles.muted}>Needs at least two valid attempts for RSI, GCT, or FT charting.</Text>
+        <Text style={styles.muted}>Log at least two valid attempts to see attempt trends.</Text>
       </View>
     );
   }
 
-  const plottedSeries = activeSeries.map((item) => {
-    const values = item.points.map((point) => point.value).filter(Number.isFinite);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const range = max - min || 1;
-    const coords = item.points.map((point) => ({
-      ...scaleSvgPoint(point.value, allIndexes.indexOf(point.index), allIndexes.length, min, range, chartWidth, chartHeight, padding),
-      label: point.label,
-      value: point.value,
-    }));
-    return { ...item, coords, path: smoothSvgPath(coords) };
-  });
-
   return (
-    <View style={styles.axisChartWrap}>
-      <Text style={styles.yAxisLabel}>Y: metric value / X: attempts</Text>
-      <View style={styles.multiLineChart}>
-        <Svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`}>
-          <Line x1={padding.left} y1={padding.top + 54} x2={chartWidth - padding.right} y2={padding.top + 54} stroke="#ECECE8" strokeWidth="1" />
-          <Line x1={padding.left} y1={padding.top} x2={padding.left} y2={chartHeight - padding.bottom} stroke="#D8D8D4" strokeWidth="1" />
-          <Line x1={padding.left} y1={chartHeight - padding.bottom} x2={chartWidth - padding.right} y2={chartHeight - padding.bottom} stroke="#D8D8D4" strokeWidth="1" />
-          {plottedSeries.map((item) => (
-            <Path key={`${item.key}-attempt-path`} d={item.path} fill="none" stroke={item.color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-          ))}
-          {plottedSeries.map((item) => {
-            const end = item.coords[item.coords.length - 1];
-            return (
-              <G key={`${item.key}-attempt-label`}>
-                <Circle cx={end.x} cy={end.y} r={4} fill="#FFFFFF" stroke={item.color} strokeWidth="2" />
-                <SvgText x={chartWidth - padding.right + 10} y={end.y + 4} fill={item.color} fontSize="10" fontWeight="700">{item.label}</SvgText>
-              </G>
-            );
-          })}
-        </Svg>
-      </View>
+    <View style={styles.attemptMiniGrid}>
+      {activeSeries.map((item) => {
+        const values = item.points.map((point) => point.value).filter(Number.isFinite);
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const range = max - min || 1;
+        const coords = item.points.map((point, index) => ({
+          ...scaleSvgPoint(point.value, index, item.points.length, min, range, chartWidth, chartHeight, padding),
+          label: point.label,
+          value: point.value,
+        }));
+        const path = smoothSvgPath(coords);
+        const guidance = bestModeForMetric(item.key) === 'min' ? 'Lower is better' : 'Higher is better';
+        return (
+          <View key={`${item.key}-attempt-card`} style={styles.attemptMiniCard}>
+            <View style={styles.rowBetween}>
+              <Text style={styles.cardTitle}>{item.label}</Text>
+              <Text style={styles.axisLabel}>{guidance}</Text>
+            </View>
+            <Svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`}>
+              <Line x1={padding.left} y1={padding.top} x2={padding.left} y2={chartHeight - padding.bottom} stroke="#D8D8D4" strokeWidth="1" />
+              <Line x1={padding.left} y1={chartHeight - padding.bottom} x2={chartWidth - padding.right} y2={chartHeight - padding.bottom} stroke="#D8D8D4" strokeWidth="1" />
+              <SvgText x={4} y={padding.top + 4} fill="#777771" fontSize="10" fontWeight="700">{displayMetricValue(item.key, max, 1)}</SvgText>
+              <SvgText x={4} y={chartHeight - padding.bottom} fill="#777771" fontSize="10" fontWeight="700">{displayMetricValue(item.key, min, 1)}</SvgText>
+              <Path d={path} fill="none" stroke={item.color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+              {coords.map((coord, index) => (
+                <Circle key={`${item.key}-${index}`} cx={coord.x} cy={coord.y} r={3.5} fill="#FFFFFF" stroke={item.color} strokeWidth="2" />
+              ))}
+            </Svg>
+            <View style={styles.axisFooter}>
+              <Text style={styles.axisLabel}>First attempt</Text>
+              <Text style={styles.axisLabel}>Last attempt</Text>
+            </View>
+          </View>
+        );
+      })}
     </View>
   );
 }
 
 function SliderField({ label, value, onChange }) {
   const numeric = Math.max(0, Math.min(10, toNumber(value)));
+  const [trackWidth, setTrackWidth] = useState(1);
+
+  function updateFromLocation(locationX) {
+    const clampedX = Math.max(0, Math.min(trackWidth, locationX));
+    const nextValue = Math.round((clampedX / Math.max(trackWidth, 1)) * 10);
+    onChange(Math.max(0, Math.min(10, nextValue)));
+  }
+
   return (
     <View style={styles.sliderWrap}>
       <View style={styles.rowBetween}>
@@ -5759,7 +6645,14 @@ function SliderField({ label, value, onChange }) {
       </View>
       <View style={styles.sliderRow}>
         <Pressable style={styles.stepButton} onPress={() => onChange(Math.max(0, numeric - 1))}><Text>-</Text></Pressable>
-        <View style={styles.sliderTrack}>
+        <View
+          style={styles.sliderTrack}
+          onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width || 1)}
+          onStartShouldSetResponder={() => true}
+          onMoveShouldSetResponder={() => true}
+          onResponderGrant={(event) => updateFromLocation(event.nativeEvent.locationX)}
+          onResponderMove={(event) => updateFromLocation(event.nativeEvent.locationX)}
+        >
           <View style={[styles.sliderFill, { width: `${numeric * 10}%` }]} />
           <View style={[styles.sliderThumb, { left: `${numeric * 10}%` }]} />
         </View>
@@ -5828,17 +6721,17 @@ function BottomNav({ screen, setScreen }) {
     editPlannedSession: 'calendar',
     insights: 'insights',
     detail: 'insights',
-    dashboard: 'dashboard',
+    dashboard: 'profile',
+    evidence: 'profile',
     profile: 'profile',
   }[screen];
   return (
     <View style={styles.nav}>
       {[
-        ['today', '■', 'Today'],
-        ['calendar', '□', 'Calendar'],
-        ['insights', '◧', 'Insights'],
-        ['dashboard', '▤', 'Dashboard'],
-        ['profile', '○', 'You'],
+        ['today', '⌂', 'Today'],
+        ['calendar', '▦', 'Plan'],
+        ['insights', '∿', 'Trends'],
+        ['profile', '○', 'Profile'],
       ].map(([id, icon, label]) => (
         <Pressable key={id} style={styles.navItem} onPress={() => setScreen(id)}>
           <Text style={[styles.navIcon, active === id && styles.navActive]}>{icon}</Text>
@@ -5968,6 +6861,9 @@ function InsightMetric({ label, value, note }) {
   );
 }
 
+const SERIF = Platform.select({ ios: 'Georgia', android: 'serif', default: 'Georgia' });
+const MONO = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' });
+
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#F7F7F5' },
   flex: { flex: 1 },
@@ -5985,18 +6881,80 @@ const styles = StyleSheet.create({
   tutorialHint: { alignItems: 'flex-start', backgroundColor: '#ECF8EF', borderColor: '#CFE8D4', borderRadius: 16, borderWidth: 1, flexDirection: 'row', gap: 12, padding: 14 },
   hintDismiss: { backgroundColor: '#111111', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7 },
   hintDismissText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
-  h1: { fontSize: 30, fontWeight: '800', color: '#111111', letterSpacing: -0.4 },
-  screenSubtitle: { color: '#686862', fontSize: 15, fontWeight: '500', lineHeight: 21 },
-  date: { marginTop: 10, fontSize: 14, fontWeight: '800', color: '#111111' },
+  h1: { fontSize: 30, fontWeight: '700', color: '#111111', letterSpacing: -0.4, fontFamily: SERIF },
+  screenSubtitle: { color: '#686862', fontSize: 15, fontWeight: '500', lineHeight: 21, fontFamily: SERIF },
+  date: { marginTop: 10, fontSize: 14, fontWeight: '500', color: '#6D6D68', fontStyle: 'italic', fontFamily: SERIF },
   streak: { marginTop: 4, color: '#7A7A76', fontWeight: '700' },
-  heroCard: { backgroundColor: '#111111', borderRadius: 8, padding: 18, minHeight: 126 },
-  heroLabel: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
-  heroScore: { color: '#42B958', fontSize: 31, fontWeight: '900', marginTop: 10 },
-  heroScale: { color: '#BDBDBA', fontSize: 14 },
-  heroCopy: { color: '#FFFFFF', fontSize: 12, fontWeight: '700', marginTop: 8 },
-  gauge: { position: 'absolute', right: 18, top: 32, width: 86, height: 8, backgroundColor: '#323230', borderRadius: 8 },
-  gaugeFill: { height: 8, backgroundColor: '#5ED369', borderRadius: 8 },
-  panelAttached: { backgroundColor: '#FFFFFF', borderRadius: 8, marginTop: -18, padding: 16, shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 12 },
+  heroCard: { backgroundColor: '#FFFDF7', borderColor: '#E6E4DC', borderWidth: 1, borderRadius: 16, padding: 18, minHeight: 126 },
+  heroLabel: { color: '#6D6D68', fontSize: 12, fontWeight: '800' },
+  heroScore: { color: '#1A1C16', fontSize: 34, fontWeight: '700', marginTop: 10, fontFamily: SERIF },
+  heroScale: { color: '#9A9A8E', fontSize: 14 },
+  heroCopy: { color: '#5E5E58', fontSize: 12, fontWeight: '700', marginTop: 8 },
+  gauge: { position: 'absolute', right: 18, top: 32, width: 86, height: 8, backgroundColor: '#E6E4DC', borderRadius: 8 },
+  gaugeFill: { height: 8, backgroundColor: '#1F8A3E', borderRadius: 8 },
+  panelAttached: { backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, marginTop: 12, padding: 16 },
+  greetingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
+  avatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#1F8A3E', alignItems: 'center', justifyContent: 'center' },
+  avatarText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700', fontFamily: SERIF },
+  readRow: { flexDirection: 'row', gap: 14, alignItems: 'center' },
+  readMain: { flex: 1 },
+  ringWrap: { width: 104, height: 104, alignItems: 'center', justifyContent: 'center' },
+  ringValue: { position: 'absolute', alignItems: 'center' },
+  ringNum: { fontSize: 28, fontWeight: '700', color: '#1A1C16', fontFamily: SERIF, lineHeight: 30 },
+  ringScale: { fontSize: 11, color: '#9A9A8E', fontFamily: MONO },
+  readline: { fontSize: 19, fontWeight: '600', color: '#181A14', fontFamily: SERIF, marginTop: 4, lineHeight: 23 },
+  statRow: { flexDirection: 'row', gap: 8 },
+  statCell: { flex: 1, backgroundColor: '#F1EFE8', borderRadius: 14, paddingVertical: 9, paddingHorizontal: 11 },
+  statCellLabel: { color: '#6F6F69', fontSize: 10, fontWeight: '700', letterSpacing: 0.4, fontFamily: MONO, marginBottom: 3, textTransform: 'uppercase' },
+  statCellValue: { color: '#181A14', fontSize: 17, fontWeight: '600', fontFamily: SERIF },
+  primaryBtn: { backgroundColor: '#1F8A3E', borderRadius: 16, paddingVertical: 15, alignItems: 'center' },
+  primaryBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', fontFamily: SERIF },
+  ghostBtn: { flex: 1, backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
+  ghostBtnText: { color: '#181A14', fontSize: 15, fontWeight: '600', fontFamily: SERIF },
+  noticedCard: { flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, padding: 13 },
+  noticedIcon: { width: 30, height: 30, borderRadius: 9, backgroundColor: '#ECEADF', alignItems: 'center', justifyContent: 'center' },
+  noticedMark: { color: '#1F8A3E', fontSize: 16, fontWeight: '700' },
+  noticedText: { color: '#181A14', fontSize: 15, fontWeight: '600', fontFamily: SERIF },
+  checkinTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  iconBack: { width: 34, height: 34, borderRadius: 17, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' },
+  iconBackText: { fontSize: 22, color: '#111111', marginTop: -2 },
+  qGroup: { gap: 10 },
+  q: { fontSize: 19, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
+  scale5: { flexDirection: 'row', gap: 5 },
+  scaleBtn: { flex: 1, height: 44, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FFFFFF', borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
+  scaleBtnSel: { backgroundColor: '#1F8A3E', borderColor: 'transparent' },
+  scaleBtnWarn: { backgroundColor: '#9C6212', borderColor: 'transparent' },
+  scaleBtnText: { fontSize: 14, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
+  scaleBtnTextSel: { color: '#FFFFFF' },
+  scaleEnds: { flexDirection: 'row', justifyContent: 'space-between' },
+  toggleRow: { flexDirection: 'row', gap: 10 },
+  toggleBtn: { flex: 1, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FFFFFF', borderRadius: 14, paddingVertical: 13, alignItems: 'center' },
+  toggleBtnSel: { backgroundColor: '#181A14', borderColor: 'transparent' },
+  toggleBtnText: { fontSize: 15, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
+  toggleBtnTextSel: { color: '#F4F1E8' },
+  painExtra: { gap: 10 },
+  segWrap: { flexDirection: 'row', backgroundColor: '#ECEADF', borderRadius: 999, padding: 4 },
+  segBtn: { paddingVertical: 6, paddingHorizontal: 13, borderRadius: 999 },
+  segBtnOn: { backgroundColor: '#FFFDF7' },
+  segBtnText: { fontSize: 11, color: '#6F6F69', fontFamily: MONO, textTransform: 'uppercase', letterSpacing: 0.4 },
+  segBtnTextOn: { color: '#181A14' },
+  storyHeadline: { fontSize: 21, fontWeight: '600', color: '#181A14', fontFamily: SERIF, lineHeight: 26, marginTop: 4 },
+  evlink: { color: '#1F8A3E', fontSize: 11, fontFamily: MONO, textTransform: 'uppercase', letterSpacing: 0.4, marginTop: 12 },
+  signalRow: { flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, padding: 14 },
+  signalDot: { width: 9, height: 9, borderRadius: 5 },
+  adds: { borderWidth: 1, borderColor: '#D9D7CC', borderStyle: 'dashed', borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
+  addsText: { color: '#5E5E58', fontSize: 15, fontFamily: SERIF },
+  daySectionLabel: { color: '#6F6F69', fontSize: 11, fontWeight: '700', letterSpacing: 0.4, fontFamily: MONO, textTransform: 'uppercase', marginTop: 4 },
+  exItem: { gap: 8, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#EFEDE4' },
+  exHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  exName: { fontSize: 16, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
+  exPrescription: { fontSize: 13, color: '#5E5E58', fontFamily: MONO, marginTop: 2 },
+  editGap: { marginLeft: 14 },
+  dangerText: { color: '#C2422B' },
+  stepRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  stepBtn: { width: 34, height: 34, borderRadius: 17, borderWidth: 1, borderColor: '#E6E6E1', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFF' },
+  stepBtnText: { fontSize: 20, color: '#181A14' },
+  stepVal: { fontSize: 18, fontWeight: '600', color: '#181A14', fontFamily: SERIF, minWidth: 20, textAlign: 'center' },
   card: { backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderRadius: 16, borderWidth: 1, padding: 16, gap: 12 },
   authCard: { backgroundColor: '#FFFFFF', borderColor: '#DCEBDD', borderRadius: 16, borderWidth: 1, gap: 12, padding: 16 },
   authStatus: { backgroundColor: '#F1F1ED', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
@@ -6011,12 +6969,12 @@ const styles = StyleSheet.create({
   profileFieldGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   profileFieldCell: { flexBasis: '47%', flexGrow: 1 },
   profilePbItem: { backgroundColor: '#F7F7F5', borderColor: '#E8E8E4', borderRadius: 12, borderWidth: 1, flexBasis: '47%', flexGrow: 1, gap: 5, padding: 12 },
-  label: { color: '#111111', fontSize: 12, fontWeight: '800' },
-  inputLabel: { color: '#1B1B19', fontSize: 12, fontWeight: '700' },
-  cardTitle: { color: '#111111', flexShrink: 1, fontSize: 18, fontWeight: '800', lineHeight: 23 },
-  muted: { color: '#74746F', flexShrink: 1, fontSize: 13, fontWeight: '500', lineHeight: 18 },
-  microText: { color: '#8B8B86', fontSize: 10, alignSelf: 'flex-end' },
-  bodyText: { color: '#1B1B19', fontSize: 15, fontWeight: '500', lineHeight: 22 },
+  label: { color: '#6F6F69', fontSize: 11, fontWeight: '700', letterSpacing: 0.4, fontFamily: MONO },
+  inputLabel: { color: '#1B1B19', fontSize: 12, fontWeight: '700', fontFamily: MONO },
+  cardTitle: { color: '#111111', flexShrink: 1, fontSize: 19, fontWeight: '600', lineHeight: 24, fontFamily: SERIF },
+  muted: { color: '#74746F', flexShrink: 1, fontSize: 13.5, fontWeight: '400', lineHeight: 19, fontFamily: SERIF },
+  microText: { color: '#8B8B86', fontSize: 10, alignSelf: 'flex-end', fontFamily: MONO },
+  bodyText: { color: '#1B1B19', fontSize: 15.5, fontWeight: '400', lineHeight: 23, fontFamily: SERIF },
   rowBetween: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
   twoCol: { flexDirection: 'row', gap: 10 },
   inlineActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, justifyContent: 'flex-end' },
@@ -6024,17 +6982,23 @@ const styles = StyleSheet.create({
   action_green: { flex: 1, backgroundColor: '#2FA044' },
   action_black: { flex: 1, backgroundColor: '#111111' },
   action_outline: { backgroundColor: '#FFFFFF', borderColor: '#CFCFCA', borderWidth: 1 },
-  actionText: { color: '#FFFFFF', fontWeight: '900' },
-  actionOutlineText: { color: '#111111' },
+  actionText: { color: '#FFFFFF', fontWeight: '600', fontSize: 15, fontFamily: SERIF },
+  actionOutlineText: { color: '#111111', fontFamily: SERIF },
   metricToggle: { alignSelf: 'flex-start', backgroundColor: '#F1F1ED', borderColor: '#E1E1DC', borderRadius: 999, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 5 },
   metricToggleText: { color: '#5B5B55', fontSize: 11, fontWeight: '900' },
   priorityCard: { backgroundColor: '#FFFFFF', borderColor: '#CFE8D4', borderRadius: 18, borderWidth: 1, gap: 12, padding: 16 },
-  priorityTitle: { color: '#111111', flexShrink: 1, fontSize: 24, fontWeight: '800', lineHeight: 29 },
+  priorityTitle: { color: '#111111', flexShrink: 1, fontSize: 25, fontWeight: '600', lineHeight: 30, fontFamily: SERIF },
   pressCue: { color: '#188131', fontSize: 13, fontWeight: '800' },
-  checkInThemeCard: { backgroundColor: '#111111', borderRadius: 18, gap: 12, padding: 18 },
-  reviewHeroLabel: { color: '#BDBDBA', fontSize: 12, fontWeight: '800' },
-  reviewHeroTitle: { color: '#FFFFFF', flexShrink: 1, fontSize: 28, fontWeight: '900', lineHeight: 33 },
-  reviewHeroBody: { color: '#EAEAE6', flexShrink: 1, fontSize: 14, fontWeight: '600', lineHeight: 20 },
+  checkInThemeCard: { borderColor: '#DADAD5', borderRadius: 18, borderWidth: 1, gap: 12, padding: 18 },
+  toneGood: { backgroundColor: '#DFF3E3', borderColor: '#2FA044', borderWidth: 1 },
+  toneBad: { backgroundColor: '#FDE7E4', borderColor: '#E13F32', borderWidth: 1 },
+  toneWarning: { backgroundColor: '#FFF0D7', borderColor: '#D9822B', borderWidth: 1 },
+  toneNeutral: { backgroundColor: '#FFF8D1', borderColor: '#E7B33C', borderWidth: 1 },
+  toneCollecting: { backgroundColor: '#FFFFFF', borderColor: '#DADAD5', borderWidth: 1 },
+  reviewHeroLabel: { color: '#565650', fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.6, fontFamily: MONO },
+  reviewHeroTitle: { color: '#111111', flexShrink: 1, fontSize: 28, fontWeight: '600', lineHeight: 33, fontFamily: SERIF },
+  reviewHeroSignal: { color: '#111111', flexShrink: 1, fontSize: 15, fontWeight: '600', lineHeight: 21, fontFamily: SERIF },
+  reviewHeroBody: { color: '#252522', flexShrink: 1, fontSize: 15, fontWeight: '400', lineHeight: 22, fontFamily: SERIF },
   reviewVisualCard: { backgroundColor: '#FFFFFF', borderColor: '#DCEBDD', borderRadius: 18, borderWidth: 1, gap: 12, padding: 16 },
   deltaVisualRow: { alignItems: 'center', flexDirection: 'row', gap: 14, justifyContent: 'space-between' },
   visualValueBlock: { backgroundColor: '#F7F7F5', borderRadius: 14, flex: 1, gap: 5, padding: 12 },
@@ -6045,6 +7009,13 @@ const styles = StyleSheet.create({
   balanceTrack: { backgroundColor: '#E8E8E4', borderRadius: 999, flexDirection: 'row', height: 16, overflow: 'hidden' },
   balanceFresh: { backgroundColor: '#2FA044' },
   balanceRisk: { backgroundColor: '#E13F32' },
+  adaptationZoneWrap: { gap: 6 },
+  adaptationZoneTrack: { borderRadius: 999, flexDirection: 'row', height: 18, overflow: 'visible', position: 'relative' },
+  adaptationZone: { flex: 1 },
+  adaptationZoneRisk: { backgroundColor: '#E13F32', borderBottomLeftRadius: 999, borderTopLeftRadius: 999 },
+  adaptationZoneStable: { backgroundColor: '#E7B33C' },
+  adaptationZoneGood: { backgroundColor: '#2FA044', borderBottomRightRadius: 999, borderTopRightRadius: 999 },
+  adaptationMarker: { backgroundColor: '#111111', borderColor: '#FFFFFF', borderRadius: 7, borderWidth: 2, height: 14, marginLeft: -7, position: 'absolute', top: 2, width: 14 },
   reviewSparkRow: { flexDirection: 'row', gap: 12 },
   reviewSparkColumn: { backgroundColor: '#F7F7F5', borderRadius: 14, flex: 1, gap: 8, padding: 12 },
   reviewSvgFrame: { backgroundColor: '#FBFBF9', borderColor: '#ECECE8', borderRadius: 14, borderWidth: 1, overflow: 'hidden', paddingTop: 4 },
@@ -6055,8 +7026,10 @@ const styles = StyleSheet.create({
   currentReadGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   currentReadItem: { backgroundColor: '#F7F7F5', borderRadius: 12, flexBasis: '47%', flexGrow: 1, gap: 5, padding: 12 },
   currentReadItemWide: { flexBasis: '100%' },
-  currentReadLabel: { color: '#6F6F69', fontSize: 12, fontWeight: '700', lineHeight: 16 },
-  currentReadValue: { color: '#111111', flexShrink: 1, fontSize: 16, fontWeight: '800', lineHeight: 21 },
+  currentReadLabel: { color: '#6F6F69', fontSize: 11, fontWeight: '700', lineHeight: 15, letterSpacing: 0.4, fontFamily: MONO },
+  currentReadValue: { color: '#111111', flexShrink: 1, fontSize: 17, fontWeight: '600', lineHeight: 22, fontFamily: SERIF },
+  miniStateHeader: { alignItems: 'center', flexDirection: 'row', gap: 6, justifyContent: 'space-between' },
+  miniStateDot: { borderRadius: 5, height: 10, width: 10 },
   currentReadRow: { alignItems: 'flex-start', borderBottomColor: '#ECECE8', borderBottomWidth: 1, flexDirection: 'column', gap: 4, paddingVertical: 8 },
   evidenceRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   evidenceBadge: { alignSelf: 'flex-start', backgroundColor: '#E8F5EA', borderRadius: 999, color: '#188131', fontSize: 12, fontWeight: '700', overflow: 'hidden', paddingHorizontal: 9, paddingVertical: 5 },
@@ -6087,18 +7060,18 @@ const styles = StyleSheet.create({
   headerButton: { width: 42, height: 42, justifyContent: 'center' },
   headerIcon: { fontSize: 26, color: '#111111' },
   headerCenter: { alignItems: 'center' },
-  headerTitle: { fontSize: 16, fontWeight: '900', color: '#111111' },
-  headerSubtitle: { fontSize: 11, color: '#6D6D68', marginTop: 2 },
+  headerTitle: { fontSize: 18, fontWeight: '600', color: '#111111', fontFamily: SERIF },
+  headerSubtitle: { fontSize: 11, color: '#6D6D68', marginTop: 2, fontFamily: MONO },
   formSection: { gap: 10, paddingBottom: 10 },
-  formTitle: { color: '#111111', fontSize: 14, fontWeight: '900' },
+  formTitle: { color: '#111111', fontSize: 15, fontWeight: '600', fontFamily: SERIF },
   inputWrap: { gap: 6, flex: 1 },
   input: { backgroundColor: '#FFFFFF', borderColor: '#D9D9D4', borderRadius: 6, borderWidth: 1, minHeight: 42, paddingHorizontal: 10, color: '#111111' },
   sliderWrap: { gap: 8 },
   sliderValue: { color: '#111111', fontWeight: '900' },
   sliderRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  sliderTrack: { flex: 1, height: 4, backgroundColor: '#D8D8D4', borderRadius: 4 },
-  sliderFill: { height: 4, backgroundColor: '#111111', borderRadius: 4 },
-  sliderThumb: { position: 'absolute', marginLeft: -6, top: -5, width: 14, height: 14, borderRadius: 7, backgroundColor: '#111111' },
+  sliderTrack: { flex: 1, height: 18, justifyContent: 'center', backgroundColor: '#D8D8D4', borderRadius: 999 },
+  sliderFill: { height: 18, backgroundColor: '#111111', borderRadius: 999 },
+  sliderThumb: { position: 'absolute', marginLeft: -11, top: -2, width: 22, height: 22, borderRadius: 11, backgroundColor: '#111111', borderColor: '#FFFFFF', borderWidth: 2 },
   stepButton: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#EFEFEC', alignItems: 'center', justifyContent: 'center' },
   setMetricsList: { gap: 10 },
   setMetricCard: { backgroundColor: '#FFFFFF', borderColor: '#E5E5E1', borderRadius: 8, borderWidth: 1, gap: 10, padding: 10 },
@@ -6129,7 +7102,7 @@ const styles = StyleSheet.create({
   loadPill: { backgroundColor: '#DFF3E3', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
   loadText: { color: '#188131', fontWeight: '900' },
   builderCard: { backgroundColor: '#FFFFFF', borderColor: '#E5E5E1', borderRadius: 8, borderWidth: 1, padding: 14, gap: 14 },
-  sectionTitle: { fontSize: 14, fontWeight: '900', color: '#111111' },
+  sectionTitle: { fontSize: 16, fontWeight: '600', color: '#111111', fontFamily: SERIF },
   pickerRow: { flexDirection: 'row', gap: 6 },
   pickerChip: { flex: 1, borderRadius: 6, backgroundColor: '#EFEFEC', alignItems: 'center', paddingVertical: 10 },
   pickerActive: { backgroundColor: '#111111' },
@@ -6236,7 +7209,7 @@ const styles = StyleSheet.create({
   performanceSetCard: { backgroundColor: '#F7F7F5', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, gap: 8, padding: 8 },
   attemptCard: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E4', borderRadius: 8, borderWidth: 1, gap: 7, padding: 8 },
   rangeSummaryText: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '800', lineHeight: 18 },
-  calendarMetaText: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '700', lineHeight: 18 },
+  calendarMetaText: { color: '#5E5E58', flexShrink: 1, fontSize: 13.5, fontWeight: '400', lineHeight: 19, fontFamily: SERIF },
   weekSessionRow: { alignItems: 'center', backgroundColor: '#F7F7F5', borderRadius: 8, flexDirection: 'row', gap: 10, padding: 10 },
   weekSessionDate: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E3E3DE', borderRadius: 8, borderWidth: 1, height: 50, justifyContent: 'center', width: 48 },
   weekSessionDay: { color: '#72726C', fontSize: 10, fontWeight: '900' },
@@ -6246,9 +7219,11 @@ const styles = StyleSheet.create({
   filterText: { fontSize: 12, fontWeight: '800' },
   insightGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   insightCard: { width: '48%', minHeight: 150, backgroundColor: '#FFFFFF', borderColor: '#E8E8E5', borderWidth: 1, borderRadius: 16, padding: 14, gap: 8 },
+  insightSignalCard: { backgroundColor: '#FFFFFF' },
   insightIcon: { width: 22, height: 22, borderRadius: 11 },
   categoryCardTop: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
   tapCue: { color: '#7A7A74', fontSize: 11, fontWeight: '700' },
+  stateBadge: { borderRadius: 999, color: '#FFFFFF', fontSize: 10, fontWeight: '900', overflow: 'hidden', paddingHorizontal: 8, paddingVertical: 4, textTransform: 'uppercase' },
   categoryFinding: { color: '#33332F', flexShrink: 1, fontSize: 13, fontWeight: '500', lineHeight: 18 },
   tinyBadge: { alignSelf: 'flex-start', backgroundColor: '#F1F1ED', borderRadius: 999, color: '#5E5E58', fontSize: 10, fontWeight: '800', overflow: 'hidden', paddingHorizontal: 8, paddingVertical: 4 },
   smallCopy: { color: '#33332F', flexShrink: 1, fontSize: 12, fontWeight: '500', lineHeight: 17 },
@@ -6263,10 +7238,14 @@ const styles = StyleSheet.create({
   svgChartFrame: { backgroundColor: '#FBFBF9', borderColor: '#ECECE8', borderRadius: 14, borderWidth: 1, paddingTop: 4 },
   axisFooter: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
   axisLabel: { color: '#777771', flexShrink: 1, fontSize: 10, fontWeight: '700' },
+  attemptMiniGrid: { gap: 10 },
+  attemptMiniCard: { backgroundColor: '#FBFBF9', borderColor: '#ECECE8', borderRadius: 14, borderWidth: 1, gap: 6, padding: 10 },
   figureInner: { gap: 8 },
   analysisSubcard: { backgroundColor: '#F7F7F5', borderRadius: 12, gap: 6, padding: 10 },
   figureResult: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '700', lineHeight: 19 },
   figureInterpretation: { backgroundColor: '#F7F7F5', borderRadius: 12, color: '#22221F', flexShrink: 1, fontSize: 12, fontWeight: '600', lineHeight: 18, padding: 10 },
+  visualInterpretationBox: { backgroundColor: '#F7F7F5', borderColor: '#E6E6E1', borderRadius: 12, borderWidth: 1, gap: 4, padding: 10 },
+  figureInterpretationText: { color: '#22221F', flexShrink: 1, fontSize: 12, fontWeight: '600', lineHeight: 18 },
   figureLimitation: { color: '#74746F', flexShrink: 1, fontSize: 11, fontWeight: '600', lineHeight: 16 },
   figureEvidence: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   figureEvidenceItem: { backgroundColor: '#F7F7F5', borderColor: '#E8E8E4', borderRadius: 12, borderWidth: 1, minWidth: '30%', paddingHorizontal: 10, paddingVertical: 8 },
