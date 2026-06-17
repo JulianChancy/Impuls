@@ -13,7 +13,10 @@ class MovementType(str, Enum):
     PLYOMETRIC = "plyometric"
     POWER_BALLISTIC = "power_ballistic"
     STRENGTH = "strength"
+    SPRINT = "sprint"
+    GENERAL = "general"
     ENDURANCE = "endurance"
+    REHAB = "rehab"
     SKILL = "skill"
 
 
@@ -56,9 +59,27 @@ MOVEMENT_TYPE_FIELDS = {
         "intensity_unit",
         "rom",
     ],
+    MovementType.SPRINT: [
+        "reps",
+        "distance",
+        "intent_percent",
+    ],
+    MovementType.GENERAL: [
+        "reps",
+        "intensity_value",
+        "intensity_unit",
+        "rom",
+    ],
     MovementType.ENDURANCE: [
         "duration_minutes",
         "intent_percent",
+    ],
+    MovementType.REHAB: [
+        "reps",
+        "duration_minutes",
+        "intensity_value",
+        "intensity_unit",
+        "rom",
     ],
     MovementType.SKILL: [
         "duration_minutes",
@@ -2986,7 +3007,6 @@ APP_METRIC_META = {
     "duration": {"label": "Duration", "tone": "neutral"},
     "average_intent": {"label": "Average intent", "tone": "neutral"},
     "freshness": {"label": "Freshness", "tone": "positive"},
-    "soreness": {"label": "Soreness", "tone": "risk"},
     "fatigue": {"label": "Fatigue", "tone": "risk"},
     "readiness": {"label": "Readiness", "tone": "positive"},
     "pain": {"label": "Pain", "tone": "risk"},
@@ -2995,13 +3015,11 @@ APP_METRIC_META = {
 
 APP_RELATIONSHIP_SPECS = [
     ("pain_load", "Pain vs Load", "Irritation", "load", "pain", "Session Load", "Pain", "#E13F32"),
-    ("pain_soreness", "Pain vs Soreness", "Irritation", "soreness", "pain", "Soreness", "Pain", "#C73A2E"),
     ("pain_fatigue", "Pain vs Fatigue", "Irritation", "fatigue", "pain", "Fatigue", "Pain", "#B1382D"),
     ("pain_average_intent", "Pain vs Average Intent", "Irritation", "average_intent", "pain", "Average Intent", "Pain", "#D05A3C"),
     ("performance_freshness", "Performance vs Freshness", "Performance", "freshness", "performance", "Freshness (0-10)", "Performance", "#24883B"),
     ("performance_readiness", "Performance vs Readiness", "Performance", "readiness", "performance", "Readiness", "Performance", "#2D9A68"),
     ("performance_pain", "Performance vs Pain", "Performance", "pain", "performance", "Pain", "Performance", "#E13F32"),
-    ("performance_soreness", "Performance vs Soreness", "Performance", "soreness", "performance", "Soreness", "Performance", "#7C63E6"),
     ("performance_fatigue", "Performance vs Fatigue", "Recovery", "fatigue", "performance", "Fatigue", "Performance", "#6656E8"),
     ("performance_load", "Performance vs Load", "Load Tolerance", "load", "performance", "Session Load", "Performance", "#1F7A40"),
     ("performance_average_intent", "Performance vs Average Intent", "Performance", "average_intent", "performance", "Average Intent", "Performance", "#3B9859"),
@@ -3038,7 +3056,7 @@ def _unit(value):
 
 def _to_seconds(value, unit):
     numeric = _num(value, None)
-    if not _finite(numeric):
+    if not _finite(numeric) or numeric <= 0:
         return None
     base_unit = _unit(unit) or "seconds"
     if base_unit in ["milliseconds", "ms"]:
@@ -3048,7 +3066,7 @@ def _to_seconds(value, unit):
 
 def _to_cm(value, unit):
     numeric = _num(value, None)
-    if not _finite(numeric):
+    if not _finite(numeric) or numeric <= 0:
         return None
     base_unit = _unit(unit) or "cm"
     if base_unit in ["inches", "inch", "in"]:
@@ -3058,7 +3076,7 @@ def _to_cm(value, unit):
 
 def _to_metres(value, unit):
     numeric = _num(value, None)
-    if not _finite(numeric):
+    if not _finite(numeric) or numeric <= 0:
         return None
     base_unit = _unit(unit) or "metres"
     if base_unit in ["yards", "yard", "yd"]:
@@ -3068,7 +3086,7 @@ def _to_metres(value, unit):
 
 def _to_kg(value, unit):
     numeric = _num(value, None)
-    if not _finite(numeric):
+    if not _finite(numeric) or numeric <= 0:
         return None
     base_unit = _unit(unit) or "kg"
     if base_unit in ["lbs", "lb"]:
@@ -3098,7 +3116,18 @@ def app_get_volume(exercise):
     movement = exercise.get("movement_type")
     if movement == "plyometric":
         return _num(exercise.get("contacts"))
-    if movement in ["power_ballistic", "strength"]:
+    if movement in ["power_ballistic", "strength", "general"]:
+        sets = _num(exercise.get("sets"), 1) or 1
+        reps = _num(exercise.get("reps"))
+        return sets * reps if sets and reps else reps
+    if movement == "sprint":
+        reps = _num(exercise.get("reps"), 1) or 1
+        distance = _num(exercise.get("distance"))
+        return reps * distance if distance else reps
+    if movement == "rehab":
+        duration = _num(exercise.get("duration_minutes"))
+        if duration:
+            return duration
         sets = _num(exercise.get("sets"), 1) or 1
         reps = _num(exercise.get("reps"))
         return sets * reps if sets and reps else reps
@@ -3125,12 +3154,12 @@ def app_exercise_load(exercise):
     intent = app_get_intent_score(exercise)
     intensity = app_get_intensity_score(exercise)
     movement = exercise.get("movement_type")
-    if movement == "plyometric":
-        return volume * intent
     if movement == "power_ballistic":
         return volume * intent * intensity
-    if movement == "strength":
+    if movement in ["strength", "general", "rehab"]:
+        # reps (x load), intensity defaults to 1 when no load is given.
         return volume * intensity
+    # plyometric (contacts x intent), sprint (distance x intent), endurance, skill.
     return volume * intent
 
 
@@ -3139,11 +3168,500 @@ def app_session_load(session):
 
 
 def app_session_volume_by_type(session):
-    rows = {"plyometric": 0, "strength": 0, "power_ballistic": 0, "endurance": 0, "skill": 0}
+    rows = {"plyometric": 0, "strength": 0, "power_ballistic": 0, "sprint": 0, "general": 0, "endurance": 0, "rehab": 0, "skill": 0}
     for exercise in (session or {}).get("exercises", []):
         movement = exercise.get("movement_type") or "skill"
         rows[movement] = rows.get(movement, 0) + app_get_volume(exercise)
     return rows
+
+
+# Force-Velocity coverage taxonomy (mirror of mobile/src/exerciseLibrary.js QUALITY_META).
+# Curve qualities are ordered low->high velocity; work_capacity + rehab are off-curve.
+QUALITY_KEYS = [
+    "max_strength",
+    "strength_speed",
+    "speed_strength",
+    "reactive_strength",
+    "max_speed",
+    "work_capacity",
+    "rehab",
+]
+QUALITY_CURVE_KEYS = ["max_strength", "strength_speed", "speed_strength", "reactive_strength", "max_speed"]
+APP_TYPE_DEFAULT_QUALITY = {
+    "strength": "max_strength",
+    "power_ballistic": "speed_strength",
+    "plyometric": "reactive_strength",
+    "sprint": "max_speed",
+    "general": "work_capacity",
+    "endurance": "work_capacity",
+    "rehab": "rehab",
+    "skill": None,
+}
+
+
+def app_default_quality_for_type(movement_type):
+    return APP_TYPE_DEFAULT_QUALITY.get(movement_type)
+
+
+def app_exercise_quality(exercise):
+    return exercise.get("quality") or app_default_quality_for_type(exercise.get("movement_type"))
+
+
+def app_session_coverage(session):
+    """Load contributed to each FV quality by a session (the coverage 'dose')."""
+    coverage = {key: 0.0 for key in QUALITY_KEYS}
+    for exercise in (session or {}).get("exercises", []):
+        quality = app_exercise_quality(exercise)
+        if quality in coverage:
+            coverage[quality] += app_exercise_load(exercise)
+    return coverage
+
+
+def _iso_day(value):
+    parsed = _parse_dt(value)
+    if parsed == datetime.min:
+        return None
+    return parsed.date().isoformat()
+
+
+def _day_in_range(day, start, end):
+    if not day:
+        return False
+    start_day = _iso_day(start)
+    end_day = _iso_day(end)
+    if start_day and day < start_day:
+        return False
+    if end_day and day > end_day:
+        return False
+    return bool(start_day or end_day)
+
+
+def app_programme_structure(data):
+    """Flatten the programme into planned sessions tagged with block/week + computed load + FV coverage."""
+    programme = data.get("programme") or {}
+    items = []
+    for macro in programme.get("macro_blocks", []) or []:
+        for block in macro.get("blocks", []) or []:
+            for week in block.get("weeks", []) or []:
+                for session in week.get("sessions", []) or []:
+                    items.append({
+                        "macro_id": macro.get("id"),
+                        "block_id": block.get("id"),
+                        "block_name": block.get("block_name") or "Block",
+                        "week_id": week.get("id"),
+                        "week_start": week.get("start_date"),
+                        "week_end": week.get("end_date"),
+                        "date": session.get("date"),
+                        "session": session,
+                        "load": app_session_load(session),
+                        "coverage": app_session_coverage(session),
+                    })
+    return items
+
+
+def app_build_block_analysis(data, ordered):
+    """Aggregate the programme to week + block granularity and couple responses by date.
+
+    This is the big-picture layer the block reads (B1/B2/B3) consume. Stats stay raw
+    here; the analysis builders interpret them.
+    """
+    structure = app_programme_structure(data)
+    weeks_by_id = {}
+    week_order = []
+    for item in structure:
+        wid = item["week_id"]
+        if not wid:
+            continue
+        if wid not in weeks_by_id:
+            weeks_by_id[wid] = {
+                "weekId": wid,
+                "blockId": item["block_id"],
+                "blockName": item["block_name"],
+                "weekStart": item["week_start"],
+                "weekEnd": item["week_end"],
+                "plannedLoad": 0.0,
+                "coverage": {key: 0.0 for key in QUALITY_KEYS},
+                "sessionCount": 0,
+                "_fatigues": [],
+                "_pains": [],
+                "_outputs": [],
+            }
+            week_order.append(wid)
+        week = weeks_by_id[wid]
+        week["plannedLoad"] += item["load"]
+        week["sessionCount"] += 1
+        for key, value in item["coverage"].items():
+            week["coverage"][key] += value
+
+    # Couple each logged response/output to the planned week whose date range contains it.
+    for row in ordered:
+        day = _iso_day(row.get("date"))
+        if not day:
+            continue
+        for week in weeks_by_id.values():
+            if _day_in_range(day, week["weekStart"], week["weekEnd"]):
+                if _finite(row.get("fatigue")):
+                    week["_fatigues"].append(row["fatigue"])
+                if _finite(row.get("pain")):
+                    week["_pains"].append(row["pain"])
+                if _finite(row.get("performance")):
+                    week["_outputs"].append(row["performance"])
+                break
+
+    weeks = []
+    for wid in sorted(week_order, key=lambda key: _iso_day(weeks_by_id[key]["weekStart"]) or ""):
+        week = weeks_by_id[wid]
+        outputs = week["_outputs"]
+        weeks.append({
+            "weekId": wid,
+            "blockId": week["blockId"],
+            "blockName": week["blockName"],
+            "weekStart": week["weekStart"],
+            "weekEnd": week["weekEnd"],
+            "plannedLoad": _json_num(week["plannedLoad"]),
+            "sessionCount": week["sessionCount"],
+            "coverage": {key: _json_num(value) for key, value in week["coverage"].items()},
+            "meanFatigue": _json_num(app_mean(week["_fatigues"])),
+            "meanPain": _json_num(app_mean(week["_pains"])),
+            "bestOutput": _json_num(max(outputs) if outputs else None),
+            "meanOutput": _json_num(app_mean(outputs)),
+            "responseCount": len(week["_outputs"]) + len(week["_fatigues"]) + len(week["_pains"]),
+        })
+
+    blocks_by_id = {}
+    block_order = []
+    for week in weeks:
+        bid = week["blockId"]
+        if bid not in blocks_by_id:
+            blocks_by_id[bid] = {
+                "blockId": bid,
+                "blockName": week["blockName"],
+                "weeks": [],
+                "plannedLoad": 0.0,
+                "coverage": {key: 0.0 for key in QUALITY_KEYS},
+            }
+            block_order.append(bid)
+        block = blocks_by_id[bid]
+        block["weeks"].append(week)
+        block["plannedLoad"] += week["plannedLoad"] or 0
+        for key, value in (week["coverage"] or {}).items():
+            block["coverage"][key] += value or 0
+
+    blocks = []
+    for bid in block_order:
+        block = blocks_by_id[bid]
+        week_loads = [week["plannedLoad"] for week in block["weeks"] if _finite(week["plannedLoad"])]
+        blocks.append({
+            "blockId": bid,
+            "blockName": block["blockName"],
+            "weekCount": len(block["weeks"]),
+            "plannedLoad": _json_num(block["plannedLoad"]),
+            "coverage": {key: _json_num(value) for key, value in block["coverage"].items()},
+            "loadProgression": _json_num(app_slope(week_loads)),
+            "weeks": block["weeks"],
+        })
+
+    return {"weeks": weeks, "blocks": blocks, "coverageKeys": QUALITY_KEYS, "curveKeys": QUALITY_CURVE_KEYS}
+
+
+QUALITY_LABELS = {
+    "max_strength": "max strength",
+    "strength_speed": "strength-speed",
+    "speed_strength": "speed-strength",
+    "reactive_strength": "reactive strength",
+    "max_speed": "max speed",
+    "work_capacity": "work capacity",
+    "rehab": "rehab",
+}
+
+# Deficit-derived target FV shapes (normalised weights across the curve qualities).
+DEFICIT_TARGETS = {
+    "reactive": {"max_strength": 0.15, "strength_speed": 0.15, "speed_strength": 0.20, "reactive_strength": 0.35, "max_speed": 0.15},
+    "velocity": {"max_strength": 0.15, "strength_speed": 0.20, "speed_strength": 0.30, "reactive_strength": 0.20, "max_speed": 0.15},
+    "force": {"max_strength": 0.35, "strength_speed": 0.25, "speed_strength": 0.20, "reactive_strength": 0.10, "max_speed": 0.10},
+    "conversion": {"max_strength": 0.20, "strength_speed": 0.20, "speed_strength": 0.25, "reactive_strength": 0.20, "max_speed": 0.15},
+    "balanced": {"max_strength": 0.20, "strength_speed": 0.20, "speed_strength": 0.20, "reactive_strength": 0.20, "max_speed": 0.20},
+}
+
+
+def app_detect_deficit(block_analysis, metric_stats):
+    """Infer the athlete's FV deficit from coverage balance + responsiveness + conversion (Exercise Library §6)."""
+    blocks = block_analysis.get("blocks", [])
+    weeks = block_analysis.get("weeks", [])
+    total = {key: 0.0 for key in QUALITY_CURVE_KEYS}
+    for block in blocks:
+        for key in QUALITY_CURVE_KEYS:
+            total[key] += (block.get("coverage") or {}).get(key, 0) or 0
+    grand = sum(total.values())
+    if grand <= 0:
+        return {"deficit": "unknown", "confidence": "collecting", "rationale": "No coverage logged yet — plan and log a block to read your deficit.", "shares": {}, "target": DEFICIT_TARGETS["balanced"], "responsiveness": {}}
+
+    shares = {key: total[key] / grand for key in QUALITY_CURVE_KEYS}
+    force_share = shares["max_strength"] + shares["strength_speed"]
+    fast_share = shares["speed_strength"] + shares["reactive_strength"] + shares["max_speed"]
+    reactive_speed = shares["reactive_strength"] + shares["max_speed"]
+    perf_trend = (metric_stats.get("performance") or {}).get("trend")
+    output_flat = _finite(perf_trend) and perf_trend <= 0.02
+
+    week_outputs = [week.get("bestOutput") for week in weeks]
+    responsiveness = {}
+    for key in QUALITY_CURVE_KEYS:
+        week_quality = [(week.get("coverage") or {}).get(key) for week in weeks]
+        pairs = [(x, y) for x, y in zip(week_quality, week_outputs) if _finite(x) and _finite(y)]
+        if len(pairs) >= 3:
+            responsiveness[key] = app_pearson([p[0] for p in pairs], [p[1] for p in pairs])
+
+    if reactive_speed < 0.18 and force_share >= 0.45:
+        deficit, rationale = "reactive", "Your programme is force-heavy with little reactive or speed dose."
+    elif force_share < 0.20 and fast_share >= 0.60:
+        deficit, rationale = "force", "Your programme is velocity-heavy with a thin maximal-strength base."
+    elif output_flat and force_share >= 0.40:
+        deficit, rationale = "conversion", "Strength dose is high but output is flat — a force-to-velocity conversion gap."
+    else:
+        candidates = [(key, r) for key, r in responsiveness.items() if _finite(r) and r > 0.3 and shares[key] < 0.18]
+        if candidates:
+            key = max(candidates, key=lambda item: item[1])[0]
+            deficit = {"reactive_strength": "reactive", "max_speed": "velocity", "speed_strength": "velocity", "max_strength": "force", "strength_speed": "force"}[key]
+            rationale = f"Output responds to {QUALITY_LABELS[key]} but it is under-dosed."
+        else:
+            deficit, rationale = "balanced", "Your force-velocity coverage looks reasonably balanced."
+
+    responsive_weeks = len([week for week in weeks if (week.get("responseCount") or 0) > 0])
+    return {
+        "deficit": deficit,
+        "confidence": app_confidence_label(responsive_weeks),
+        "rationale": rationale,
+        "shares": {key: _json_num(value) for key, value in shares.items()},
+        "target": DEFICIT_TARGETS.get(deficit, DEFICIT_TARGETS["balanced"]),
+        "responsiveness": {key: _json_num(value) for key, value in responsiveness.items()},
+    }
+
+
+def app_build_coverage_read(block_analysis, deficit):
+    """B2/B3 collapsed: programme FV coverage vs the deficit-derived target (the hero radar)."""
+    total = {key: 0.0 for key in QUALITY_CURVE_KEYS}
+    for block in block_analysis.get("blocks", []):
+        for key in QUALITY_CURVE_KEYS:
+            total[key] += (block.get("coverage") or {}).get(key, 0) or 0
+    grand = sum(total.values())
+    current = {key: (total[key] / grand if grand else 0) for key in QUALITY_CURVE_KEYS}
+    target = deficit.get("target", DEFICIT_TARGETS["balanced"])
+
+    if grand <= 0:
+        sentence = "Plan and log a block to see how your force-velocity coverage matches your needs."
+        magnitude = 0.3
+    elif deficit["deficit"] in ("balanced", "unknown"):
+        sentence = "Your coverage spans the force-velocity curve fairly evenly."
+        magnitude = 0.4
+    else:
+        gap_key = max(QUALITY_CURVE_KEYS, key=lambda key: target[key] - current[key])
+        sentence = f"Your data points to a {deficit['deficit']} deficit, and this block under-doses {QUALITY_LABELS[gap_key]}."
+        magnitude = min(1.0, 0.5 + abs(target[gap_key] - current[gap_key]) * 2)
+
+    axes = [{"key": key, "label": QUALITY_LABELS[key], "current": _json_num(current[key]), "target": _json_num(target[key])} for key in QUALITY_CURVE_KEYS]
+    return {
+        "id": "coverage_deficit",
+        "title": "Force-velocity coverage",
+        "sentence": sentence,
+        "confidence": deficit["confidence"],
+        "priority": "adaptation",
+        "magnitude": magnitude,
+        "viz": {"type": "quality_radar", "axes": axes, "deficit": deficit["deficit"]},
+        "evidence": {"shares": deficit["shares"], "rationale": deficit["rationale"], "responsiveness": deficit["responsiveness"]},
+    }
+
+
+def app_build_stimulus_read(block_analysis):
+    """B1: contrast best-output weeks vs flat weeks on load + coverage levers."""
+    weeks = [week for week in block_analysis.get("weeks", []) if _finite(week.get("bestOutput"))]
+    if len(weeks) < 3:
+        return None
+    ordered_weeks = sorted(weeks, key=lambda week: week["bestOutput"])
+    half = max(1, len(ordered_weeks) // 2)
+    low = ordered_weeks[:half]
+    high = ordered_weeks[-half:]
+
+    def avg_load(group):
+        return app_mean([week["plannedLoad"] for week in group if _finite(week["plannedLoad"])])
+
+    def avg_cov(group, key):
+        return app_mean([(week.get("coverage") or {}).get(key) for week in group])
+
+    bars = [{"label": "Load", "best": _json_num(avg_load(high)), "flat": _json_num(avg_load(low))}]
+    for key in QUALITY_CURVE_KEYS:
+        bars.append({"label": QUALITY_LABELS[key], "best": _json_num(avg_cov(high, key)), "flat": _json_num(avg_cov(low, key))})
+    diffs = [(bar["label"], (bar["best"] or 0) - (bar["flat"] or 0)) for bar in bars]
+    top_label, top_diff = max(diffs, key=lambda item: abs(item[1]))
+    direction = "more" if top_diff > 0 else "less"
+    sentence = f"Your best weeks tend to carry {direction} {top_label.lower()} than your flat weeks." if abs(top_diff) > 0 else "Best and flat weeks look similar so far — keep logging."
+    spread = app_mean([week["bestOutput"] for week in high]) - app_mean([week["bestOutput"] for week in low])
+    return {
+        "id": "stimulus",
+        "title": "What drives your best weeks",
+        "sentence": sentence,
+        "confidence": app_confidence_label(len(weeks)),
+        "priority": "stimulus",
+        "magnitude": min(1.0, abs(_num(spread)) / 3 + 0.3),
+        "viz": {"type": "paired_bars", "bars": bars},
+        "evidence": {"bestWeeks": len(high), "flatWeeks": len(low), "outputSpread": _json_num(spread)},
+    }
+
+
+def app_build_sustainability_read(block_analysis):
+    """Added: load build vs recovery (divergence = warning)."""
+    weeks = [week for week in block_analysis.get("weeks", []) if _finite(week.get("plannedLoad"))]
+    if len(weeks) < 3:
+        return None
+    loads = [week["plannedLoad"] for week in weeks]
+    fatigues = [week.get("meanFatigue") for week in weeks]
+    load_slope = app_slope(loads)
+    finite_fatigues = [value for value in fatigues if _finite(value)]
+    fat_slope = app_slope(finite_fatigues) if len(finite_fatigues) >= 2 else None
+    diverging = _finite(load_slope) and _finite(fat_slope) and load_slope > 0 and fat_slope > 0
+    sentence = "Load is climbing and fatigue is climbing with it — watch that the build stays sustainable." if diverging else "Your load build and recovery are tracking together so far."
+    series = [
+        {"label": "Planned load", "color": "#1F7A40", "points": [{"x": index, "y": _json_num(week["plannedLoad"])} for index, week in enumerate(weeks)]},
+        {"label": "Fatigue", "color": "#6656E8", "points": [{"x": index, "y": _json_num(week.get("meanFatigue"))} for index, week in enumerate(weeks)]},
+    ]
+    return {
+        "id": "sustainability",
+        "title": "Is the build sustainable",
+        "sentence": sentence,
+        "confidence": app_confidence_label(len(weeks)),
+        "priority": "adaptation",
+        "magnitude": 0.7 if diverging else 0.35,
+        "viz": {"type": "dual_line", "series": series},
+        "evidence": {"loadSlope": _json_num(load_slope), "fatigueSlope": _json_num(fat_slope), "diverging": diverging},
+    }
+
+
+def app_session_tendon_stress(session):
+    """Patellar load-stress: reactive work (plyo/sprint) weighted 1.5x controlled lifts."""
+    stress = 0.0
+    for exercise in (session or {}).get("exercises", []):
+        quality = app_exercise_quality(exercise)
+        reactive = quality in ("reactive_strength", "max_speed") or exercise.get("movement_type") in ("plyometric", "sprint")
+        stress += app_exercise_load(exercise) * (1.5 if reactive else 1.0)
+    return stress
+
+
+def _check_pain_persistence(pains, threshold):
+    """Does pain stay at/above threshold across a run spanning >= 48h?"""
+    run = []
+    for day, pain in pains:
+        if pain >= threshold:
+            run.append(day)
+            if len(run) >= 2 and (_parse_dt(run[-1]) - _parse_dt(run[0])).days >= 2:
+                return True
+        else:
+            run = []
+    return False
+
+
+def app_build_tendon_read(data, ordered):
+    """S4 / tendon ruleset — descriptive: load-stress, 48h persistence, state, tolerated band, risk."""
+    pains = [(_iso_day(row.get("date")), _num(row.get("pain"))) for row in ordered if _finite(row.get("pain"))]
+    pains = [(day, pain) for day, pain in pains if day]
+    if not pains or max(pain for _, pain in pains) <= 0:
+        return None
+
+    pain_values = [pain for _, pain in pains]
+    baseline = app_mean(pain_values) or 0
+    sd = app_sd(pain_values) or 0
+    elevated = baseline + sd
+    tolerated = max(2.0, baseline)
+    latest_pain = pains[-1][1]
+    pain_slope = app_slope(pain_values)
+
+    structure = app_programme_structure(data)
+    stress_by_day = {}
+    for item in structure:
+        day = _iso_day(item.get("date"))
+        if day:
+            stress_by_day[day] = stress_by_day.get(day, 0) + app_session_tendon_stress(item["session"])
+    stress_slope = app_slope([stress_by_day.get(day, 0) for day, _ in pains])
+    persists = _check_pain_persistence(pains, max(elevated, 1))
+
+    stress_rising = _finite(stress_slope) and stress_slope > 0
+    if latest_pain >= elevated and stress_rising and persists:
+        state, sentence = "overload", "Knee pain is up while reactive load is climbing, and it is persisting past 48h."
+    elif latest_pain >= elevated and stress_rising:
+        state, sentence = "rising", "Knee pain is climbing with reactive load — watch whether it settles within 48h."
+    elif latest_pain >= elevated and not stress_rising:
+        state, sentence = "unexpected spike", "Knee pain rose without a load increase — worth watching."
+    elif _finite(pain_slope) and pain_slope < 0:
+        state, sentence = "settling", "Knee pain is easing after recent load — a spike-but-settles pattern."
+    elif latest_pain <= tolerated:
+        state, sentence = "tolerating", f"Knee pain is staying within your usual tolerated range (~{tolerated:.0f}/10)."
+    else:
+        state, sentence = "stable", "Knee pain is steady for now."
+
+    risk_score = (2 if latest_pain >= 7 else 1 if latest_pain >= 4 else 0) + (1 if _finite(stress_slope) and stress_slope > 0 else 0) + (1 if persists else 0)
+    risk = ["green", "amber", "amber", "red", "red"][min(risk_score, 4)]
+    points = [{"date": day, "pain": _json_num(pain), "stress": _json_num(stress_by_day.get(day))} for day, pain in pains]
+    return {
+        "id": "tendon",
+        "title": "Knee load tolerance",
+        "sentence": sentence,
+        "confidence": app_confidence_label(len(pains)),
+        "priority": "pain",
+        "magnitude": min(1.0, latest_pain / 10 + (0.3 if persists else 0)),
+        "viz": {"type": "pain_line", "points": points, "tolerated": _json_num(tolerated)},
+        "evidence": {"state": state, "risk": risk, "persists": persists, "tolerated": _json_num(tolerated), "baseline": _json_num(baseline), "stressSlope": _json_num(stress_slope)},
+    }
+
+
+def app_read_salience(read):
+    priority_class = {"pain": 5, "output": 4, "adaptation": 3, "stimulus": 2, "routine": 1}.get(read.get("priority", "routine"), 1)
+    confidence = {"strong": 1.0, "moderate": 0.8, "emerging": 0.6, "exploratory": 0.4, "collecting": 0.2}.get(str(read.get("confidence", "")).lower(), 0.5)
+    magnitude = read.get("magnitude", 0.5)
+    novelty = read.get("novelty", 1.0)
+    return priority_class * magnitude * confidence * novelty
+
+
+def app_build_programme_reads(data, ordered, block_analysis, metric_stats):
+    """Assemble the block/macro reads, score them by relevance triage, and pick headline + supporting."""
+    deficit = app_detect_deficit(block_analysis, metric_stats)
+    candidates = [app_build_coverage_read(block_analysis, deficit)]
+    for builder in (
+        app_build_stimulus_read(block_analysis),
+        app_build_sustainability_read(block_analysis),
+        app_build_tendon_read(data, ordered),
+    ):
+        if builder:
+            candidates.append(builder)
+
+    for read in candidates:
+        read["salience"] = _json_num(app_read_salience(read))
+    ranked = sorted(candidates, key=lambda read: read.get("salience") or 0, reverse=True)
+    has_data = bool(block_analysis.get("weeks"))
+    return {
+        "headline": ranked[0] if ranked else None,
+        "supporting": ranked[1:3],
+        "more": ranked[3:],
+        "deficit": deficit,
+        "hasData": has_data,
+    }
+
+
+def app_build_session_extras(ordered, best):
+    """Added session reads: PB milestone + readiness/output mismatch."""
+    extras = {}
+    outputs = [row for row in ordered if _finite(row.get("performance"))]
+    if outputs:
+        latest = outputs[-1]
+        prior_best = max((row.get("performance") for row in outputs[:-1]), default=None)
+        if _finite(prior_best) and latest.get("performance") is not None and latest["performance"] > prior_best:
+            extras["pb"] = {"metric": "performance", "value": _json_num(latest["performance"]), "previous": _json_num(prior_best), "date": latest.get("date")}
+    latest_row = ordered[-1] if ordered else None
+    if latest_row and _finite(latest_row.get("readiness")) and _finite(latest_row.get("performance")):
+        readiness = latest_row["readiness"]
+        performance = latest_row["performance"]
+        if readiness <= 4 and performance >= 6:
+            extras["mismatch"] = {"kind": "robust", "sentence": "You performed well despite low readiness — a sign of robustness or a peak."}
+        elif readiness >= 7 and performance <= 4:
+            extras["mismatch"] = {"kind": "off_day", "sentence": "Output was low despite feeling fresh — an off day, or worth checking technique or measurement."}
+    return extras
 
 
 def app_all_planned_sessions(data):
@@ -3195,16 +3713,17 @@ def app_check_in_metric(check_in, score_key, fallback_key):
 
 
 def app_fatigue(check_in):
+    # Recovery is now a single Fatigue<->Fresh scale stored in freshness_score (high = fresh).
+    # Soreness is no longer collected, so fatigue is simply the inverse of freshness.
     freshness = _num(app_check_in_metric(check_in, "freshness_score", "freshness"))
-    soreness = _num(app_check_in_metric(check_in, "soreness_score", "soreness"))
-    return ((10 - freshness) + soreness) / 2
+    return 10 - freshness
 
 
 def app_readiness(check_in):
+    # Readiness = freshness discounted by half of any pain, clamped to 0-10.
     freshness = _num(app_check_in_metric(check_in, "freshness_score", "freshness"))
-    soreness = _num(app_check_in_metric(check_in, "soreness_score", "soreness"))
     pain = _num(app_check_in_metric(check_in, "pain_score", "pain"))
-    return freshness - (soreness + pain) / 2
+    return max(0, min(10, freshness - pain / 2))
 
 
 def app_rsi(check_in):
@@ -4320,8 +4839,8 @@ def app_checkin_evidence_summary(latest, previous, strongest):
         )
 
     return (
-        f"Readiness was {_pretty(latest.get('readiness'), 1)}, with pain {_pretty(latest.get('pain'), 1)}, "
-        f"soreness {_pretty(latest.get('soreness'), 1)}, and fatigue {_pretty(latest.get('fatigue'), 1)}."
+        f"Readiness was {_pretty(latest.get('readiness'), 1)}, with pain {_pretty(latest.get('pain'), 1)} "
+        f"and fatigue {_pretty(latest.get('fatigue'), 1)}."
     )
 
 
@@ -4452,7 +4971,7 @@ def app_checkin_theme_copy(data, latest, previous, strongest, trend_insights, ad
     elif frame == "load-response signal":
         load_change = f" Load changed {load_delta:+.1f} from the previous paired day." if _finite(load_delta) and abs(load_delta) >= 1 else ""
         signal = f"Training load is {_pretty(load, 1)} and body response is moving with the dose.{load_change}"
-        meaning = f"Do not read this from freshness alone. Watch whether similar load creates pain, soreness, fatigue, or output drop-off. {programme_meaning}"
+        meaning = f"Do not read this from freshness alone. Watch whether similar load creates pain, fatigue, or output drop-off. {programme_meaning}"
     elif frame == "irritation-response signal":
         if _finite(pain_delta):
             direction = "up" if pain_delta > 0 else "down"
@@ -4509,7 +5028,6 @@ def app_checkin_state_radar(latest):
     axes = [
         {"key": "pain", "label": "Pain", "value": _json_num(latest.get("pain")), "tone": "risk"},
         {"key": "freshness", "label": "Freshness", "value": _json_num(latest.get("freshness")), "tone": "positive"},
-        {"key": "soreness", "label": "Soreness", "value": _json_num(latest.get("soreness")), "tone": "risk"},
         {"key": "fatigue", "label": "Fatigue", "value": _json_num(latest.get("fatigue")), "tone": "risk"},
         {"key": "readiness", "label": "Readiness", "value": _json_num(latest.get("readiness")), "tone": "positive"},
     ]
@@ -4521,7 +5039,7 @@ def app_checkin_state_radar(latest):
         "axes": axes,
         "evidence": "Latest check-in values are plotted on a 0-10 scale.",
         "interpretation": "Farther from the centre means a higher score. Green is helpful; red or orange is a body cost to watch.",
-        "emptyState": "Needs a saved check-in with pain, freshness, soreness, fatigue, and readiness.",
+        "emptyState": "Needs a saved check-in with pain, freshness, fatigue, and readiness.",
     }
 
 
@@ -4532,19 +5050,18 @@ def app_checkin_visual(latest, previous, strongest, metric_series, relationships
     deltas = app_checkin_deltas(latest, previous)
     load_rel = app_checkin_load_relationship(relationships, strongest)
 
-    if frame in ["fatigue-limited", "soreness-limited", "freshness-supported"]:
+    if frame in ["fatigue-limited", "freshness-supported"]:
         return {
             "type": "readiness_decomposition_bar",
             "title": "What shaped readiness",
-            "xLabel": "Green helps, red/orange costs",
+            "xLabel": "Green helps, red costs",
             "yLabel": "0-10 check-in score",
             "freshness": _json_num(latest.get("freshness")),
             "painCost": _json_num(_num(latest.get("pain")) / 2),
-            "sorenessCost": _json_num(_num(latest.get("soreness")) / 2),
             "readiness": _json_num(latest.get("readiness")),
-            "evidence": f"Freshness {_pretty(latest.get('freshness'), 1)} is balanced against pain and soreness cost.",
-            "interpretation": "The green bar is what helps you feel ready. The red and orange bars are what pull readiness down.",
-            "emptyState": "Needs freshness, pain, and soreness to decompose readiness.",
+            "evidence": f"Freshness {_pretty(latest.get('freshness'), 1)} is balanced against pain cost.",
+            "interpretation": "The green bar is what helps you feel ready. The red bar is what pulls readiness down.",
+            "emptyState": "Needs freshness and pain to decompose readiness.",
         }
 
     if previous and _finite(deltas.get("pain")) and abs(deltas["pain"]) >= 1:
@@ -4672,7 +5189,6 @@ def analyze_app_data(data):
             "average_intent": app_mean(intents),
             "pain": _num(check_in_value(check_in, "pain_score", "pain"), None) if has_check_in else None,
             "freshness": _num(check_in_value(check_in, "freshness_score", "freshness"), None) if has_check_in else None,
-            "soreness": _num(check_in_value(check_in, "soreness_score", "soreness"), None) if has_check_in else None,
             "fatigue": app_fatigue(check_in) if has_check_in else None,
             "readiness": app_readiness(check_in) if has_check_in else None,
             "performance": actual_values["performance"] if _finite(actual_values["performance"]) else _num(check_in.get("performance_score"), None),
@@ -4709,7 +5225,6 @@ def analyze_app_data(data):
         "load": app_session_load(active_session),
         "pain": _num((data.get("checkInDraft") or {}).get("pain_score")),
         "freshness": _num((data.get("checkInDraft") or {}).get("freshness_score")),
-        "soreness": _num((data.get("checkInDraft") or {}).get("soreness_score")),
         "fatigue": app_fatigue(data.get("checkInDraft") or {}),
         "readiness": app_readiness(data.get("checkInDraft") or {}),
         "performance": _num((data.get("checkInDraft") or {}).get("performance_score")),
@@ -4765,6 +5280,9 @@ def analyze_app_data(data):
     freshness_performance = next((item.get("r") for item in relationships if item.get("id") == "performance_freshness"), None)
     fatigue_performance = next((item.get("r") for item in relationships if item.get("id") == "performance_fatigue"), None)
     pain_load = next((item.get("r") for item in relationships if item.get("id") == "pain_load"), None)
+    block_analysis = app_build_block_analysis(data, ordered)
+    programme_reads = app_build_programme_reads(data, ordered, block_analysis, metric_stats)
+    session_extras = app_build_session_extras(ordered, None)
     return {
         "rows": rows_desc,
         "latest": latest,
@@ -4799,4 +5317,7 @@ def analyze_app_data(data):
         "activeSessionLoad": app_session_load(active_session),
         "sessionReview": app_build_session_review(data, rows),
         "checkInReview": app_build_checkin_review(data, ordered, rows_desc, metric_series, trend_insights, relationships, current_read, adaptation_insight),
+        "blockAnalysis": block_analysis,
+        "programmeReads": programme_reads,
+        "sessionExtras": session_extras,
     }

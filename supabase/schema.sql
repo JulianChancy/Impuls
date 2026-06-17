@@ -121,7 +121,15 @@ create table if not exists public.planned_exercises (
   intensity_value numeric,
   intensity_unit text default '%',
   intent_percent numeric,
+  distance numeric,
   rom text,
+  tempo text,
+  -- Force-Velocity coverage tags. quality/specificity/laterality let the engine read
+  -- programme coverage; variation is a free-text modifier (e.g. "cluster", "paused").
+  quality text,
+  specificity text,
+  laterality text,
+  variation text,
   -- set_metrics stays jsonb because each exercise can store flexible set-level metrics that vary by movement type.
   set_metrics jsonb not null default '[]'::jsonb,
   position integer not null default 0,
@@ -157,7 +165,14 @@ create table if not exists public.session_exercises (
   intensity_value numeric,
   intensity_unit text default '%',
   intent_percent numeric,
+  distance numeric,
   rom text,
+  tempo text,
+  -- Force-Velocity coverage tags (see planned_exercises above).
+  quality text,
+  specificity text,
+  laterality text,
+  variation text,
   -- set_metrics stays jsonb because performance metrics are set-specific and app-specific.
   set_metrics jsonb not null default '[]'::jsonb,
   position integer not null default 0,
@@ -224,6 +239,23 @@ comment on column public.check_ins.weight_unit is 'Unit chosen by user for lift 
 comment on column public.check_ins.bar_velocity_unit is 'Unit chosen by user for bar velocity (m/s).';
 alter table if exists public.planned_exercises alter column intensity_unit set default '%';
 alter table if exists public.session_exercises alter column intensity_unit set default '%';
+
+-- Existing projects can run these safely to add Force-Velocity coverage tags + sprint distance + tempo:
+alter table if exists public.planned_exercises add column if not exists distance numeric;
+alter table if exists public.planned_exercises add column if not exists tempo text;
+alter table if exists public.planned_exercises add column if not exists quality text;
+alter table if exists public.planned_exercises add column if not exists specificity text;
+alter table if exists public.planned_exercises add column if not exists laterality text;
+alter table if exists public.planned_exercises add column if not exists variation text;
+alter table if exists public.session_exercises add column if not exists distance numeric;
+alter table if exists public.session_exercises add column if not exists tempo text;
+alter table if exists public.session_exercises add column if not exists quality text;
+alter table if exists public.session_exercises add column if not exists specificity text;
+alter table if exists public.session_exercises add column if not exists laterality text;
+alter table if exists public.session_exercises add column if not exists variation text;
+comment on column public.planned_exercises.quality is 'Force-Velocity quality tag (max_strength..max_speed, work_capacity, rehab) used for coverage analysis.';
+comment on column public.planned_exercises.specificity is 'Law-of-specificity tag: general | intermediate | specific.';
+comment on column public.planned_exercises.laterality is 'bilateral | unilateral.';
 alter table if exists public.planned_sessions add column if not exists performance_score numeric;
 alter table if exists public.planned_sessions add column if not exists performance_notes text;
 alter table if exists public.planned_sessions add column if not exists performance_logged_at timestamptz;

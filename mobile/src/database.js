@@ -58,11 +58,35 @@ function exerciseRow(userId, parentKey, parentId, exercise, position = 0) {
     intensity_value: numberOrNull(exercise.intensity_value),
     intensity_unit: exercise.intensity_unit || '%',
     intent_percent: numberOrNull(exercise.intent_percent),
+    distance: numberOrNull(exercise.distance),
     rom: exercise.rom || null,
+    tempo: exercise.tempo || null,
+    // Force-Velocity coverage tags used by the analysis engine.
+    quality: exercise.quality || null,
+    specificity: exercise.specificity || null,
+    laterality: exercise.laterality || null,
+    variation: exercise.variation || null,
     // Store attempt-level metrics in the existing JSON column too, so older Supabase schemas still round-trip them.
     set_metrics: actualMetrics || exercise.set_metrics || [],
     position: exercise.position ?? exercise.order ?? position,
   });
+}
+
+// Columns added by the FV-coverage migration. If a project has not run it yet,
+// retry the upsert without these so planning still saves.
+const EXERCISE_TAG_COLUMNS = ['distance', 'tempo', 'quality', 'specificity', 'laterality', 'variation'];
+
+async function upsertExerciseRow(table, row, onConflict) {
+  try {
+    return await singleOrThrow(upsertRow(table, row, onConflict));
+  } catch (error) {
+    const schemaMessage = `${error?.message || ''} ${error?.details || ''}`;
+    if (!EXERCISE_TAG_COLUMNS.some((col) => schemaMessage.includes(col))) throw error;
+    console.warn('[SUPABASE SAVE] Exercise FV-tag columns missing. Saving without coverage tags. Run the exercise-tag migration in supabase/schema.sql.', error);
+    const legacy = { ...row };
+    EXERCISE_TAG_COLUMNS.forEach((col) => delete legacy[col]);
+    return singleOrThrow(upsertRow(table, legacy, onConflict));
+  }
 }
 
 function exerciseFromRow(row) {
@@ -83,7 +107,13 @@ function exerciseFromRow(row) {
     intensity_value: row.intensity_value ?? '',
     intensity_unit: row.intensity_unit || '%',
     intent_percent: row.intent_percent ?? '',
+    distance: row.distance ?? '',
     rom: row.rom || (movementType === 'strength' ? 'full' : ''),
+    tempo: row.tempo || '',
+    quality: row.quality || '',
+    specificity: row.specificity || '',
+    laterality: row.laterality || '',
+    variation: row.variation || '',
     set_metrics: row.set_metrics || [],
     actual_metrics: storedMetrics,
     order: row.position ?? 0,
@@ -451,8 +481,8 @@ export async function savePlannedSession(userId, weekId, session, savedIds) {
   savedIds?.plannedSessions?.push(sessionRow.id);
 
   for (const [index, exercise] of (session.exercises || []).entries()) {
-    const exerciseRowResult = await singleOrThrow(
-      upsertRow('planned_exercises', exerciseRow(userId, 'planned_session_id', sessionRow.id, exercise, index), 'planned_session_id,position')
+    const exerciseRowResult = await upsertExerciseRow(
+      'planned_exercises', exerciseRow(userId, 'planned_session_id', sessionRow.id, exercise, index), 'planned_session_id,position'
     );
     savedIds?.plannedExercises?.push(exerciseRowResult.id);
   }
@@ -476,8 +506,8 @@ export async function saveSession(userId, session) {
   );
 
   for (const [index, exercise] of (session.exercises || []).entries()) {
-    await singleOrThrow(
-      upsertRow('session_exercises', exerciseRow(userId, 'session_id', sessionRow.id, exercise, index), 'session_id,position')
+    await upsertExerciseRow(
+      'session_exercises', exerciseRow(userId, 'session_id', sessionRow.id, exercise, index), 'session_id,position'
     );
   }
 

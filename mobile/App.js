@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   SafeAreaView,
@@ -36,6 +37,22 @@ import {
   saveProgramme as saveProgrammeToSupabase,
   saveSession as saveSessionToSupabase,
 } from './src/database';
+import {
+  EXERCISE_LIBRARY,
+  FAMILY_ORDER,
+  LATERALITY_OPTIONS,
+  QUALITY_META,
+  QUALITY_OPTIONS,
+  ROM_OPTIONS,
+  SESSION_TEMPLATES,
+  SPECIFICITY_OPTIONS,
+  TYPE_META,
+  TYPE_OPTIONS,
+  defaultFieldsForType,
+  defaultQualityForType,
+  searchLibrary,
+  templateItemToExercise,
+} from './src/exerciseLibrary';
 import { Circle, G, Line, Path, Rect, Svg, Text as SvgText } from 'react-native-svg';
 
 function analysisUrlsFromEnv() {
@@ -108,13 +125,9 @@ function createPersistentSessionId() {
   });
 }
 
-const movementOptions = [
-  ['plyometric', 'Plyometric'],
-  ['power_ballistic', 'Power / Ballistic'],
-  ['strength', 'Strength'],
-  ['endurance', 'Endurance'],
-  ['skill', 'Skill'],
-];
+// Movement types are sourced from the exercise library so the picker, the per-type
+// fields, and the load engine all agree on the same taxonomy.
+const movementOptions = TYPE_OPTIONS;
 
 const performanceMetricOptions = [
   ['jumping', 'Plyometrics'],
@@ -287,6 +300,124 @@ function addDays(dateValue, amount) {
 
 function dateFromIso(dateValue) {
   return new Date(`${dateValue || isoDate()}T00:00:00`);
+}
+
+// Turn a chosen check-in day (YYYY-MM-DD) into a timestamp. Today keeps the real
+// clock time so same-day logs stay ordered; past/future days anchor to local noon
+// so they never slip across a timezone boundary.
+function checkInTimestamp(dateValue) {
+  const today = isoDate();
+  if (!dateValue || dateValue === today) return new Date().toISOString();
+  return new Date(`${dateValue}T12:00:00`).toISOString();
+}
+
+function friendlyDateLabel(dateValue) {
+  const today = isoDate();
+  if (!dateValue || dateValue === today) return 'Today';
+  if (dateValue === addDays(today, -1)) return 'Yesterday';
+  if (dateValue === addDays(today, 1)) return 'Tomorrow';
+  return dateFromIso(dateValue).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+function dayOffset(dateA, dateB) {
+  if (!dateA || !dateB) return 0;
+  const a = new Date(`${dateA}T00:00:00`).getTime();
+  const b = new Date(`${dateB}T00:00:00`).getTime();
+  return Math.max(0, Math.round((a - b) / 86400000));
+}
+
+// Client-side mirror of the engine load formula (backend/logic.py app_exercise_load),
+// used for the live load-shape preview and repeat-week progression. Keep in sync with the engine.
+function jsNum(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+function jsExerciseVolume(ex) {
+  const t = ex.movement_type;
+  if (t === 'plyometric') return jsNum(ex.contacts);
+  if (t === 'power_ballistic' || t === 'strength' || t === 'general') {
+    const sets = jsNum(ex.sets) || 1;
+    const reps = jsNum(ex.reps);
+    return reps ? sets * reps : reps;
+  }
+  if (t === 'sprint') {
+    const reps = jsNum(ex.reps) || 1;
+    const distance = jsNum(ex.distance);
+    return distance ? reps * distance : reps;
+  }
+  if (t === 'rehab') {
+    const dur = jsNum(ex.duration_minutes);
+    if (dur) return dur;
+    const sets = jsNum(ex.sets) || 1;
+    const reps = jsNum(ex.reps);
+    return reps ? sets * reps : reps;
+  }
+  return jsNum(ex.duration_minutes);
+}
+function jsExerciseLoad(ex) {
+  const volume = jsExerciseVolume(ex);
+  const intent = jsNum(ex.intent_percent) / 100;
+  const unit = ex.intensity_unit || '%';
+  const intensityValue = jsNum(ex.intensity_value);
+  const intensity = unit === '%' ? (intensityValue ? intensityValue / 100 : 1) : (intensityValue || 1);
+  const t = ex.movement_type;
+  if (t === 'power_ballistic') return volume * intent * intensity;
+  if (t === 'strength' || t === 'general' || t === 'rehab') return volume * intensity;
+  return volume * intent;
+}
+function jsSessionLoad(session) {
+  return (session.exercises || []).reduce((sum, ex) => sum + jsExerciseLoad(ex), 0);
+}
+function jsWeekLoad(week) {
+  return (week.sessions || []).reduce((sum, session) => sum + jsSessionLoad(session), 0);
+}
+
+// Weekly progression factors for repeat-week. weekIndex is 1-based from the source week.
+const PROGRESSION_OPTIONS = [
+  ['flat', 'Flat'],
+  ['p5', '+5%/wk'],
+  ['p10', '+10%/wk'],
+  ['deload', 'Build + deload'],
+];
+function progressionFactor(mode, weekIndex, total) {
+  if (mode === 'p5') return 1 + 0.05 * weekIndex;
+  if (mode === 'p10') return 1 + 0.1 * weekIndex;
+  if (mode === 'deload') return weekIndex === total ? 0.6 : 1 + 0.08 * weekIndex;
+  return 1;
+}
+// Scale an exercise's single primary load driver by the weekly factor.
+function scaleExerciseLoad(ex, factor) {
+  if (!factor || factor === 1) return { ...ex };
+  const clone = { ...ex };
+  const scaled = (value) => Math.round(jsNum(value) * factor);
+  const t = ex.movement_type;
+  if (t === 'plyometric') clone.contacts = scaled(ex.contacts) || ex.contacts;
+  else if (t === 'sprint') clone.reps = scaled(ex.reps) || ex.reps;
+  else if (t === 'endurance' || t === 'skill') clone.duration_minutes = scaled(ex.duration_minutes) || ex.duration_minutes;
+  else if ((ex.intensity_unit || '%') === '%') clone.intensity_value = Math.min(100, scaled(ex.intensity_value)) || ex.intensity_value;
+  else clone.intensity_value = scaled(ex.intensity_value) || ex.intensity_value;
+  return clone;
+}
+
+// Shared no-dependency day picker: ‹ steps back, › steps forward, the centre label
+// taps back to today. Used by quick check-in and Log Performance (retrospective/forward logging).
+function DateStepper({ value, onChange }) {
+  const selected = value || isoDate();
+  const isToday = selected === isoDate();
+  return (
+    <View style={styles.dateRow}>
+      <Pressable style={styles.dateNav} onPress={() => onChange(addDays(selected, -1))}>
+        <Text style={styles.dateNavText}>‹</Text>
+      </Pressable>
+      <Pressable style={styles.dateCenter} onPress={() => onChange(isoDate())}>
+        <Text style={styles.dateCenterText}>{friendlyDateLabel(selected)}</Text>
+        {isToday ? null : <Text style={styles.dateReset}>Tap for today</Text>}
+      </Pressable>
+      <Pressable style={styles.dateNav} onPress={() => onChange(addDays(selected, 1))}>
+        <Text style={styles.dateNavText}>›</Text>
+      </Pressable>
+    </View>
+  );
 }
 
 function addMonths(dateValue, amount) {
@@ -1876,6 +2007,7 @@ export default function App() {
       sets: toNumber(exerciseDraft.sets),
       contacts: toNumber(exerciseDraft.contacts),
       reps: toNumber(exerciseDraft.reps),
+      distance: toNumber(exerciseDraft.distance),
       duration_minutes: toNumber(exerciseDraft.duration_minutes),
       intensity_value: toNumber(exerciseDraft.intensity_value),
       intent_percent: toNumber(exerciseDraft.intent_percent),
@@ -1895,12 +2027,11 @@ export default function App() {
     const draft = data.checkInDraft;
     const checkIn = {
       id: createId('checkin'),
-      check_in_datetime: new Date().toISOString(),
+      check_in_datetime: checkInTimestamp(draft.check_in_date),
       linked_session_id: data.activeSession.id,
       pain_score: draft.pain_score,
       pain_location: draft.pain_location,
       freshness_score: draft.freshness_score,
-      soreness_score: draft.soreness_score,
     };
     // Optional single output captured in the fast check-in. Only attach a real
     // value: a slider score must be > 0, and typed metrics must be non-empty,
@@ -1926,7 +2057,7 @@ export default function App() {
     setData((current) => ({
       ...current,
       checkIns: [checkIn, ...current.checkIns],
-      checkInDraft: { ...current.checkInDraft, primary_value: '' },
+      checkInDraft: { ...current.checkInDraft, primary_value: '', check_in_date: isoDate() },
     }));
     if (currentUser) {
       saveCheckInToSupabase(currentUser.id, checkIn)
@@ -1937,6 +2068,44 @@ export default function App() {
         });
     }
     setScreen('checkinReview');
+  }
+
+  function savePerformanceLog(payload) {
+    const posNum = (value) => {
+      const n = Number(value);
+      return String(value ?? '').trim() !== '' && Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const entry = {
+      id: createId('checkin'),
+      check_in_datetime: checkInTimestamp(payload.date),
+      linked_session_id: data.activeSession?.id || null,
+    };
+    if (payload.mode === 'jump') {
+      // Measured jump session. performance_type tags it as measured output so the
+      // engine can keep it distinct from the quick-log subjective "felt" score.
+      entry.performance_type = 'jumping';
+      const score = posNum(payload.performance_score);
+      if (score !== null) entry.performance_score = score;
+      const h = posNum(payload.height);
+      if (h !== null) { entry.height_or_distance = h; entry.height_or_distance_unit = payload.height_unit || 'cm'; }
+      const ft = posNum(payload.ft);
+      if (ft !== null) { entry.ft = ft; entry.ft_unit = payload.ft_unit || 'seconds'; }
+    } else {
+      entry.performance_type = 'lift';
+      const w = posNum(payload.weight);
+      if (w !== null) { entry.weight = w; entry.weight_unit = payload.weight_unit || 'kg'; }
+      const bv = posNum(payload.bar_velocity);
+      if (bv !== null) entry.bar_velocity = bv;
+      if (String(payload.lift_name ?? '').trim()) entry.lift_name = payload.lift_name.trim();
+    }
+    const hasOutput = ['performance_score', 'height_or_distance', 'ft', 'weight', 'bar_velocity'].some((key) => Number.isFinite(entry[key]));
+    if (!hasOutput) { setScreen('today'); return; }
+    setLastSavedCheckInId(entry.id);
+    setData((current) => ({ ...current, checkIns: [entry, ...current.checkIns] }));
+    if (currentUser) {
+      saveCheckInToSupabase(currentUser.id, entry).catch((error) => console.error('[SUPABASE SAVE] Performance log failed. Local copy preserved.', error));
+    }
+    setScreen('today');
   }
 
   function finishSession(options = {}) {
@@ -2244,21 +2413,7 @@ export default function App() {
               />
             )}
             {screen === 'performanceSession' && (
-              <SessionScreen
-                data={data}
-                analysis={analysis}
-                setData={setData}
-                updateSession={updateSession}
-                setScreen={setScreen}
-                finishSession={() => finishSession({ syncPlanned: true, preserveId: true })}
-                savePerformanceDraft={savePerformanceDraft}
-                performanceSaveStatus={performanceSaveStatus}
-                onAddExercise={() => {
-                  setAddExerciseReturnScreen('performanceSession');
-                  setScreen('addExercise');
-                }}
-                mode="performance"
-              />
+              <PerformanceLogScreen savePerformanceLog={savePerformanceLog} setScreen={setScreen} />
             )}
             {screen === 'addExercise' && (
               <AddExerciseScreen draft={exerciseDraft} setDraft={setExerciseDraft} addExercise={addExercise} setScreen={setScreen} returnScreen={addExerciseReturnScreen} />
@@ -2384,7 +2539,7 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
   const readinessNum = toNumber(analysis.latest?.readiness);
   const readinessPct = Math.max(0, Math.min(1, readinessNum / 10));
   const ringDash = `${(readinessPct * 314).toFixed(1)} 314`;
-  const readline = readinessNum >= 7.5 ? "You're primed to train" : readinessNum >= 5 ? 'Train, but manage the load' : 'Recovery comes first today';
+  const readline = readinessNum >= 7.5 ? 'Readiness is high today' : readinessNum >= 5 ? 'Readiness is moderate today' : readinessNum > 0 ? 'Readiness is low today' : 'Log a check-in to see your readiness';
   const noticed = analysis?.adaptationInsight?.label || 'Keep logging to surface your patterns';
   const sessionMeta = hasPlannedSession ? exercisePrescriptionSummary(planned) : 'No session planned for today';
 
@@ -2429,8 +2584,8 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
         <Text style={styles.cardTitle}>{planned.session_name}</Text>
         <Text style={styles.calendarMetaText}>{sessionMeta}</Text>
         <View style={styles.twoCol}>
-          <Pressable style={styles.ghostBtn} onPress={startTodayPerformance}><Text style={styles.ghostBtnText}>Start session</Text></Pressable>
-          <Pressable style={styles.ghostBtn} onPress={startTodayPerformance}><Text style={styles.ghostBtnText}>Quick log</Text></Pressable>
+          <Pressable style={styles.ghostBtn} onPress={() => setScreen('calendar')}><Text style={styles.ghostBtnText}>Start session</Text></Pressable>
+          <Pressable style={styles.ghostBtn} onPress={startTodayPerformance}><Text style={styles.ghostBtnText}>Log performance</Text></Pressable>
         </View>
       </View>
 
@@ -2528,19 +2683,84 @@ function TutorialHint({ visible, title, body, onDismiss }) {
   );
 }
 
-function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSeen, onDismissTutorial }) {
-  const primaryMetric = draft.primary_metric || 'performance_score';
-  const metricLabel = (quickOutputOptions.find(([id]) => id === primaryMetric) || [])[1] || 'Result';
-  const unitOptions = quickOutputUnitOptions[primaryMetric];
-  const primaryUnit = draft.primary_unit || quickOutputDefaultUnit[primaryMetric] || '';
-
-  function selectMetric(metric) {
-    updateDraft('primary_metric', metric);
-    updateDraft('primary_unit', quickOutputDefaultUnit[metric] || '');
-    updateDraft('primary_value', '');
+function metricExplainer(key) {
+  switch (key) {
+    case 'performance_score': return 'Your own 0–10 rating of the session.';
+    case 'height_or_distance': return 'Jump height — how high you left the ground.';
+    case 'sprint_time': return 'Time over your sprint distance — lower is faster.';
+    case 'ft': return 'Flight time — longer airtime means a higher jump.';
+    case 'rsi': return 'Reactive strength = flight time ÷ ground contact. Higher is springier.';
+    case 'gct': return 'Ground contact time — shorter is more reactive.';
+    case 'bar_velocity': return 'Bar speed — maps to the strength quality you trained.';
+    default: return '';
   }
+}
+
+function interpretMetric(key, rawValue, unit) {
+  const value = Number(rawValue);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  if (key === 'performance_score') {
+    if (value >= 8.5) return 'An excellent session by feel.';
+    if (value >= 6.5) return 'A strong session by feel.';
+    if (value >= 4.5) return 'A moderate session by feel.';
+    return 'A low-quality session by feel.';
+  }
+  if (key === 'height_or_distance') {
+    const cm = (unit === 'inches' || unit === 'in') ? value * 2.54 : value;
+    const band = cm >= 75 ? 'an elite vertical' : cm >= 60 ? 'a very strong vertical' : cm >= 45 ? 'a strong recreational vertical' : cm >= 30 ? 'an average vertical' : 'a developing vertical';
+    return `≈ ${Math.round(cm)} cm — ${band}.`;
+  }
+  if (key === 'ft') {
+    const cm = (981 * value * value) / 8;
+    const band = cm >= 75 ? 'elite' : cm >= 60 ? 'very strong' : cm >= 45 ? 'strong' : cm >= 30 ? 'average' : 'developing';
+    return `≈ ${Math.round(cm)} cm jump — ${band}.`;
+  }
+  if (key === 'sprint_time') {
+    return 'Logged — your own splits over time give this its context.';
+  }
+  if (key === 'rsi') {
+    const band = value >= 3 ? 'elite reactive' : value >= 2.5 ? 'excellent' : value >= 2 ? 'strong' : value >= 1.5 ? 'good' : 'developing';
+    return `${band} reactive strength.`;
+  }
+  if (key === 'gct') {
+    const s = unit === 'milliseconds' ? value / 1000 : value;
+    const band = s <= 0.18 ? 'very reactive' : s <= 0.25 ? 'reactive' : s <= 0.35 ? 'moderate' : 'slow';
+    return `${Math.round(s * 1000)} ms contact — ${band}.`;
+  }
+  if (key === 'bar_velocity') {
+    const band = value >= 1.3 ? 'speed' : value >= 1.0 ? 'speed-strength' : value >= 0.75 ? 'strength-speed' : value >= 0.5 ? 'accelerative strength' : 'max strength';
+    return `${value.toFixed(2)} m/s — ${band} zone.`;
+  }
+  return null;
+}
+
+function readDay(fresh, pain) {
+  const parts = [];
+  if (fresh >= 7) parts.push('feeling fresh'); else if (fresh >= 4) parts.push('moderately fresh'); else if (fresh > 0) parts.push('feeling fatigued');
+  if (pain >= 5) parts.push('notable knee pain'); else if (pain > 0) parts.push('mild knee pain'); else if (fresh > 0) parts.push('no pain');
+  if (!parts.length) return null;
+  return `Your signals today: ${parts.join(', ')}.`;
+}
+
+function sessionLoadNote(session) {
+  const contacts = (session.exercises || []).reduce((sum, exercise) => sum + (Number(exercise.contacts) || 0), 0);
+  if (contacts <= 0) return null;
+  const band = contacts >= 120 ? 'high contact volume' : contacts >= 60 ? 'moderate contact volume' : 'low contact volume';
+  return `${contacts} contacts · ${band}`;
+}
+
+function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSeen, onDismissTutorial }) {
+  const selectedDate = draft.check_in_date || isoDate();
+
+  // Default the date to today each time the screen opens, so a persisted draft never
+  // re-opens on a stale day. The user can still step to a past/future day below.
+  useEffect(() => {
+    updateDraft('check_in_date', isoDate());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const painYes = Number(draft.pain_score) > 0;
+  const dayRead = readDay(Number(draft.freshness_score) || 0, Number(draft.pain_score) || 0);
 
   function Scale10({ field, tone }) {
     const value = Number(draft[field]) || 0;
@@ -2567,19 +2787,18 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSee
       </View>
 
       <View style={styles.qGroup}>
-        <Text style={styles.q}>How recovered do you feel?</Text>
+        <Text style={styles.q}>For which day?</Text>
+        <DateStepper value={selectedDate} onChange={(value) => updateDraft('check_in_date', value)} />
+      </View>
+
+      <View style={styles.qGroup}>
+        <Text style={styles.q}>How fresh do you feel?</Text>
         <Scale10 field="freshness_score" />
-        <View style={styles.scaleEnds}><Text style={styles.label}>Drained</Text><Text style={styles.label}>Fully fresh</Text></View>
+        <View style={styles.scaleEnds}><Text style={styles.label}>Fatigued</Text><Text style={styles.label}>Fresh</Text></View>
       </View>
 
       <View style={styles.qGroup}>
-        <Text style={styles.q}>Any soreness?</Text>
-        <Scale10 field="soreness_score" tone="warn" />
-        <View style={styles.scaleEnds}><Text style={styles.label}>None</Text><Text style={styles.label}>Very sore</Text></View>
-      </View>
-
-      <View style={styles.qGroup}>
-        <Text style={styles.q}>Any pain today?</Text>
+        <Text style={styles.q}>Any jumper's knee pain today?</Text>
         <View style={styles.toggleRow}>
           <Pressable style={[styles.toggleBtn, !painYes && styles.toggleBtnSel]} onPress={() => { updateDraft('pain_score', 0); updateDraft('pain_location', ''); }}>
             <Text style={[styles.toggleBtnText, !painYes && styles.toggleBtnTextSel]}>No, all good</Text>
@@ -2591,24 +2810,19 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSee
         {painYes ? (
           <View style={styles.painExtra}>
             <Scale10 field="pain_score" tone="warn" />
+            <View style={styles.scaleEnds}><Text style={styles.label}>Barely there</Text><Text style={styles.label}>Severe</Text></View>
             <Input label="Where? (optional)" value={String(draft.pain_location || '')} onChangeText={(value) => updateDraft('pain_location', value)} />
           </View>
         ) : null}
       </View>
 
       <View style={styles.qGroup}>
-        <Text style={styles.q}>Today's result (optional)</Text>
-        <ChipWrap options={quickOutputOptions} value={primaryMetric} onChange={selectMetric} />
-        {primaryMetric === 'performance_score' ? (
-          <Input label="Effort / score (0–10)" value={String(draft.primary_value ?? '')} onChangeText={(value) => updateDraft('primary_value', value)} />
-        ) : (
-          <View style={styles.painExtra}>
-            <Input label={`${metricLabel} value`} value={String(draft.primary_value ?? '')} onChangeText={(value) => updateDraft('primary_value', value)} />
-            {unitOptions ? <ChipWrap options={unitOptions} value={primaryUnit} onChange={(value) => updateDraft('primary_unit', value)} /> : null}
-          </View>
-        )}
+        <Text style={styles.q}>How did today feel? (optional)</Text>
+        <Input label="Effort / score (0–10)" value={String(draft.primary_value ?? '')} onChangeText={(value) => updateDraft('primary_value', value)} />
+        <Text style={styles.metricExplain}>A quick subjective read on how the session went. Log measured jumps and lifts in Log Performance.</Text>
       </View>
 
+      {dayRead ? <Text style={styles.readDayText}>{dayRead}</Text> : null}
       <Pressable style={styles.primaryBtn} onPress={saveCheckIn}><Text style={styles.primaryBtnText}>Done</Text></Pressable>
     </View>
   );
@@ -2793,20 +3007,18 @@ function ReviewRadarChart({ visual }) {
 function ReadinessDecompositionChart({ visual }) {
   const freshness = reviewNumber(visual.freshness);
   const painCost = reviewNumber(visual.painCost);
-  const sorenessCost = reviewNumber(visual.sorenessCost);
   const readiness = reviewNumber(visual.readiness);
   const width = 320;
   const height = 132;
   const centerX = 160;
   const barY = 54;
-  const maxSide = Math.max(freshness ?? 0, (painCost ?? 0) + (sorenessCost ?? 0), 1);
+  const maxSide = Math.max(freshness ?? 0, painCost ?? 0, 1);
   const scale = 120 / maxSide;
 
-  if ([freshness, painCost, sorenessCost, readiness].some((value) => value === null)) return <ReviewEmptyChart visual={visual} />;
+  if ([freshness, painCost, readiness].some((value) => value === null)) return <ReviewEmptyChart visual={visual} />;
 
   const freshnessWidth = freshness * scale;
   const painWidth = painCost * scale;
-  const sorenessWidth = sorenessCost * scale;
 
   return (
     <ReviewChartShell visual={visual}>
@@ -2815,13 +3027,12 @@ function ReadinessDecompositionChart({ visual }) {
           <Line x1={centerX} y1={24} x2={centerX} y2={96} stroke="#BDBDB7" strokeWidth="1.5" />
           <Rect x={centerX} y={barY} width={freshnessWidth} height="18" rx="9" fill="#2FA044" />
           <Rect x={centerX - painWidth} y={barY} width={painWidth} height="18" rx="9" fill="#E13F32" />
-          <Rect x={centerX - painWidth - sorenessWidth} y={barY} width={sorenessWidth} height="18" rx="9" fill="#B86B18" />
           <SvgText x={centerX + freshnessWidth + 4} y={barY + 13} fill="#24883B" fontSize="10" fontWeight="700">freshness</SvgText>
-          <SvgText x={Math.max(4, centerX - painWidth - sorenessWidth - 4)} y={barY - 8} fill="#B1382D" fontSize="10" fontWeight="700" textAnchor="end">cost</SvgText>
+          <SvgText x={Math.max(4, centerX - painWidth - 4)} y={barY - 8} fill="#B1382D" fontSize="10" fontWeight="700" textAnchor="end">pain cost</SvgText>
           <SvgText x={centerX} y={116} fill="#111111" fontSize="11" fontWeight="800" textAnchor="middle">readiness {pretty(readiness, 1)}</SvgText>
         </Svg>
       </View>
-      <FigureEvidence items={[['Freshness', pretty(freshness, 1)], ['Pain cost', pretty(painCost, 1)], ['Soreness cost', pretty(sorenessCost, 1)], ['Readiness', pretty(readiness, 1)]]} />
+      <FigureEvidence items={[['Freshness', pretty(freshness, 1)], ['Pain cost', pretty(painCost, 1)], ['Readiness', pretty(readiness, 1)]]} />
     </ReviewChartShell>
   );
 }
@@ -2978,6 +3189,46 @@ function ReviewLineSvg({ series, height = 150, compact = false }) {
   );
 }
 
+function PerformanceLogScreen({ savePerformanceLog, setScreen }) {
+  const [mode, setMode] = useState('jump');
+  const [form, setForm] = useState({ date: isoDate(), performance_score: '', height: '', height_unit: 'cm', ft: '', ft_unit: 'seconds', weight: '', weight_unit: 'kg', lift_name: '', bar_velocity: '' });
+  const up = (key, value) => setForm((current) => ({ ...current, [key]: value }));
+  return (
+    <View style={styles.screen}>
+      <View style={styles.checkinTop}>
+        <Pressable style={styles.iconBack} onPress={() => setScreen('today')}><Text style={styles.iconBackText}>‹</Text></Pressable>
+        <Text style={[styles.h1, styles.flex]}>Log performance</Text>
+      </View>
+      <View style={styles.qGroup}>
+        <Text style={styles.q}>For which day?</Text>
+        <DateStepper value={form.date} onChange={(value) => up('date', value)} />
+      </View>
+      <View style={styles.toggleRow}>
+        <Pressable style={[styles.toggleBtn, mode === 'jump' && styles.toggleBtnSel]} onPress={() => setMode('jump')}><Text style={[styles.toggleBtnText, mode === 'jump' && styles.toggleBtnTextSel]}>Best jump</Text></Pressable>
+        <Pressable style={[styles.toggleBtn, mode === 'lift' && styles.toggleBtnSel]} onPress={() => setMode('lift')}><Text style={[styles.toggleBtnText, mode === 'lift' && styles.toggleBtnTextSel]}>Best lift</Text></Pressable>
+      </View>
+      <Text style={styles.muted}>Log whatever you measured — fields are optional.</Text>
+      {mode === 'jump' ? (
+        <View style={styles.card}>
+          <Input label="Session score (0–10)" value={form.performance_score} onChangeText={(value) => up('performance_score', value)} />
+          <Input label="Max touch height" value={form.height} onChangeText={(value) => up('height', value)} />
+          <ChipWrap options={jumpDistanceUnitOptions} value={form.height_unit} onChange={(value) => up('height_unit', value)} />
+          <Input label="Flight time (optional)" value={form.ft} onChangeText={(value) => up('ft', value)} />
+          <ChipWrap options={sprintTimeUnitOptions} value={form.ft_unit} onChange={(value) => up('ft_unit', value)} />
+        </View>
+      ) : (
+        <View style={styles.card}>
+          <Input label="Exercise name" value={form.lift_name} onChangeText={(value) => up('lift_name', value)} />
+          <Input label="Weight" value={form.weight} onChangeText={(value) => up('weight', value)} />
+          <ChipWrap options={weightUnitOptions} value={form.weight_unit} onChange={(value) => up('weight_unit', value)} />
+          <Input label="Bar velocity (m/s, optional)" value={form.bar_velocity} onChangeText={(value) => up('bar_velocity', value)} />
+        </View>
+      )}
+      <Pressable style={styles.primaryBtn} onPress={() => savePerformanceLog({ mode, ...form })}><Text style={styles.primaryBtnText}>Save</Text></Pressable>
+    </View>
+  );
+}
+
 function SessionScreen({
   data,
   analysis,
@@ -3112,25 +3363,12 @@ function SessionScreen({
 }
 
 function AddExerciseScreen({ draft, setDraft, addExercise, setScreen, returnScreen = 'session' }) {
-  const movementLabel = movementOptions.find(([id]) => id === draft.movement_type)?.[1] || 'Movement';
-  const update = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
   return (
     <View style={styles.screen}>
       <Header title="Add Exercise" onBack={() => setScreen(returnScreen)} />
-      <Text style={styles.label}>Movement Type</Text>
-      <SelectLike value={movementLabel} />
-      <Input label="Exercise Name" value={draft.exercise_name} onChangeText={(value) => update('exercise_name', value)} />
       <View style={styles.builderCard}>
-        <Text style={styles.sectionTitle}>{movementLabel} Fields</Text>
-        <ExerciseFields draft={draft} update={update} />
-        <View style={styles.summaryRow}>
-          <Text style={styles.label}>Estimated Load</Text>
-          <View style={styles.loadPill}>
-            <Text style={styles.loadText}>After adding</Text>
-          </View>
-        </View>
+        <ExerciseDraftEditor draft={draft} update={(key, value) => setDraft((current) => ({ ...current, [key]: value }))} />
       </View>
-      <ChipWrap options={movementOptions} value={draft.movement_type} onChange={(value) => update('movement_type', value)} />
       <ActionButton title="Add to Session" tone="green" onPress={addExercise} />
     </View>
   );
@@ -3334,6 +3572,7 @@ function CalendarScreen({
       sets: toNumber(exDraft.sets),
       contacts: toNumber(exDraft.contacts),
       reps: toNumber(exDraft.reps),
+      distance: toNumber(exDraft.distance),
       duration_minutes: toNumber(exDraft.duration_minutes),
       intensity_value: toNumber(exDraft.intensity_value),
       intent_percent: toNumber(exDraft.intent_percent),
@@ -3497,6 +3736,7 @@ function CalendarScreen({
             <Pressable onPress={() => analysePlannedSession(session)}><Text style={styles.textLink}>Analyse</Text></Pressable>
             <Pressable style={styles.editGap} onPress={() => setEditSessionId(editSessionId === session.id ? null : session.id)}><Text style={styles.textLink}>{editSessionId === session.id ? 'Done' : 'Edit'}</Text></Pressable>
           </View>
+          {sessionLoadNote(session) ? <Text style={styles.exPrescription}>{sessionLoadNote(session)}</Text> : null}
           {editSessionId === session.id ? (
             <View style={styles.painExtra}>
               <Input label="Session name" value={session.session_name} onChangeText={(value) => setSessionField(session.id, 'session_name', value)} />
@@ -3532,9 +3772,7 @@ function CalendarScreen({
                     <Pressable onPress={() => setEditingExId(editing ? null : exercise.id)}><Text style={styles.textLink}>{editing ? 'Hide edit' : 'Edit sets / reps'}</Text></Pressable>
                     {editing ? (
                       <View style={styles.painExtra}>
-                        <Input label="Name" value={exercise.exercise_name} onChangeText={(value) => updatePlannedExercise(session.id, exercise.id, 'exercise_name', value)} />
-                        <ChipWrap options={movementOptions} value={exercise.movement_type} onChange={(value) => updatePlannedExercise(session.id, exercise.id, 'movement_type', value)} />
-                        <ExerciseFields draft={exercise} update={(key, value) => updatePlannedExercise(session.id, exercise.id, key, value)} />
+                        <ExerciseDraftEditor draft={exercise} update={(key, value) => updatePlannedExercise(session.id, exercise.id, key, value)} />
                         <Pressable style={styles.deleteButton} onPress={() => removeExercise(session.id, exercise.id)}><Text style={styles.deleteButtonText}>Remove exercise</Text></Pressable>
                       </View>
                     ) : null}
@@ -3545,9 +3783,7 @@ function CalendarScreen({
           })}
           {addingSessionId === session.id ? (
             <View style={styles.builderCard}>
-              <ChipWrap options={movementOptions} value={exDraft.movement_type} onChange={(value) => setExDraft((c) => ({ ...c, movement_type: value }))} />
-              <Input label="Exercise name" value={exDraft.exercise_name} onChangeText={(value) => setExDraft((c) => ({ ...c, exercise_name: value }))} />
-              <ExerciseFields draft={exDraft} update={(key, value) => setExDraft((c) => ({ ...c, [key]: value }))} />
+              <ExerciseDraftEditor draft={exDraft} update={(key, value) => setExDraft((c) => ({ ...c, [key]: value }))} />
               <View style={styles.twoCol}>
                 <Pressable style={styles.ghostBtn} onPress={() => setAddingSessionId(null)}><Text style={styles.ghostBtnText}>Cancel</Text></Pressable>
                 <Pressable style={[styles.primaryBtn, styles.flex]} onPress={() => addExerciseToSession(session.id)}><Text style={styles.primaryBtnText}>Add</Text></Pressable>
@@ -4052,6 +4288,9 @@ function EditBlockCalendarScreen({
 }) {
   const [newSession, setNewSession] = useState({ session_name: '', focus: '', duration: '', date: selectedDate || isoDate() });
   const [templateWeekday, setTemplateWeekday] = useState('1');
+  const [repeatCount, setRepeatCount] = useState('3');
+  const [repeatProgression, setRepeatProgression] = useState('flat');
+  const [templateOpen, setTemplateOpen] = useState(false);
   const programme = data.programme;
   const macro = currentMacro(programme);
   const block = currentBlock(programme);
@@ -4294,6 +4533,55 @@ function EditBlockCalendarScreen({
     });
   }
 
+  // Build one week, then repeat it across the next N weeks with an optional load progression.
+  function repeatWeekWithProgression() {
+    const count = Number(repeatCount) || 0;
+    if (count < 1) return;
+    commitProgramme((draft) => {
+      const selectedBlock = currentBlock(draft);
+      if (!selectedBlock) return;
+      const source = (selectedBlock.weeks || []).find((item) => item.id === draft.selected_week_id) || (selectedBlock.weeks || [])[0];
+      if (!source) return;
+      const sourceStart = source.start_date || startOfWeekIso(selectedDate);
+      let lastEnd = source.end_date || addDays(sourceStart, 6);
+      for (let i = 1; i <= count; i += 1) {
+        const start = addDays(lastEnd, 1);
+        const end = addDays(start, 6);
+        lastEnd = end;
+        const factor = progressionFactor(repeatProgression, i, count);
+        selectedBlock.weeks.push({
+          id: createId('week'),
+          week_name: '',
+          start_date: start,
+          end_date: end,
+          sessions: (source.sessions || []).map((session) => ({
+            ...session,
+            id: createId('planned'),
+            date: addDays(start, dayOffset(session.date, sourceStart)),
+            completed: false,
+            exercises: (session.exercises || []).map((exercise) => ({ ...scaleExerciseLoad(exercise, factor), id: createId('planned_exercise') })),
+          })),
+        });
+      }
+      selectedBlock.weeks.sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
+    });
+  }
+
+  function insertTemplate(template) {
+    setTemplateOpen(false);
+    commitProgramme((draft) => {
+      ensureProgrammeWeek(draft, selectedDate).sessions.push({
+        id: createId('planned'),
+        date: selectedDate,
+        session_name: template.name,
+        focus: template.focus,
+        duration: '',
+        completed: false,
+        exercises: template.items.map((item) => ({ ...templateItemToExercise(item), id: createId('planned_exercise') })),
+      });
+    });
+  }
+
   function deletePlannedSession(sessionId) {
     commitProgramme((draft) => {
       const selectedWeek = currentWeek(draft);
@@ -4342,6 +4630,29 @@ function EditBlockCalendarScreen({
           );
         })}
       </View>
+      <LoadShapePreview block={block} currentWeekId={week?.id} />
+      <View style={styles.calendarPanel}>
+        <Text style={styles.sectionTitle}>Build faster</Text>
+        <ActionButton title="+ Use a template" tone="outline" onPress={() => setTemplateOpen(true)} />
+        <Text style={styles.label}>Repeat this week</Text>
+        <View style={styles.chipWrap}>
+          {['1', '2', '3', '4', '5'].map((count) => (
+            <Pressable key={count} style={[styles.chip, repeatCount === count && styles.chipActive]} onPress={() => setRepeatCount(count)}>
+              <Text style={[styles.chipText, repeatCount === count && styles.chipTextActive]}>{count}×</Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={styles.label}>Progression</Text>
+        <View style={styles.chipWrap}>
+          {PROGRESSION_OPTIONS.map(([id, label]) => (
+            <Pressable key={id} style={[styles.chip, repeatProgression === id && styles.chipActive]} onPress={() => setRepeatProgression(id)}>
+              <Text style={[styles.chipText, repeatProgression === id && styles.chipTextActive]}>{label}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <ActionButton title={`Repeat week ${repeatCount}×`} tone="black" onPress={repeatWeekWithProgression} />
+      </View>
+      <TemplatePicker visible={templateOpen} onClose={() => setTemplateOpen(false)} onPick={insertTemplate} />
       <View style={styles.calendarPanel}>
         <Text style={styles.sectionTitle}>This Week</Text>
         {weekSessions.length === 0 ? <Text style={styles.muted}>No sessions in this week yet.</Text> : null}
@@ -4468,6 +4779,7 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
       sets: toNumber(draftExercise.sets),
       contacts: toNumber(draftExercise.contacts),
       reps: toNumber(draftExercise.reps),
+      distance: toNumber(draftExercise.distance),
       duration_minutes: toNumber(draftExercise.duration_minutes),
       intensity_value: toNumber(draftExercise.intensity_value),
       intent_percent: toNumber(draftExercise.intent_percent),
@@ -4541,9 +4853,7 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
             <Text style={styles.calendarMetaText}>{exercise.movement_type.replace('_', ' ')} · {exercisePrescription(exercise)}</Text>
             {open ? (
               <View style={styles.painExtra}>
-                <Input label="Name" value={exercise.exercise_name} onChangeText={(value) => updateExercise(exercise.id, 'exercise_name', value)} />
-                <ChipWrap options={movementOptions} value={exercise.movement_type} onChange={(value) => updateExercise(exercise.id, 'movement_type', value)} />
-                <ExerciseFields draft={exercise} update={(key, value) => updateExercise(exercise.id, key, value)} />
+                <ExerciseDraftEditor draft={exercise} update={(key, value) => updateExercise(exercise.id, key, value)} />
                 <Pressable style={styles.deleteButton} onPress={() => deleteExercise(exercise.id)}><Text style={styles.deleteButtonText}>Delete exercise</Text></Pressable>
               </View>
             ) : null}
@@ -4558,9 +4868,7 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
       {adding ? (
         <View style={styles.builderCard}>
           <Text style={styles.sectionTitle}>Add exercise</Text>
-          <ChipWrap options={movementOptions} value={draftExercise.movement_type} onChange={(value) => updateDraft('movement_type', value)} />
-          <Input label="Exercise name" value={draftExercise.exercise_name} onChangeText={(value) => updateDraft('exercise_name', value)} />
-          <ExerciseFields draft={draftExercise} update={updateDraft} />
+          <ExerciseDraftEditor draft={draftExercise} update={updateDraft} />
           <View style={styles.twoCol}>
             <Pressable style={styles.ghostBtn} onPress={() => setAdding(false)}><Text style={styles.ghostBtnText}>Cancel</Text></Pressable>
             <Pressable style={[styles.primaryBtn, styles.flex]} onPress={addPlannedExercise}><Text style={styles.primaryBtnText}>Add</Text></Pressable>
@@ -4797,81 +5105,374 @@ function stateColor(state) {
   return { color: '#181A14' };
 }
 
-function InsightsScreen({ data, analysis, setScreen, setSelectedInsight, setSelectedDashboardMetric, tutorialSeen, onDismissTutorial }) {
-  const [insightTab, setInsightTab] = useState('current');
-  const [range, setRange] = useState('week');
-  const rows = orderedRows(analysis);
-  const history = data.checkInInsightHistory || [];
-  const adaptation = analysis.adaptationInsight || {};
-  const adaptationCopy = athleteAdaptationCopy(adaptation);
-  const cr = analysis.currentRead || {};
-  const perfPoints = metricSeries(analysis, 'performance').map((point) => point.value);
+function fmtMetricVal(v) {
+  if (!Number.isFinite(v)) return '';
+  if (Math.abs(v) >= 100) return String(Math.round(v));
+  if (Math.abs(v) >= 10) return v.toFixed(1).replace(/\.0$/, '');
+  return v.toFixed(2).replace(/\.?0+$/, '');
+}
 
-  if (insightTab === 'history') {
+const OUTPUT_KEYS = ['performance', 'height_or_distance', 'rsi', 'ft', 'sprint_time', 'bar_velocity', 'weight'];
+
+function primaryOutputSeries(analysis) {
+  let best = null;
+  OUTPUT_KEYS.forEach((key) => {
+    const pts = metricSeries(analysis, key).filter((point) => Number.isFinite(point.value));
+    if (pts.length >= 2 && (!best || pts.length > best.pts.length)) best = { key, pts };
+  });
+  return best;
+}
+
+function InsightChart({ analysis }) {
+  const best = primaryOutputSeries(analysis);
+  if (!best) {
+    return <Text style={styles.muted}>Log a couple of results and your performance trend will appear here.</Text>;
+  }
+  const perf = best.pts;
+  const loadPts = metricSeries(analysis, 'load').filter((point) => Number.isFinite(point.value));
+  const dates = [...new Set([...perf, ...loadPts].map((point) => point.date))].sort();
+  const W = 300;
+  const H = 152;
+  const top = 12;
+  const bottom = 24;
+  const left = 32;
+  const right = 10;
+  const xi = (d) => (dates.length <= 1 ? left + (W - left - right) / 2 : left + dates.indexOf(d) * (W - left - right) / (dates.length - 1));
+  const axis = (pts) => {
+    const vals = pts.map((point) => point.value);
+    const mn = Math.min(...vals);
+    const mx = Math.max(...vals);
+    const rng = (mx - mn) || 1;
+    return { fn: (v) => (H - bottom) - ((v - mn) / rng) * ((H - bottom) - top), mn, mx };
+  };
+  const ps = axis(perf);
+  const py = ps.fn;
+  let perfLine = `M${xi(perf[0].date)} ${py(perf[0].value)}`;
+  perf.slice(1).forEach((point) => { perfLine += ` L${xi(point.date)} ${py(point.value)}`; });
+  const perfArea = `${perfLine} L${xi(perf[perf.length - 1].date)} ${H - bottom} L${xi(perf[0].date)} ${H - bottom} Z`;
+  let loadArea = '';
+  if (loadPts.length >= 2) {
+    const ls = axis(loadPts);
+    loadArea = `M${xi(loadPts[0].date)} ${ls.fn(loadPts[0].value)}`;
+    loadPts.slice(1).forEach((point) => { loadArea += ` L${xi(point.date)} ${ls.fn(point.value)}`; });
+    loadArea += ` L${xi(loadPts[loadPts.length - 1].date)} ${H - bottom} L${xi(loadPts[0].date)} ${H - bottom} Z`;
+  }
+  const last = perf[perf.length - 1];
+  const lastX = xi(last.date);
+  return (
+    <View>
+      <View style={styles.chartLegend}>
+        <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#1F8A3E' }]} /><Text style={styles.legendText}>{formatMetricName(best.key)}</Text></View>
+        {loadPts.length >= 2 ? <View style={styles.legendItem}><View style={[styles.legendBar, { backgroundColor: '#B6B3A6' }]} /><Text style={styles.legendText}>Training load</Text></View> : null}
+      </View>
+      <View style={{ height: H }}>
+        <Svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`}>
+          <Line x1={left} y1={top} x2={left} y2={H - bottom} stroke="#E2DFD3" strokeWidth="1" />
+          <Line x1={left} y1={H - bottom} x2={W - right} y2={H - bottom} stroke="#E2DFD3" strokeWidth="1" />
+          {loadArea ? <Path d={loadArea} fill="#9A9A8E" opacity={0.16} /> : null}
+          <Path d={perfArea} fill="#1F8A3E" opacity={0.1} />
+          <Path d={perfLine} fill="none" stroke="#1F8A3E" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+          <Circle cx={lastX} cy={py(last.value)} r="4.5" fill="#1F8A3E" />
+          <SvgText x={left - 5} y={top + 3} fill="#9A9A8E" fontSize="9" textAnchor="end">{fmtMetricVal(ps.mx)}</SvgText>
+          <SvgText x={left - 5} y={H - bottom} fill="#9A9A8E" fontSize="9" textAnchor="end">{fmtMetricVal(ps.mn)}</SvgText>
+          <SvgText x={left} y={H - 8} fill="#9A9A8E" fontSize="9" textAnchor="start">{dateShort(dates[0])}</SvgText>
+          <SvgText x={W - right} y={H - 8} fill="#9A9A8E" fontSize="9" textAnchor="end">{dateShort(dates[dates.length - 1])}</SvgText>
+          <SvgText x={lastX} y={py(last.value) - 8} fill="#1F8A3E" fontSize="11" fontWeight="bold" textAnchor={lastX > W - 40 ? 'end' : 'middle'}>{fmtMetricVal(last.value)}</SvgText>
+        </Svg>
+      </View>
+    </View>
+  );
+}
+
+// ---- Block read surface (PR7): one scannable card per read = label + plain sentence + one visual ----
+
+function formatEvidenceLabel(key) {
+  return String(key).replace(/([A-Z])/g, ' $1').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase()).trim();
+}
+
+function ReadEvidence({ read }) {
+  const evidence = read.evidence || {};
+  const scalarItems = Object.entries(evidence).filter(([, value]) => value !== null && typeof value !== 'object');
+  const shares = evidence.shares && typeof evidence.shares === 'object' ? evidence.shares : null;
+  return (
+    <View style={styles.evidenceBox}>
+      {scalarItems.map(([key, value]) => (
+        <View key={key} style={styles.evidenceRow}>
+          <Text style={styles.evidenceKey}>{formatEvidenceLabel(key)}</Text>
+          <Text style={styles.evidenceVal}>{typeof value === 'number' ? (Math.round(value * 100) / 100) : String(value)}</Text>
+        </View>
+      ))}
+      {shares ? Object.entries(shares).map(([key, value]) => (
+        <View key={`share-${key}`} style={styles.evidenceRow}>
+          <Text style={styles.evidenceKey}>{formatEvidenceLabel(key)} share</Text>
+          <Text style={styles.evidenceVal}>{Math.round((Number(value) || 0) * 100)}%</Text>
+        </View>
+      )) : null}
+    </View>
+  );
+}
+
+function ReadViz({ viz }) {
+  if (!viz) return null;
+  if (viz.type === 'quality_radar') return <QualityRadarCard viz={viz} />;
+  if (viz.type === 'paired_bars') return <PairedBarsCard viz={viz} />;
+  if (viz.type === 'dual_line') return <DualLineCard viz={viz} />;
+  if (viz.type === 'pain_line') return <PainLineCard viz={viz} />;
+  return null;
+}
+
+function ProgrammeReadCard({ read, headline }) {
+  const [showEvidence, setShowEvidence] = useState(false);
+  if (!read) return null;
+  return (
+    <View style={[styles.card, headline && styles.readCardHeadline]}>
+      <View style={styles.rowBetween}>
+        <Text style={styles.readCardLabel}>{read.title}</Text>
+        {read.confidence ? <Text style={styles.readConfidence}>{read.confidence}</Text> : null}
+      </View>
+      <Text style={styles.readSentence}>{read.sentence}</Text>
+      <ReadViz viz={read.viz} />
+      <Pressable onPress={() => setShowEvidence((value) => !value)}>
+        <Text style={styles.evlink}>{showEvidence ? 'Hide evidence' : 'See evidence →'}</Text>
+      </Pressable>
+      {showEvidence ? <ReadEvidence read={read} /> : null}
+    </View>
+  );
+}
+
+// HERO visual: programme FV coverage (filled) vs the deficit-derived target shape (dashed).
+function QualityRadarCard({ viz }) {
+  const axes = viz.axes || [];
+  if (axes.length < 3) return null;
+  const size = 264;
+  const cx = 132;
+  const cy = 120;
+  const R = 78;
+  const maxVal = Math.max(0.45, ...axes.flatMap((axis) => [axis.current || 0, axis.target || 0]));
+  const pointAt = (index, value, radius = R) => {
+    const angle = -Math.PI / 2 + (index / axes.length) * Math.PI * 2;
+    const r = (Math.max(0, value) / maxVal) * radius;
+    return [cx + Math.cos(angle) * r, cy + Math.sin(angle) * r];
+  };
+  const polygon = (key) => axes
+    .map((axis, index) => pointAt(index, axis[key]))
+    .map((point, index) => `${index === 0 ? 'M' : 'L'}${point[0].toFixed(1)} ${point[1].toFixed(1)}`)
+    .join(' ') + ' Z';
+  const ring = (scale) => axes
+    .map((_, index) => {
+      const angle = -Math.PI / 2 + (index / axes.length) * Math.PI * 2;
+      return [cx + Math.cos(angle) * R * scale, cy + Math.sin(angle) * R * scale];
+    })
+    .map((point, index) => `${index === 0 ? 'M' : 'L'}${point[0].toFixed(1)} ${point[1].toFixed(1)}`)
+    .join(' ') + ' Z';
+  return (
+    <View style={styles.reviewSvgFrame}>
+      <Svg width="100%" height={246} viewBox={`0 0 ${size} 246`}>
+        {[0.5, 1].map((scale) => <Path key={scale} d={ring(scale)} fill="none" stroke="#E3E3DE" strokeWidth="1" />)}
+        {axes.map((axis, index) => {
+          const angle = -Math.PI / 2 + (index / axes.length) * Math.PI * 2;
+          const lx = cx + Math.cos(angle) * (R + 20);
+          const ly = cy + Math.sin(angle) * (R + 16);
+          return (
+            <G key={axis.key}>
+              <Line x1={cx} y1={cy} x2={cx + Math.cos(angle) * R} y2={cy + Math.sin(angle) * R} stroke="#E8E8E4" strokeWidth="1" />
+              <SvgText x={lx} y={ly} fill="#5D5D58" fontSize="8.5" fontWeight="700" textAnchor="middle">{axis.label}</SvgText>
+            </G>
+          );
+        })}
+        <Path d={polygon('target')} fill="none" stroke="#B9A04A" strokeWidth="2" strokeDasharray="4 3" />
+        <Path d={polygon('current')} fill="#2FA04433" stroke="#24883B" strokeWidth="2.5" strokeLinejoin="round" />
+        {axes.map((axis, index) => {
+          const [x, y] = pointAt(index, axis.current);
+          return <Circle key={`pt-${axis.key}`} cx={x} cy={y} r="3" fill="#FFFFFF" stroke="#24883B" strokeWidth="2" />;
+        })}
+      </Svg>
+      <View style={styles.radarLegend}>
+        <View style={styles.legendItem}><View style={[styles.legendSwatch, { backgroundColor: '#24883B' }]} /><Text style={styles.legendText}>Your coverage</Text></View>
+        <View style={styles.legendItem}><View style={[styles.legendSwatch, { backgroundColor: '#B9A04A' }]} /><Text style={styles.legendText}>Target shape</Text></View>
+      </View>
+    </View>
+  );
+}
+
+function PairedBarsCard({ viz }) {
+  const bars = (viz.bars || []).filter((bar) => (bar.best || 0) > 0 || (bar.flat || 0) > 0);
+  if (!bars.length) return null;
+  const max = Math.max(1, ...bars.flatMap((bar) => [bar.best || 0, bar.flat || 0]));
+  return (
+    <View style={styles.pairedWrap}>
+      {bars.map((bar) => (
+        <View key={bar.label} style={styles.pairedRow}>
+          <Text style={styles.pairedLabel}>{bar.label}</Text>
+          <View style={styles.pairedBars}>
+            <View style={styles.pairedTrack}><View style={[styles.pairedFill, { width: `${Math.round(((bar.best || 0) / max) * 100)}%`, backgroundColor: '#1F8A3E' }]} /></View>
+            <View style={styles.pairedTrack}><View style={[styles.pairedFill, { width: `${Math.round(((bar.flat || 0) / max) * 100)}%`, backgroundColor: '#C9C4B6' }]} /></View>
+          </View>
+        </View>
+      ))}
+      <View style={styles.radarLegend}>
+        <View style={styles.legendItem}><View style={[styles.legendSwatch, { backgroundColor: '#1F8A3E' }]} /><Text style={styles.legendText}>Best weeks</Text></View>
+        <View style={styles.legendItem}><View style={[styles.legendSwatch, { backgroundColor: '#C9C4B6' }]} /><Text style={styles.legendText}>Flat weeks</Text></View>
+      </View>
+    </View>
+  );
+}
+
+function DualLineCard({ viz }) {
+  const series = (viz.series || []).filter((line) => (line.points || []).some((point) => point.y != null));
+  if (!series.length) return null;
+  const width = 300;
+  const height = 120;
+  const padX = 12;
+  const padY = 14;
+  const maxX = Math.max(1, ...series.flatMap((line) => line.points.map((point) => point.x)));
+  const linePath = (line) => {
+    const ys = line.points.map((point) => point.y).filter((value) => value != null);
+    const min = Math.min(...ys);
+    const max = Math.max(...ys);
+    const span = max - min || 1;
+    return line.points
+      .filter((point) => point.y != null)
+      .map((point, index) => {
+        const x = padX + (point.x / maxX) * (width - 2 * padX);
+        const y = height - padY - ((point.y - min) / span) * (height - 2 * padY);
+        return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`;
+      })
+      .join(' ');
+  };
+  return (
+    <View style={styles.reviewSvgFrame}>
+      <Svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`}>
+        {series.map((line) => <Path key={line.label} d={linePath(line)} fill="none" stroke={line.color} strokeWidth="2.5" strokeLinejoin="round" />)}
+      </Svg>
+      <View style={styles.radarLegend}>
+        {series.map((line) => (
+          <View key={line.label} style={styles.legendItem}><View style={[styles.legendSwatch, { backgroundColor: line.color }]} /><Text style={styles.legendText}>{line.label}</Text></View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function PainLineCard({ viz }) {
+  const points = (viz.points || []).filter((point) => point.pain != null);
+  if (points.length < 2) return null;
+  const width = 300;
+  const height = 132;
+  const padX = 12;
+  const padY = 14;
+  const count = points.length;
+  const xAt = (index) => padX + (index / (count - 1)) * (width - 2 * padX);
+  const yPain = (value) => height - padY - (value / 10) * (height - 2 * padY);
+  const tolerated = viz.tolerated || 0;
+  const stressMax = Math.max(1, ...points.map((point) => point.stress || 0));
+  const yStress = (value) => height - padY - ((value || 0) / stressMax) * (height - 2 * padY);
+  const painPath = points.map((point, index) => `${index === 0 ? 'M' : 'L'}${xAt(index).toFixed(1)} ${yPain(point.pain).toFixed(1)}`).join(' ');
+  const stressPath = points.map((point, index) => `${index === 0 ? 'M' : 'L'}${xAt(index).toFixed(1)} ${yStress(point.stress).toFixed(1)}`).join(' ');
+  return (
+    <View style={styles.reviewSvgFrame}>
+      <Svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`}>
+        <Rect x={padX} y={yPain(tolerated)} width={width - 2 * padX} height={Math.max(0, (height - padY) - yPain(tolerated))} fill="#EEF5EF" />
+        <Line x1={padX} y1={yPain(tolerated)} x2={width - padX} y2={yPain(tolerated)} stroke="#9FC6A6" strokeWidth="1" strokeDasharray="3 3" />
+        <Path d={stressPath} fill="none" stroke="#C9A24A" strokeWidth="1.5" strokeDasharray="4 3" />
+        <Path d={painPath} fill="none" stroke="#E13F32" strokeWidth="2.5" strokeLinejoin="round" />
+        {points.map((point, index) => <Circle key={index} cx={xAt(index)} cy={yPain(point.pain)} r="2.6" fill="#FFFFFF" stroke="#E13F32" strokeWidth="1.5" />)}
+      </Svg>
+      <View style={styles.radarLegend}>
+        <View style={styles.legendItem}><View style={[styles.legendSwatch, { backgroundColor: '#E13F32' }]} /><Text style={styles.legendText}>Knee pain</Text></View>
+        <View style={styles.legendItem}><View style={[styles.legendSwatch, { backgroundColor: '#C9A24A' }]} /><Text style={styles.legendText}>Reactive load</Text></View>
+        <View style={styles.legendItem}><View style={[styles.legendSwatch, { backgroundColor: '#CFE0D2' }]} /><Text style={styles.legendText}>Tolerated</Text></View>
+      </View>
+    </View>
+  );
+}
+
+function BlockReadView({ reads, blockContext, showMore, setShowMore }) {
+  if (!reads || !reads.hasData || !reads.headline) {
     return (
-      <View style={styles.screen}>
-        <Text style={styles.h1}>Trends</Text>
-        <Pressable onPress={() => setInsightTab('current')}><Text style={styles.textLink}>← Back to trends</Text></Pressable>
-        <CheckInInsightHistory history={history} />
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Collecting your block</Text>
+        <Text style={styles.bodyText}>Plan a block and log a few check-ins and results. Impuls will read whether it's working, what's driving it, and where your deficit is.</Text>
       </View>
     );
   }
+  const supporting = reads.supporting || [];
+  const more = reads.more || [];
+  return (
+    <>
+      {blockContext ? <Text style={styles.exPrescription}>{blockContext}</Text> : null}
+      <ProgrammeReadCard read={reads.headline} headline />
+      {supporting.map((read) => <ProgrammeReadCard key={read.id} read={read} />)}
+      {more.length ? (
+        <>
+          <Pressable style={styles.centerLink} onPress={() => setShowMore(!showMore)}>
+            <Text style={styles.centerLinkText}>{showMore ? 'Show less' : `More (${more.length})`}</Text>
+          </Pressable>
+          {showMore ? more.map((read) => <ProgrammeReadCard key={read.id} read={read} />) : null}
+        </>
+      ) : null}
+    </>
+  );
+}
+
+function SessionReadView({ analysis }) {
+  const review = analysis.checkInReview || {};
+  const theme = review.theme || {};
+  const extras = analysis.sessionExtras || {};
+  if (!review.checkInId) {
+    return (
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>No check-in yet</Text>
+        <Text style={styles.bodyText}>Log a quick check-in or a result and your session read appears here.</Text>
+      </View>
+    );
+  }
+  return (
+    <>
+      {extras.pb ? (
+        <View style={[styles.card, styles.pbCard]}>
+          <Text style={styles.pbText}>★ New best — performance {pretty(extras.pb.value, 1)} (was {pretty(extras.pb.previous, 1)})</Text>
+        </View>
+      ) : null}
+      <View style={styles.card}>
+        <Text style={styles.readCardLabel}>{theme.title || 'Today'}</Text>
+        <Text style={styles.readSentence}>{theme.signal}</Text>
+        {review.visual ? <CheckInReviewVisual visual={review.visual} /> : null}
+        {theme.meaning ? <Text style={styles.metricExplain}>{theme.meaning}</Text> : null}
+        {extras.mismatch ? <Text style={styles.metricMeaning}>{extras.mismatch.sentence}</Text> : null}
+      </View>
+    </>
+  );
+}
+
+function InsightsScreen({ data, analysis, setScreen, setSelectedInsight, setSelectedDashboardMetric, tutorialSeen, onDismissTutorial }) {
+  const [mode, setMode] = useState('block');
+  const [showMore, setShowMore] = useState(false);
+  const reads = analysis.programmeReads || {};
+  const blk = currentBlock(data.programme);
+  const wks = blk?.weeks || [];
+  const wkIdx = wks.findIndex((weekItem) => weekItem.id === data.programme.selected_week_id);
+  const blockContext = blk ? `${blk.block_name || 'Current block'}${wks.length ? ` · Week ${(wkIdx >= 0 ? wkIdx : 0) + 1} of ${wks.length}` : ''}` : null;
 
   return (
     <View style={styles.screen}>
       <View style={styles.rowBetween}>
         <Text style={styles.h1}>Trends</Text>
         <View style={styles.segWrap}>
-          {['Week', 'Month', 'Year'].map((r) => {
-            const on = range === r.toLowerCase();
+          {[['block', 'Block'], ['session', 'Session']].map(([id, label]) => {
+            const on = mode === id;
             return (
-              <Pressable key={r} style={[styles.segBtn, on && styles.segBtnOn]} onPress={() => setRange(r.toLowerCase())}>
-                <Text style={[styles.segBtnText, on && styles.segBtnTextOn]}>{r}</Text>
+              <Pressable key={id} style={[styles.segBtn, on && styles.segBtnOn]} onPress={() => setMode(id)}>
+                <Text style={[styles.segBtnText, on && styles.segBtnTextOn]}>{label}</Text>
               </Pressable>
             );
           })}
         </View>
       </View>
 
-      {rows.length < 2 ? (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Collecting your story</Text>
-          <Text style={styles.bodyText}>Log a check-in and a result on the same day. After a few pairs, Impuls will show how your training is trending.</Text>
-        </View>
-      ) : (
-        <>
-          <Pressable style={styles.card} onPress={() => { setSelectedInsight('adaptation'); setScreen('detail'); }}>
-            <Text style={styles.label}>This week · the story</Text>
-            <Text style={styles.storyHeadline}>{adaptationCopy.headline}</Text>
-            <TrendLine values={perfPoints} />
-            <Text style={styles.evlink}>See the evidence →</Text>
-          </Pressable>
-
-          <View style={styles.statRow}>
-            <View style={styles.statCell}><Text style={styles.statCellLabel}>Performance</Text><Text style={[styles.statCellValue, stateColor(cr.performance)]}>{shortState(cr.performance)}</Text></View>
-            <View style={styles.statCell}><Text style={styles.statCellLabel}>Load</Text><Text style={styles.statCellValue}>{shortState(cr.loadStress)}</Text></View>
-            <View style={styles.statCell}><Text style={styles.statCellLabel}>Recovery</Text><Text style={[styles.statCellValue, stateColor(cr.fatigue)]}>{shortState(cr.fatigue)}</Text></View>
-          </View>
-
-          <Text style={styles.label}>More signals</Text>
-          <Pressable style={styles.signalRow} onPress={() => { setSelectedInsight('irritation'); setScreen('detail'); }}>
-            <View style={[styles.signalDot, { backgroundColor: '#C2422B' }]} />
-            <Text style={[styles.cardTitle, styles.flex]}>Pain &amp; irritation</Text>
-            <Text style={styles.chevron}>›</Text>
-          </Pressable>
-          <Pressable style={styles.signalRow} onPress={() => { setSelectedInsight('adaptation'); setScreen('detail'); }}>
-            <View style={[styles.signalDot, { backgroundColor: '#5B4FC2' }]} />
-            <Text style={[styles.cardTitle, styles.flex]}>Adaptation</Text>
-            <Text style={styles.chevron}>›</Text>
-          </Pressable>
-
-          {history.length ? (
-            <Pressable style={styles.centerLink} onPress={() => setInsightTab('history')}>
-              <Text style={styles.centerLinkText}>View saved check-in insights</Text>
-            </Pressable>
-          ) : null}
-        </>
-      )}
+      {mode === 'block'
+        ? <BlockReadView reads={reads} blockContext={blockContext} showMore={showMore} setShowMore={setShowMore} />
+        : <SessionReadView analysis={analysis} />}
     </View>
   );
 }
@@ -5082,7 +5683,6 @@ function InsightSectionDetail({ data, analysis, section, setScreen, setSelectedD
             <Text style={styles.label}>Adaptation State</Text>
             <Text style={styles.h1}>{athleteAdaptationCopy(adaptation).headline}</Text>
             <Text style={styles.bodyText}>{athleteAdaptationCopy(adaptation).body}</Text>
-            <Text style={styles.muted}>{athleteAdaptationCopy(adaptation).action}</Text>
             <Text style={styles.evidenceBadge}>{adaptation.confidence || adaptation.status || 'Collecting'}</Text>
           </View>
           <AdaptationStateVisual adaptation={adaptation} analysis={analysis} />
@@ -6278,61 +6878,239 @@ function PersonalBestItem({ field, best, manualValue }) {
   );
 }
 
+// Per-type load fields, driven by TYPE_META.fields so all 8 movement types render
+// the right inputs without a branch per type.
 function ExerciseFields({ draft, update }) {
-  if (draft.movement_type === 'plyometric') {
-    return (
+  const meta = TYPE_META[draft.movement_type] || TYPE_META.skill;
+  const fields = meta.fields || [];
+  const has = (field) => fields.includes(field);
+  return (
+    <>
       <View style={styles.twoCol}>
-        <Input label="Sets" value={String(draft.sets || '')} onChangeText={(value) => update('sets', value)} />
-        <Input label="Contacts" value={String(draft.contacts)} onChangeText={(value) => update('contacts', value)} />
-        <Input label="Intent %" value={String(draft.intent_percent)} onChangeText={(value) => update('intent_percent', value)} />
+        {has('sets') ? <Input label="Sets" value={String(draft.sets || '')} onChangeText={(value) => update('sets', value)} /> : null}
+        {has('reps') ? <Input label="Reps" value={String(draft.reps || '')} onChangeText={(value) => update('reps', value)} /> : null}
+        {has('contacts') ? <Input label="Contacts" value={String(draft.contacts || '')} onChangeText={(value) => update('contacts', value)} /> : null}
+        {has('distance') ? <Input label="Distance (m)" value={String(draft.distance || '')} onChangeText={(value) => update('distance', value)} /> : null}
+        {has('duration') ? <Input label="Duration (min)" value={String(draft.duration_minutes || '')} onChangeText={(value) => update('duration_minutes', value)} /> : null}
+        {has('intent') ? <Input label="Intent %" value={String(draft.intent_percent || '')} onChangeText={(value) => update('intent_percent', value)} /> : null}
       </View>
-    );
-  }
-  if (draft.movement_type === 'power_ballistic') {
-    return (
-      <>
-        <View style={styles.twoCol}>
-          <Input label="Sets" value={String(draft.sets || '')} onChangeText={(value) => update('sets', value)} />
-          <Input label="Reps" value={String(draft.reps)} onChangeText={(value) => update('reps', value)} />
-        </View>
-        <View style={styles.twoCol}>
-          <Input label="Intensity" value={String(draft.intensity_value)} onChangeText={(value) => update('intensity_value', value)} />
-          <Input label="Intent" value={String(draft.intent_percent)} onChangeText={(value) => update('intent_percent', value)} />
-        </View>
-        <View style={styles.inputWrap}>
-          <Text style={styles.inputLabel}>Intensity unit</Text>
-          <ChipWrap options={intensityUnitOptions} value={draft.intensity_unit || '%'} onChange={(value) => update('intensity_unit', value)} />
-        </View>
-      </>
-    );
-  }
-  if (draft.movement_type === 'strength') {
-    return (
-      <>
-        <View style={styles.twoCol}>
-          <Input label="Sets" value={String(draft.sets || '')} onChangeText={(value) => update('sets', value)} />
-          <Input label="Reps" value={String(draft.reps)} onChangeText={(value) => update('reps', value)} />
-        </View>
-        <View style={styles.twoCol}>
-          <Input label="Intensity" value={String(draft.intensity_value)} onChangeText={(value) => update('intensity_value', value)} />
-        </View>
-        <View style={styles.inputWrap}>
-          <Text style={styles.inputLabel}>Intensity unit</Text>
-          <ChipWrap options={intensityUnitOptions} value={draft.intensity_unit || '%'} onChange={(value) => update('intensity_unit', value)} />
-        </View>
+      {has('intensity') ? (
+        <>
+          <View style={styles.twoCol}>
+            <Input label="Intensity" value={String(draft.intensity_value || '')} onChangeText={(value) => update('intensity_value', value)} />
+          </View>
+          <View style={styles.inputWrap}>
+            <Text style={styles.inputLabel}>Intensity unit</Text>
+            <ChipWrap options={intensityUnitOptions} value={draft.intensity_unit || '%'} onChange={(value) => update('intensity_unit', value)} />
+          </View>
+        </>
+      ) : null}
+      {has('rom') ? (
         <View style={styles.inputWrap}>
           <Text style={styles.inputLabel}>ROM</Text>
-          <ChipWrap options={romOptions} value={draft.rom || 'full'} onChange={(value) => update('rom', value)} />
+          <ChipWrap options={ROM_OPTIONS} value={draft.rom || 'full'} onChange={(value) => update('rom', value)} />
         </View>
-      </>
-    );
-  }
+      ) : null}
+      {has('tempo') ? <Input label="Tempo (e.g. 3-1-X-0)" value={String(draft.tempo || '')} onChangeText={(value) => update('tempo', value)} /> : null}
+    </>
+  );
+}
+
+// Convert a library entry to an exercise-draft patch: type + FV tags + smart default fields.
+function libraryEntryToDraft(entry) {
+  return {
+    movement_type: entry.type,
+    exercise_name: entry.name,
+    quality: entry.quality || defaultQualityForType(entry.type),
+    specificity: entry.specificity || 'general',
+    laterality: entry.laterality || 'bilateral',
+    variation: '',
+    ...defaultFieldsForType(entry.type),
+  };
+}
+
+// Editable Force-Velocity coverage tags. Pre-filled from the library; user-overridable.
+function ExerciseTagsEditor({ draft, update }) {
   return (
-    <View style={styles.twoCol}>
-      <Input label="Sets" value={String(draft.sets || '')} onChangeText={(value) => update('sets', value)} />
-      <Input label="Duration" value={String(draft.duration_minutes)} onChangeText={(value) => update('duration_minutes', value)} />
-      <Input label="Intent" value={String(draft.intent_percent)} onChangeText={(value) => update('intent_percent', value)} />
+    <View style={styles.tagsCard}>
+      <Text style={styles.tagsTitle}>Coverage tags</Text>
+      <Text style={styles.inputLabel}>FV quality</Text>
+      <ChipWrap options={QUALITY_OPTIONS} value={draft.quality || ''} onChange={(value) => update('quality', value)} />
+      <Text style={styles.inputLabel}>Specificity</Text>
+      <ChipWrap options={SPECIFICITY_OPTIONS} value={draft.specificity || 'general'} onChange={(value) => update('specificity', value)} />
+      <Text style={styles.inputLabel}>Laterality</Text>
+      <ChipWrap options={LATERALITY_OPTIONS} value={draft.laterality || 'bilateral'} onChange={(value) => update('laterality', value)} />
+      <Input label="Variation (optional)" value={String(draft.variation || '')} onChangeText={(value) => update('variation', value)} />
     </View>
+  );
+}
+
+// Library-first exercise builder: tap to open the searchable picker, then edit
+// per-type load fields and coverage tags. Used by every add/edit-exercise flow.
+function ExerciseDraftEditor({ draft, update, showTags = true }) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const applyPick = (entry) => {
+    Object.entries(libraryEntryToDraft(entry)).forEach(([key, value]) => update(key, value));
+    setPickerOpen(false);
+  };
+  const meta = TYPE_META[draft.movement_type] || {};
+  const chosen = !!draft.exercise_name;
+  return (
+    <>
+      <Pressable style={styles.libraryPickBtn} onPress={() => setPickerOpen(true)}>
+        <Text style={styles.libraryPickText}>{chosen ? draft.exercise_name : 'Choose exercise'}</Text>
+        <Text style={styles.libraryPickMeta}>{chosen ? (meta.label || 'Exercise') : 'Search the library or create custom'}</Text>
+      </Pressable>
+      {chosen ? (
+        <>
+          <ExerciseFields draft={draft} update={update} />
+          {showTags ? <ExerciseTagsEditor draft={draft} update={update} /> : null}
+        </>
+      ) : null}
+      <ExercisePicker visible={pickerOpen} onClose={() => setPickerOpen(false)} onPick={applyPick} />
+    </>
+  );
+}
+
+// Searchable, pre-tagged library picker. Library-first selection; creating a custom
+// exercise requires choosing a type (which sets its load formula + default quality).
+function ExercisePicker({ visible, onClose, onPick }) {
+  const [query, setQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [customMode, setCustomMode] = useState(false);
+  const [customName, setCustomName] = useState('');
+  const [customType, setCustomType] = useState('');
+
+  function reset() {
+    setQuery('');
+    setTypeFilter('');
+    setCustomMode(false);
+    setCustomName('');
+    setCustomType('');
+  }
+  function close() { reset(); onClose(); }
+  function pick(entry) { reset(); onPick(entry); }
+  const canCreate = customName.trim() && customType;
+  function createCustom() {
+    if (!canCreate) return;
+    pick({ name: customName.trim(), type: customType, quality: defaultQualityForType(customType), specificity: 'general', laterality: 'bilateral' });
+  }
+
+  const results = searchLibrary(query, typeFilter);
+  const grouped = FAMILY_ORDER
+    .map((family) => [family, results.filter((entry) => entry.family === family)])
+    .filter(([, items]) => items.length);
+  const typeFilterOptions = [['', 'All'], ...TYPE_OPTIONS];
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={close}>
+      <View style={styles.pickerBackdrop}>
+        <View style={styles.pickerSheet}>
+          <View style={styles.pickerHeader}>
+            <Text style={styles.pickerTitle}>{customMode ? 'Create custom' : 'Choose exercise'}</Text>
+            <Pressable onPress={close}><Text style={styles.pickerClose}>Done</Text></Pressable>
+          </View>
+          {customMode ? (
+            <ScrollView style={styles.pickerScroll} keyboardShouldPersistTaps="handled">
+              <Input label="Exercise name" value={customName} onChangeText={setCustomName} />
+              <Text style={styles.inputLabel}>Type — required (sets load + coverage)</Text>
+              <ChipWrap options={TYPE_OPTIONS} value={customType} onChange={setCustomType} />
+              {customType ? <Text style={styles.pickerHint}>Default quality: {QUALITY_META[defaultQualityForType(customType)]?.label || 'untagged'}</Text> : null}
+              <Pressable style={[styles.primaryBtn, !canCreate && styles.btnDisabled]} disabled={!canCreate} onPress={createCustom}>
+                <Text style={styles.primaryBtnText}>Add custom exercise</Text>
+              </Pressable>
+              <Pressable style={styles.pickerLink} onPress={() => setCustomMode(false)}><Text style={styles.pickerLinkText}>‹ Back to library</Text></Pressable>
+            </ScrollView>
+          ) : (
+            <>
+              <TextInput style={styles.pickerSearch} placeholder="Search exercises…" placeholderTextColor="#9A9A93" value={query} onChangeText={setQuery} />
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pickerFilters} contentContainerStyle={styles.pickerFiltersInner}>
+                {typeFilterOptions.map(([id, label]) => (
+                  <Pressable key={id || 'all'} style={[styles.pickerFilter, typeFilter === id && styles.pickerFilterSel]} onPress={() => setTypeFilter(id)}>
+                    <Text style={[styles.pickerFilterText, typeFilter === id && styles.pickerFilterTextSel]}>{label}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+              <ScrollView style={styles.pickerScroll} keyboardShouldPersistTaps="handled">
+                {grouped.map(([family, items]) => (
+                  <View key={family} style={styles.pickerGroup}>
+                    <Text style={styles.pickerGroupTitle}>{family}</Text>
+                    {items.map((entry) => (
+                      <Pressable key={entry.name} style={styles.pickerRow} onPress={() => pick(entry)}>
+                        <View style={styles.flex}>
+                          <Text style={styles.pickerRowName}>{entry.name}</Text>
+                          <Text style={styles.pickerRowMeta}>{(TYPE_META[entry.type] || {}).label} · {entry.specificity}{entry.laterality === 'unilateral' ? ' · single-leg' : ''}</Text>
+                        </View>
+                        <View style={styles.qualityTag}><Text style={styles.qualityTagText}>{QUALITY_META[entry.quality]?.label || '—'}</Text></View>
+                      </Pressable>
+                    ))}
+                  </View>
+                ))}
+                {grouped.length === 0 ? <Text style={styles.pickerEmpty}>No matches. Try "Create custom".</Text> : null}
+                <Pressable style={styles.pickerCustomBtn} onPress={() => { setCustomMode(true); setCustomName(query); }}>
+                  <Text style={styles.pickerCustomText}>+ Create custom exercise</Text>
+                </Pressable>
+              </ScrollView>
+            </>
+          )}
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// Live load-shape preview: one bar per week showing total planned load across the block.
+function LoadShapePreview({ block, currentWeekId }) {
+  const weeks = (block?.weeks || []).slice().sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
+  if (!weeks.length) return null;
+  const loads = weeks.map((week) => jsWeekLoad(week));
+  const max = Math.max(...loads, 1);
+  return (
+    <View style={styles.loadShapeCard}>
+      <Text style={styles.tagsTitle}>Load shape · weekly planned load</Text>
+      <View style={styles.loadShapeBars}>
+        {weeks.map((week, index) => {
+          const height = Math.max(4, Math.round((loads[index] / max) * 56));
+          const active = week.id === currentWeekId;
+          return (
+            <View key={week.id} style={styles.loadShapeCol}>
+              <View style={styles.loadShapeTrack}>
+                <View style={[styles.loadShapeBar, { height }, active && styles.loadShapeBarActive]} />
+              </View>
+              <Text style={[styles.loadShapeLabel, active && styles.loadShapeLabelActive]}>{index + 1}</Text>
+            </View>
+          );
+        })}
+      </View>
+      <Text style={styles.loadShapeMeta}>Each bar is a week's total planned load. Build the shape you want — steady build, wave, or build-then-deload.</Text>
+    </View>
+  );
+}
+
+// Pick a curated session template (pre-tagged exercises) to drop onto a day.
+function TemplatePicker({ visible, onClose, onPick }) {
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.pickerBackdrop}>
+        <View style={styles.pickerSheet}>
+          <View style={styles.pickerHeader}>
+            <Text style={styles.pickerTitle}>Session templates</Text>
+            <Pressable onPress={onClose}><Text style={styles.pickerClose}>Done</Text></Pressable>
+          </View>
+          <ScrollView style={styles.pickerScroll}>
+            {SESSION_TEMPLATES.map((template) => (
+              <Pressable key={template.name} style={styles.pickerRow} onPress={() => onPick(template)}>
+                <View style={styles.flex}>
+                  <Text style={styles.pickerRowName}>{template.name}</Text>
+                  <Text style={styles.pickerRowMeta}>{template.focus} · {template.items.length} exercises</Text>
+                </View>
+                <Text style={styles.chevron}>›</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -6865,7 +7643,7 @@ const SERIF = Platform.select({ ios: 'Georgia', android: 'serif', default: 'Geor
 const MONO = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' });
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#F7F7F5' },
+  safe: { flex: 1, backgroundColor: '#F2EEE5' },
   flex: { flex: 1 },
   loading: { margin: 24, fontWeight: '800' },
   backendState: { gap: 14, padding: 24 },
@@ -6877,7 +7655,7 @@ const styles = StyleSheet.create({
   onboardingSteps: { flexDirection: 'row', gap: 8 },
   onboardingStepDot: { backgroundColor: '#D9D9D4', borderRadius: 999, height: 8, width: 26 },
   onboardingStepDotActive: { backgroundColor: '#111111', width: 42 },
-  onboardingInfoCard: { backgroundColor: '#F7F7F5', borderColor: '#E8E8E4', borderRadius: 14, borderWidth: 1, gap: 6, padding: 12 },
+  onboardingInfoCard: { backgroundColor: '#F2EEE5', borderColor: '#E8E8E4', borderRadius: 14, borderWidth: 1, gap: 6, padding: 12 },
   tutorialHint: { alignItems: 'flex-start', backgroundColor: '#ECF8EF', borderColor: '#CFE8D4', borderRadius: 16, borderWidth: 1, flexDirection: 'row', gap: 12, padding: 14 },
   hintDismiss: { backgroundColor: '#111111', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7 },
   hintDismissText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
@@ -6885,14 +7663,14 @@ const styles = StyleSheet.create({
   screenSubtitle: { color: '#686862', fontSize: 15, fontWeight: '500', lineHeight: 21, fontFamily: SERIF },
   date: { marginTop: 10, fontSize: 14, fontWeight: '500', color: '#6D6D68', fontStyle: 'italic', fontFamily: SERIF },
   streak: { marginTop: 4, color: '#7A7A76', fontWeight: '700' },
-  heroCard: { backgroundColor: '#FFFDF7', borderColor: '#E6E4DC', borderWidth: 1, borderRadius: 16, padding: 18, minHeight: 126 },
+  heroCard: { backgroundColor: '#FBF8F0', borderColor: '#E6E4DC', borderWidth: 1, borderRadius: 16, padding: 18, minHeight: 126 },
   heroLabel: { color: '#6D6D68', fontSize: 12, fontWeight: '800' },
   heroScore: { color: '#1A1C16', fontSize: 34, fontWeight: '700', marginTop: 10, fontFamily: SERIF },
   heroScale: { color: '#9A9A8E', fontSize: 14 },
   heroCopy: { color: '#5E5E58', fontSize: 12, fontWeight: '700', marginTop: 8 },
   gauge: { position: 'absolute', right: 18, top: 32, width: 86, height: 8, backgroundColor: '#E6E4DC', borderRadius: 8 },
   gaugeFill: { height: 8, backgroundColor: '#1F8A3E', borderRadius: 8 },
-  panelAttached: { backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, marginTop: 12, padding: 16 },
+  panelAttached: { backgroundColor: '#FBF8F0', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, marginTop: 12, padding: 16 },
   greetingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
   avatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#1F8A3E', alignItems: 'center', justifyContent: 'center' },
   avatarText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700', fontFamily: SERIF },
@@ -6909,39 +7687,114 @@ const styles = StyleSheet.create({
   statCellValue: { color: '#181A14', fontSize: 17, fontWeight: '600', fontFamily: SERIF },
   primaryBtn: { backgroundColor: '#1F8A3E', borderRadius: 16, paddingVertical: 15, alignItems: 'center' },
   primaryBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', fontFamily: SERIF },
-  ghostBtn: { flex: 1, backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
+  ghostBtn: { flex: 1, backgroundColor: '#FBF8F0', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
   ghostBtnText: { color: '#181A14', fontSize: 15, fontWeight: '600', fontFamily: SERIF },
-  noticedCard: { flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, padding: 13 },
+  noticedCard: { flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#FBF8F0', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, padding: 13 },
   noticedIcon: { width: 30, height: 30, borderRadius: 9, backgroundColor: '#ECEADF', alignItems: 'center', justifyContent: 'center' },
   noticedMark: { color: '#1F8A3E', fontSize: 16, fontWeight: '700' },
   noticedText: { color: '#181A14', fontSize: 15, fontWeight: '600', fontFamily: SERIF },
   checkinTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  iconBack: { width: 34, height: 34, borderRadius: 17, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' },
+  iconBack: { width: 34, height: 34, borderRadius: 17, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', alignItems: 'center', justifyContent: 'center' },
   iconBackText: { fontSize: 22, color: '#111111', marginTop: -2 },
   qGroup: { gap: 10 },
   q: { fontSize: 19, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
   scale5: { flexDirection: 'row', gap: 5 },
-  scaleBtn: { flex: 1, height: 44, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FFFFFF', borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
+  scaleBtn: { flex: 1, height: 44, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
   scaleBtnSel: { backgroundColor: '#1F8A3E', borderColor: 'transparent' },
   scaleBtnWarn: { backgroundColor: '#9C6212', borderColor: 'transparent' },
   scaleBtnText: { fontSize: 14, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
   scaleBtnTextSel: { color: '#FFFFFF' },
   scaleEnds: { flexDirection: 'row', justifyContent: 'space-between' },
   toggleRow: { flexDirection: 'row', gap: 10 },
-  toggleBtn: { flex: 1, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FFFFFF', borderRadius: 14, paddingVertical: 13, alignItems: 'center' },
+  toggleBtn: { flex: 1, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 14, paddingVertical: 13, alignItems: 'center' },
   toggleBtnSel: { backgroundColor: '#181A14', borderColor: 'transparent' },
   toggleBtnText: { fontSize: 15, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
   toggleBtnTextSel: { color: '#F4F1E8' },
   painExtra: { gap: 10 },
+  metricMeaning: { fontSize: 15, fontWeight: '600', color: '#1F8A3E', fontFamily: SERIF, marginTop: 2 },
+  metricExplain: { fontSize: 12.5, color: '#74746F', fontFamily: SERIF, fontStyle: 'italic' },
+  readDayText: { fontSize: 14.5, color: '#5E5E58', fontFamily: SERIF, fontStyle: 'italic', lineHeight: 20 },
+  dateRow: { flexDirection: 'row', alignItems: 'stretch', gap: 8 },
+  dateNav: { width: 48, height: 52, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  dateNavText: { fontSize: 22, color: '#181A14', fontFamily: SERIF, lineHeight: 24 },
+  dateCenter: { flex: 1, height: 52, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  dateCenterText: { fontSize: 17, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
+  dateReset: { fontSize: 11, color: '#1F8A3E', fontFamily: MONO, letterSpacing: 0.3, marginTop: 1 },
+  libraryPickBtn: { borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 12, paddingVertical: 12, paddingHorizontal: 14, marginBottom: 10 },
+  libraryPickText: { fontSize: 16, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
+  libraryPickMeta: { fontSize: 11, color: '#74746F', fontFamily: MONO, letterSpacing: 0.3, marginTop: 2, textTransform: 'uppercase' },
+  tagsCard: { borderWidth: 1, borderColor: '#ECE7DA', backgroundColor: '#FBF8F0', borderRadius: 12, padding: 12, marginTop: 10, gap: 6 },
+  tagsTitle: { fontSize: 11, color: '#6F6F69', fontFamily: MONO, letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 2 },
+  qualityTag: { borderWidth: 1, borderColor: '#D9E6DC', backgroundColor: '#EEF5EF', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3, marginLeft: 8 },
+  qualityTagText: { fontSize: 10, color: '#1F7A40', fontFamily: MONO, letterSpacing: 0.2 },
+  btnDisabled: { opacity: 0.45 },
+  pickerBackdrop: { flex: 1, backgroundColor: 'rgba(24,26,20,0.35)', justifyContent: 'flex-end' },
+  pickerSheet: { backgroundColor: '#F2EEE5', borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 8, maxHeight: '88%' },
+  pickerHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  pickerTitle: { fontSize: 20, fontWeight: '700', color: '#181A14', fontFamily: SERIF },
+  pickerClose: { fontSize: 15, fontWeight: '700', color: '#1F8A3E', fontFamily: SERIF },
+  pickerSearch: { borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11, fontSize: 16, color: '#181A14', fontFamily: SERIF },
+  pickerFilters: { marginTop: 10, marginBottom: 4, flexGrow: 0 },
+  pickerFiltersInner: { gap: 7, paddingRight: 8 },
+  pickerFilter: { borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7 },
+  pickerFilterSel: { backgroundColor: '#181A14', borderColor: 'transparent' },
+  pickerFilterText: { fontSize: 12.5, color: '#5E5E58', fontFamily: SERIF },
+  pickerFilterTextSel: { color: '#F4F1E8' },
+  pickerScroll: { marginTop: 6 },
+  pickerGroup: { marginBottom: 14 },
+  pickerGroupTitle: { fontSize: 11, color: '#6F6F69', fontFamily: MONO, letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6 },
+  pickerRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#ECE7DA', backgroundColor: '#FBF8F0', borderRadius: 12, paddingVertical: 11, paddingHorizontal: 13, marginBottom: 7 },
+  pickerRowName: { fontSize: 15.5, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
+  pickerRowMeta: { fontSize: 11, color: '#74746F', fontFamily: MONO, letterSpacing: 0.2, marginTop: 2 },
+  pickerEmpty: { fontSize: 14, color: '#74746F', fontFamily: SERIF, fontStyle: 'italic', textAlign: 'center', marginVertical: 16 },
+  pickerCustomBtn: { borderWidth: 1, borderColor: '#1F8A3E', borderStyle: 'dashed', borderRadius: 12, paddingVertical: 13, alignItems: 'center', marginBottom: 24, marginTop: 2 },
+  pickerCustomText: { fontSize: 15, fontWeight: '700', color: '#1F8A3E', fontFamily: SERIF },
+  pickerHint: { fontSize: 12.5, color: '#74746F', fontFamily: SERIF, fontStyle: 'italic', marginTop: 4, marginBottom: 6 },
+  pickerLink: { paddingVertical: 12, alignItems: 'center', marginBottom: 24 },
+  pickerLinkText: { fontSize: 14, color: '#5E5E58', fontFamily: SERIF },
+  loadShapeCard: { borderWidth: 1, borderColor: '#ECE7DA', backgroundColor: '#FBF8F0', borderRadius: 14, padding: 14, marginBottom: 12 },
+  loadShapeBars: { flexDirection: 'row', alignItems: 'flex-end', gap: 6, height: 70, marginTop: 8 },
+  loadShapeCol: { flex: 1, alignItems: 'center', justifyContent: 'flex-end' },
+  loadShapeTrack: { height: 56, justifyContent: 'flex-end' },
+  loadShapeBar: { width: 16, borderRadius: 5, backgroundColor: '#CFE0D2' },
+  loadShapeBarActive: { backgroundColor: '#1F8A3E' },
+  loadShapeLabel: { fontSize: 10, color: '#9A9A93', fontFamily: MONO, marginTop: 4 },
+  loadShapeLabelActive: { color: '#1F8A3E' },
+  loadShapeMeta: { fontSize: 12, color: '#74746F', fontFamily: SERIF, fontStyle: 'italic', marginTop: 8, lineHeight: 17 },
+  readCardHeadline: { borderColor: '#CFE0D2', borderWidth: 1.5 },
+  readCardLabel: { fontSize: 11, color: '#6F6F69', fontFamily: MONO, letterSpacing: 0.5, textTransform: 'uppercase' },
+  readConfidence: { fontSize: 10, color: '#9A9A93', fontFamily: MONO, letterSpacing: 0.3 },
+  readSentence: { fontSize: 18, color: '#181A14', fontFamily: SERIF, lineHeight: 25, marginTop: 6, marginBottom: 4 },
+  evidenceBox: { marginTop: 8, borderTopWidth: 1, borderTopColor: '#ECE7DA', paddingTop: 8 },
+  evidenceRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 },
+  evidenceKey: { fontSize: 12.5, color: '#74746F', fontFamily: SERIF },
+  evidenceVal: { fontSize: 12.5, color: '#181A14', fontFamily: MONO },
+  radarLegend: { flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 14, marginTop: 6 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  legendSwatch: { width: 11, height: 11, borderRadius: 3 },
+  legendText: { fontSize: 11, color: '#5E5E58', fontFamily: MONO, letterSpacing: 0.2 },
+  pairedWrap: { marginTop: 10, gap: 10 },
+  pairedRow: { gap: 4 },
+  pairedLabel: { fontSize: 12, color: '#5E5E58', fontFamily: MONO, letterSpacing: 0.2 },
+  pairedBars: { gap: 3 },
+  pairedTrack: { height: 9, backgroundColor: '#F2EEE5', borderRadius: 5, overflow: 'hidden' },
+  pairedFill: { height: 9, borderRadius: 5 },
+  pbCard: { backgroundColor: '#F3F8F0', borderColor: '#CFE0D2', borderWidth: 1 },
+  pbText: { fontSize: 15.5, color: '#1F7A40', fontFamily: SERIF, fontWeight: '700' },
   segWrap: { flexDirection: 'row', backgroundColor: '#ECEADF', borderRadius: 999, padding: 4 },
   segBtn: { paddingVertical: 6, paddingHorizontal: 13, borderRadius: 999 },
-  segBtnOn: { backgroundColor: '#FFFDF7' },
+  segBtnOn: { backgroundColor: '#FBF8F0' },
   segBtnText: { fontSize: 11, color: '#6F6F69', fontFamily: MONO, textTransform: 'uppercase', letterSpacing: 0.4 },
   segBtnTextOn: { color: '#181A14' },
   storyHeadline: { fontSize: 21, fontWeight: '600', color: '#181A14', fontFamily: SERIF, lineHeight: 26, marginTop: 4 },
   evlink: { color: '#1F8A3E', fontSize: 11, fontFamily: MONO, textTransform: 'uppercase', letterSpacing: 0.4, marginTop: 12 },
-  signalRow: { flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, padding: 14 },
+  signalRow: { flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#FBF8F0', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, padding: 14 },
   signalDot: { width: 9, height: 9, borderRadius: 5 },
+  chartLegend: { flexDirection: 'row', gap: 16, marginTop: 12 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  legendDot: { width: 10, height: 10, borderRadius: 5 },
+  legendBar: { width: 14, height: 8, borderRadius: 2 },
+  legendText: { fontSize: 11, color: '#6F6F69', fontFamily: MONO, letterSpacing: 0.3 },
   adds: { borderWidth: 1, borderColor: '#D9D7CC', borderStyle: 'dashed', borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
   addsText: { color: '#5E5E58', fontSize: 15, fontFamily: SERIF },
   daySectionLabel: { color: '#6F6F69', fontSize: 11, fontWeight: '700', letterSpacing: 0.4, fontFamily: MONO, textTransform: 'uppercase', marginTop: 4 },
@@ -6952,23 +7805,23 @@ const styles = StyleSheet.create({
   editGap: { marginLeft: 14 },
   dangerText: { color: '#C2422B' },
   stepRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  stepBtn: { width: 34, height: 34, borderRadius: 17, borderWidth: 1, borderColor: '#E6E6E1', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFF' },
+  stepBtn: { width: 34, height: 34, borderRadius: 17, borderWidth: 1, borderColor: '#E6E6E1', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FBF8F0' },
   stepBtnText: { fontSize: 20, color: '#181A14' },
   stepVal: { fontSize: 18, fontWeight: '600', color: '#181A14', fontFamily: SERIF, minWidth: 20, textAlign: 'center' },
-  card: { backgroundColor: '#FFFFFF', borderColor: '#E6E6E1', borderRadius: 16, borderWidth: 1, padding: 16, gap: 12 },
-  authCard: { backgroundColor: '#FFFFFF', borderColor: '#DCEBDD', borderRadius: 16, borderWidth: 1, gap: 12, padding: 16 },
+  card: { backgroundColor: '#FBF8F0', borderColor: '#E6E6E1', borderRadius: 16, borderWidth: 1, padding: 16, gap: 12 },
+  authCard: { backgroundColor: '#FBF8F0', borderColor: '#DCEBDD', borderRadius: 16, borderWidth: 1, gap: 12, padding: 16 },
   authStatus: { backgroundColor: '#F1F1ED', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
   authStatusActive: { backgroundColor: '#E8F5EA' },
   authStatusText: { color: '#5E5E58', fontSize: 11, fontWeight: '900' },
   authStatusTextActive: { color: '#188131' },
   authActions: { flexDirection: 'row', gap: 8 },
-  authButton: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#CFCFCA', borderRadius: 8, borderWidth: 1, flex: 1, minHeight: 42, justifyContent: 'center', paddingHorizontal: 12 },
+  authButton: { alignItems: 'center', backgroundColor: '#FBF8F0', borderColor: '#CFCFCA', borderRadius: 8, borderWidth: 1, flex: 1, minHeight: 42, justifyContent: 'center', paddingHorizontal: 12 },
   authButtonDark: { backgroundColor: '#111111', borderColor: '#111111' },
   authButtonText: { color: '#111111', fontWeight: '900' },
   authButtonTextLight: { color: '#FFFFFF' },
   profileFieldGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   profileFieldCell: { flexBasis: '47%', flexGrow: 1 },
-  profilePbItem: { backgroundColor: '#F7F7F5', borderColor: '#E8E8E4', borderRadius: 12, borderWidth: 1, flexBasis: '47%', flexGrow: 1, gap: 5, padding: 12 },
+  profilePbItem: { backgroundColor: '#F2EEE5', borderColor: '#E8E8E4', borderRadius: 12, borderWidth: 1, flexBasis: '47%', flexGrow: 1, gap: 5, padding: 12 },
   label: { color: '#6F6F69', fontSize: 11, fontWeight: '700', letterSpacing: 0.4, fontFamily: MONO },
   inputLabel: { color: '#1B1B19', fontSize: 12, fontWeight: '700', fontFamily: MONO },
   cardTitle: { color: '#111111', flexShrink: 1, fontSize: 19, fontWeight: '600', lineHeight: 24, fontFamily: SERIF },
@@ -6981,12 +7834,12 @@ const styles = StyleSheet.create({
   action: { borderRadius: 8, minHeight: 44, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14 },
   action_green: { flex: 1, backgroundColor: '#2FA044' },
   action_black: { flex: 1, backgroundColor: '#111111' },
-  action_outline: { backgroundColor: '#FFFFFF', borderColor: '#CFCFCA', borderWidth: 1 },
+  action_outline: { backgroundColor: '#FBF8F0', borderColor: '#CFCFCA', borderWidth: 1 },
   actionText: { color: '#FFFFFF', fontWeight: '600', fontSize: 15, fontFamily: SERIF },
   actionOutlineText: { color: '#111111', fontFamily: SERIF },
   metricToggle: { alignSelf: 'flex-start', backgroundColor: '#F1F1ED', borderColor: '#E1E1DC', borderRadius: 999, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 5 },
   metricToggleText: { color: '#5B5B55', fontSize: 11, fontWeight: '900' },
-  priorityCard: { backgroundColor: '#FFFFFF', borderColor: '#CFE8D4', borderRadius: 18, borderWidth: 1, gap: 12, padding: 16 },
+  priorityCard: { backgroundColor: '#FBF8F0', borderColor: '#CFE8D4', borderRadius: 18, borderWidth: 1, gap: 12, padding: 16 },
   priorityTitle: { color: '#111111', flexShrink: 1, fontSize: 25, fontWeight: '600', lineHeight: 30, fontFamily: SERIF },
   pressCue: { color: '#188131', fontSize: 13, fontWeight: '800' },
   checkInThemeCard: { borderColor: '#DADAD5', borderRadius: 18, borderWidth: 1, gap: 12, padding: 18 },
@@ -6994,14 +7847,14 @@ const styles = StyleSheet.create({
   toneBad: { backgroundColor: '#FDE7E4', borderColor: '#E13F32', borderWidth: 1 },
   toneWarning: { backgroundColor: '#FFF0D7', borderColor: '#D9822B', borderWidth: 1 },
   toneNeutral: { backgroundColor: '#FFF8D1', borderColor: '#E7B33C', borderWidth: 1 },
-  toneCollecting: { backgroundColor: '#FFFFFF', borderColor: '#DADAD5', borderWidth: 1 },
+  toneCollecting: { backgroundColor: '#FBF8F0', borderColor: '#DADAD5', borderWidth: 1 },
   reviewHeroLabel: { color: '#565650', fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.6, fontFamily: MONO },
   reviewHeroTitle: { color: '#111111', flexShrink: 1, fontSize: 28, fontWeight: '600', lineHeight: 33, fontFamily: SERIF },
   reviewHeroSignal: { color: '#111111', flexShrink: 1, fontSize: 15, fontWeight: '600', lineHeight: 21, fontFamily: SERIF },
   reviewHeroBody: { color: '#252522', flexShrink: 1, fontSize: 15, fontWeight: '400', lineHeight: 22, fontFamily: SERIF },
-  reviewVisualCard: { backgroundColor: '#FFFFFF', borderColor: '#DCEBDD', borderRadius: 18, borderWidth: 1, gap: 12, padding: 16 },
+  reviewVisualCard: { backgroundColor: '#FBF8F0', borderColor: '#DCEBDD', borderRadius: 18, borderWidth: 1, gap: 12, padding: 16 },
   deltaVisualRow: { alignItems: 'center', flexDirection: 'row', gap: 14, justifyContent: 'space-between' },
-  visualValueBlock: { backgroundColor: '#F7F7F5', borderRadius: 14, flex: 1, gap: 5, padding: 12 },
+  visualValueBlock: { backgroundColor: '#F2EEE5', borderRadius: 14, flex: 1, gap: 5, padding: 12 },
   reviewVisualValue: { color: '#111111', fontSize: 28, fontWeight: '900' },
   deltaArrow: { fontSize: 32, fontWeight: '900' },
   reviewGaugeTrack: { backgroundColor: '#E8E8E4', borderRadius: 999, height: 12, overflow: 'hidden' },
@@ -7017,14 +7870,14 @@ const styles = StyleSheet.create({
   adaptationZoneGood: { backgroundColor: '#2FA044', borderBottomRightRadius: 999, borderTopRightRadius: 999 },
   adaptationMarker: { backgroundColor: '#111111', borderColor: '#FFFFFF', borderRadius: 7, borderWidth: 2, height: 14, marginLeft: -7, position: 'absolute', top: 2, width: 14 },
   reviewSparkRow: { flexDirection: 'row', gap: 12 },
-  reviewSparkColumn: { backgroundColor: '#F7F7F5', borderRadius: 14, flex: 1, gap: 8, padding: 12 },
+  reviewSparkColumn: { backgroundColor: '#F2EEE5', borderRadius: 14, flex: 1, gap: 8, padding: 12 },
   reviewSvgFrame: { backgroundColor: '#FBFBF9', borderColor: '#ECECE8', borderRadius: 14, borderWidth: 1, overflow: 'hidden', paddingTop: 4 },
   smallMultipleGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  smallMultipleCard: { backgroundColor: '#F7F7F5', borderColor: '#ECECE8', borderRadius: 12, borderWidth: 1, gap: 6, padding: 8, width: '48%' },
+  smallMultipleCard: { backgroundColor: '#F2EEE5', borderColor: '#ECECE8', borderRadius: 12, borderWidth: 1, gap: 6, padding: 8, width: '48%' },
   smallLineFrame: { height: 70, overflow: 'hidden' },
   historyInsightItem: { borderBottomColor: '#DADAD5', borderBottomWidth: 1, gap: 14, paddingBottom: 18 },
   currentReadGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  currentReadItem: { backgroundColor: '#F7F7F5', borderRadius: 12, flexBasis: '47%', flexGrow: 1, gap: 5, padding: 12 },
+  currentReadItem: { backgroundColor: '#F2EEE5', borderRadius: 12, flexBasis: '47%', flexGrow: 1, gap: 5, padding: 12 },
   currentReadItemWide: { flexBasis: '100%' },
   currentReadLabel: { color: '#6F6F69', fontSize: 11, fontWeight: '700', lineHeight: 15, letterSpacing: 0.4, fontFamily: MONO },
   currentReadValue: { color: '#111111', flexShrink: 1, fontSize: 17, fontWeight: '600', lineHeight: 22, fontFamily: SERIF },
@@ -7034,21 +7887,21 @@ const styles = StyleSheet.create({
   evidenceRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   evidenceBadge: { alignSelf: 'flex-start', backgroundColor: '#E8F5EA', borderRadius: 999, color: '#188131', fontSize: 12, fontWeight: '700', overflow: 'hidden', paddingHorizontal: 9, paddingVertical: 5 },
   filterTabs: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  filterTab: { backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 999, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 8 },
+  filterTab: { backgroundColor: '#FBF8F0', borderColor: '#E1E1DC', borderRadius: 999, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 8 },
   filterTabActive: { backgroundColor: '#111111', borderColor: '#111111' },
   filterTabText: { color: '#474742', fontSize: 13, fontWeight: '700' },
   filterTabTextActive: { color: '#FFFFFF' },
   sectionHeaderRow: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
   textLink: { color: '#188131', fontSize: 13, fontWeight: '800' },
   dashboardCategory: { gap: 8 },
-  dashboardChip: { backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 999, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 8 },
+  dashboardChip: { backgroundColor: '#FBF8F0', borderColor: '#E1E1DC', borderRadius: 999, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 8 },
   dashboardChipActive: { backgroundColor: '#111111', borderColor: '#111111' },
   dashboardChipText: { color: '#111111', fontSize: 12, fontWeight: '700' },
   dashboardChipTextActive: { color: '#FFFFFF' },
   compactSelectWrap: { gap: 8 },
-  compactSelect: { alignItems: 'center', backgroundColor: '#F7F7F5', borderColor: '#E1E1DC', borderRadius: 12, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 52, paddingHorizontal: 12, paddingVertical: 8 },
+  compactSelect: { alignItems: 'center', backgroundColor: '#F2EEE5', borderColor: '#E1E1DC', borderRadius: 12, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 52, paddingHorizontal: 12, paddingVertical: 8 },
   compactSelectValue: { color: '#111111', fontSize: 16, fontWeight: '900', marginTop: 2 },
-  compactMenu: { backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 12, borderWidth: 1, overflow: 'hidden' },
+  compactMenu: { backgroundColor: '#FBF8F0', borderColor: '#E1E1DC', borderRadius: 12, borderWidth: 1, overflow: 'hidden' },
   compactMenuItem: { paddingHorizontal: 12, paddingVertical: 11 },
   compactMenuItemActive: { backgroundColor: '#111111' },
   compactMenuText: { color: '#111111', fontSize: 13, fontWeight: '800' },
@@ -7065,7 +7918,7 @@ const styles = StyleSheet.create({
   formSection: { gap: 10, paddingBottom: 10 },
   formTitle: { color: '#111111', fontSize: 15, fontWeight: '600', fontFamily: SERIF },
   inputWrap: { gap: 6, flex: 1 },
-  input: { backgroundColor: '#FFFFFF', borderColor: '#D9D9D4', borderRadius: 6, borderWidth: 1, minHeight: 42, paddingHorizontal: 10, color: '#111111' },
+  input: { backgroundColor: '#FBF8F0', borderColor: '#D9D9D4', borderRadius: 6, borderWidth: 1, minHeight: 42, paddingHorizontal: 10, color: '#111111' },
   sliderWrap: { gap: 8 },
   sliderValue: { color: '#111111', fontWeight: '900' },
   sliderRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
@@ -7074,7 +7927,7 @@ const styles = StyleSheet.create({
   sliderThumb: { position: 'absolute', marginLeft: -11, top: -2, width: 22, height: 22, borderRadius: 11, backgroundColor: '#111111', borderColor: '#FFFFFF', borderWidth: 2 },
   stepButton: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#EFEFEC', alignItems: 'center', justifyContent: 'center' },
   setMetricsList: { gap: 10 },
-  setMetricCard: { backgroundColor: '#FFFFFF', borderColor: '#E5E5E1', borderRadius: 8, borderWidth: 1, gap: 10, padding: 10 },
+  setMetricCard: { backgroundColor: '#FBF8F0', borderColor: '#E5E5E1', borderRadius: 8, borderWidth: 1, gap: 10, padding: 10 },
   setMetricTitle: { color: '#111111', fontSize: 12, fontWeight: '900' },
   chevronRow: { backgroundColor: '#F2F2EF', borderRadius: 8, minHeight: 44, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   chevronText: { fontWeight: '800', color: '#111111' },
@@ -7086,7 +7939,7 @@ const styles = StyleSheet.create({
   chipActive: { backgroundColor: '#2FA044' },
   chipText: { color: '#111111', fontSize: 12, fontWeight: '800' },
   chipTextActive: { color: '#FFFFFF' },
-  exerciseRow: { backgroundColor: '#FFFFFF', borderBottomColor: '#E8E8E4', borderBottomWidth: 1, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between' },
+  exerciseRow: { backgroundColor: '#FBF8F0', borderBottomColor: '#E8E8E4', borderBottomWidth: 1, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between' },
   exerciseHeaderRow: { alignItems: 'flex-start', flex: 1, flexDirection: 'row', justifyContent: 'space-between' },
   exerciseEdit: { flex: 1, gap: 6, paddingRight: 8 },
   exerciseNameWithOrder: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: 8 },
@@ -7098,17 +7951,17 @@ const styles = StyleSheet.create({
   deleteButtonText: { color: '#A23428', fontSize: 11, fontWeight: '900' },
   completeDot: { color: '#2FA044', fontSize: 18, fontWeight: '900' },
   openCircle: { color: '#8A8A84', fontSize: 22 },
-  summaryRow: { backgroundColor: '#FFFFFF', borderTopColor: '#E8E8E4', borderTopWidth: 1, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  summaryRow: { backgroundColor: '#FBF8F0', borderTopColor: '#E8E8E4', borderTopWidth: 1, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   loadPill: { backgroundColor: '#DFF3E3', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
   loadText: { color: '#188131', fontWeight: '900' },
-  builderCard: { backgroundColor: '#FFFFFF', borderColor: '#E5E5E1', borderRadius: 8, borderWidth: 1, padding: 14, gap: 14 },
+  builderCard: { backgroundColor: '#FBF8F0', borderColor: '#E5E5E1', borderRadius: 8, borderWidth: 1, padding: 14, gap: 14 },
   sectionTitle: { fontSize: 16, fontWeight: '600', color: '#111111', fontFamily: SERIF },
   pickerRow: { flexDirection: 'row', gap: 6 },
   pickerChip: { flex: 1, borderRadius: 6, backgroundColor: '#EFEFEC', alignItems: 'center', paddingVertical: 10 },
   pickerActive: { backgroundColor: '#111111' },
   pickerText: { fontSize: 12, fontWeight: '800', color: '#111111' },
   pickerTextActive: { color: '#FFFFFF' },
-  selectLike: { minHeight: 44, borderWidth: 1, borderColor: '#D9D9D4', borderRadius: 6, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#FFFFFF' },
+  selectLike: { minHeight: 44, borderWidth: 1, borderColor: '#D9D9D4', borderRadius: 6, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#FBF8F0' },
   selectText: { fontWeight: '800', color: '#111111' },
   bigGreen: { color: '#24883B', fontSize: 30, fontWeight: '900' },
   positive: { color: '#16842B', fontSize: 12, fontWeight: '800' },
@@ -7118,7 +7971,7 @@ const styles = StyleSheet.create({
   inlineLabel: { fontSize: 13, fontWeight: '900', color: '#111111' },
   inlineValue: { minWidth: 170, textAlign: 'right', color: '#111111', fontWeight: '700' },
   weekNav: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 },
-  weekArrow: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, height: 42, justifyContent: 'center', width: 48 },
+  weekArrow: { alignItems: 'center', backgroundColor: '#FBF8F0', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, height: 42, justifyContent: 'center', width: 48 },
   calendarHeadingWrap: { alignItems: 'center', flex: 1, gap: 2, paddingHorizontal: 8 },
   calendarTodayTitle: { color: '#111111', fontSize: 12, fontWeight: '800' },
   calendarModeTabs: { backgroundColor: '#E6E6E1', borderRadius: 12, flexDirection: 'row', gap: 4, padding: 4 },
@@ -7126,12 +7979,12 @@ const styles = StyleSheet.create({
   calendarModeTabActive: { backgroundColor: '#111111' },
   calendarModeTabText: { color: '#242421', fontSize: 12, fontWeight: '900' },
   calendarModeTabTextActive: { color: '#FFFFFF' },
-  rangeSelectorBox: {backgroundColor: '#FFFFFF', borderColor: '#E1E1DC', borderRadius: 12, borderWidth: 1,gap: 8,padding: 12,},
+  rangeSelectorBox: {backgroundColor: '#FBF8F0', borderColor: '#E1E1DC', borderRadius: 12, borderWidth: 1,gap: 8,padding: 12,},
   dateRangeButton: {alignItems: 'center',backgroundColor: '#111111', borderRadius: 10, paddingVertical: 10,},
   dateRangeButtonText: {color: '#FFFFFF', fontSize: 12,fontWeight: '900',},
-  dateRangePickerCard: {backgroundColor: '#FFFFFF', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 12,padding: 12,},
+  dateRangePickerCard: {backgroundColor: '#FBF8F0', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 12,padding: 12,},
   rangePreviewRow: {flexDirection: 'row', gap: 10,},
-  rangePreviewItem: {backgroundColor: '#F7F7F5',borderColor: '#E8E8E4',borderRadius: 10,borderWidth: 1,flex: 1,gap: 4,padding: 10,},
+  rangePreviewItem: {backgroundColor: '#F2EEE5',borderColor: '#E8E8E4',borderRadius: 10,borderWidth: 1,flex: 1,gap: 4,padding: 10,},
   rangePreviewValue: {color: '#111111',fontSize: 14,fontWeight: '900',},
   rangeCalendarGrid: {flexDirection: 'row',flexWrap: 'wrap',},
   rangeDayCell: {alignItems: 'center',borderRadius: 8,height: 36,justifyContent: 'center',width: '14.2857%',},
@@ -7169,7 +8022,7 @@ const styles = StyleSheet.create({
   activeDayText: { color: '#FFFFFF' },
   dayDot: { backgroundColor: 'transparent', borderRadius: 4, height: 6, marginTop: 4, width: 6 },
   dayDotFilled: { backgroundColor: '#111111', borderColor: '#111111' },
-  monthCalendar: { backgroundColor: '#FFFFFF', borderColor: '#ECECE8', borderRadius: 12, borderWidth: 1, gap: 8, padding: 8 },
+  monthCalendar: { backgroundColor: '#FBF8F0', borderColor: '#ECECE8', borderRadius: 12, borderWidth: 1, gap: 8, padding: 8 },
   monthWeekHeader: { flexDirection: 'row' },
   monthWeekHeaderText: { color: '#474742', flex: 1, fontSize: 9, fontWeight: '900', textAlign: 'center' },
   monthGrid: { flexDirection: 'row', flexWrap: 'wrap' },
@@ -7177,49 +8030,49 @@ const styles = StyleSheet.create({
   monthDayOutside: { opacity: 0.72 },
   monthDayOutsideText: { color: '#111111' },
   yearGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  monthCell: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E6E6E2', borderRadius: 12, borderWidth: 1, gap: 5, justifyContent: 'center', minHeight: 54, width: '30.8%' },
+  monthCell: { alignItems: 'center', backgroundColor: '#FBF8F0', borderColor: '#E6E6E2', borderRadius: 12, borderWidth: 1, gap: 5, justifyContent: 'center', minHeight: 54, width: '30.8%' },
   monthCellActive: { backgroundColor: '#2FA044', borderColor: '#2FA044' },
   monthCellText: { color: '#111111', fontSize: 12, fontWeight: '900' },
-  programmeRow: { backgroundColor: '#FFFFFF', borderBottomColor: '#E6E6E2', borderBottomWidth: 1, paddingVertical: 13, flexDirection: 'row', justifyContent: 'space-between' },
+  programmeRow: { backgroundColor: '#FBF8F0', borderBottomColor: '#E6E6E2', borderBottomWidth: 1, paddingVertical: 13, flexDirection: 'row', justifyContent: 'space-between' },
   emptyDay: { gap: 12 },
   todayTrainingCard: { borderTopColor: '#E8E8E4', borderTopWidth: 1, gap: 8, paddingTop: 12 },
-  exerciseMetricCard: { backgroundColor: '#F7F7F5', borderRadius: 8, gap: 8, padding: 8 },
+  exerciseMetricCard: { backgroundColor: '#F2EEE5', borderRadius: 8, gap: 8, padding: 8 },
   exerciseBulletRow: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', gap: 10 },
   metricsReveal: { gap: 10, marginTop: 4 },
   daySessionRow: { alignItems: 'center', borderTopColor: '#E8E8E4', borderTopWidth: 1, flexDirection: 'row', justifyContent: 'space-between', gap: 12, paddingTop: 12 },
   noteInput: { minHeight: 92, textAlignVertical: 'top' },
-  calendarPanel: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E5', borderRadius: 8, borderWidth: 1, gap: 12, padding: 14 },
+  calendarPanel: { backgroundColor: '#FBF8F0', borderColor: '#E8E8E5', borderRadius: 8, borderWidth: 1, gap: 12, padding: 14 },
   treeBlock: { borderTopColor: '#ECECE8', borderTopWidth: 1, gap: 8, paddingTop: 10 },
   treeIndent: { borderLeftColor: '#DADAD5', borderLeftWidth: 2, gap: 8, marginLeft: 8, paddingLeft: 10 },
-  treeWeek: { backgroundColor: '#F7F7F5', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, gap: 8 },
-  treeCard: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E5', borderRadius: 8, borderWidth: 1, gap: 4, padding: 10 },
+  treeWeek: { backgroundColor: '#F2EEE5', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, gap: 8 },
+  treeCard: { backgroundColor: '#FBF8F0', borderColor: '#E8E8E5', borderRadius: 8, borderWidth: 1, gap: 4, padding: 10 },
   treeCardActive: { borderColor: '#2FA044', backgroundColor: '#F2FBF4' },
   smallPill: { backgroundColor: '#111111', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
   smallPillText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
-  programmeEditRow: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E5', borderRadius: 8, borderWidth: 1, gap: 10, padding: 12 },
+  programmeEditRow: { backgroundColor: '#FBF8F0', borderColor: '#E8E8E5', borderRadius: 8, borderWidth: 1, gap: 10, padding: 12 },
   programmeEditMain: { gap: 10 },
   programmeActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   miniButton: { backgroundColor: '#EFEFEC', borderRadius: 8, flex: 1, alignItems: 'center', paddingVertical: 9 },
   miniButtonDark: { backgroundColor: '#111111' },
   miniButtonText: { color: '#111111', fontSize: 12, fontWeight: '900' },
   miniButtonTextLight: { color: '#FFFFFF' },
-  programmeFocusedPanel: { backgroundColor: '#F7F7F5', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 12, padding: 12 },
-  performanceExerciseLog: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E4', borderRadius: 12, borderWidth: 1, gap: 12, padding: 12 },
-  savePerformancePanel: { backgroundColor: '#F7F7F5', borderColor: '#DCEBDD', borderRadius: 12, borderWidth: 1, gap: 8, padding: 10 },
-  performanceSetCard: { backgroundColor: '#F7F7F5', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, gap: 8, padding: 8 },
-  attemptCard: { backgroundColor: '#FFFFFF', borderColor: '#E8E8E4', borderRadius: 8, borderWidth: 1, gap: 7, padding: 8 },
+  programmeFocusedPanel: { backgroundColor: '#F2EEE5', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 12, padding: 12 },
+  performanceExerciseLog: { backgroundColor: '#FBF8F0', borderColor: '#E8E8E4', borderRadius: 12, borderWidth: 1, gap: 12, padding: 12 },
+  savePerformancePanel: { backgroundColor: '#F2EEE5', borderColor: '#DCEBDD', borderRadius: 12, borderWidth: 1, gap: 8, padding: 10 },
+  performanceSetCard: { backgroundColor: '#F2EEE5', borderColor: '#E1E1DC', borderRadius: 10, borderWidth: 1, gap: 8, padding: 8 },
+  attemptCard: { backgroundColor: '#FBF8F0', borderColor: '#E8E8E4', borderRadius: 8, borderWidth: 1, gap: 7, padding: 8 },
   rangeSummaryText: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '800', lineHeight: 18 },
   calendarMetaText: { color: '#5E5E58', flexShrink: 1, fontSize: 13.5, fontWeight: '400', lineHeight: 19, fontFamily: SERIF },
-  weekSessionRow: { alignItems: 'center', backgroundColor: '#F7F7F5', borderRadius: 8, flexDirection: 'row', gap: 10, padding: 10 },
-  weekSessionDate: { alignItems: 'center', backgroundColor: '#FFFFFF', borderColor: '#E3E3DE', borderRadius: 8, borderWidth: 1, height: 50, justifyContent: 'center', width: 48 },
+  weekSessionRow: { alignItems: 'center', backgroundColor: '#F2EEE5', borderRadius: 8, flexDirection: 'row', gap: 10, padding: 10 },
+  weekSessionDate: { alignItems: 'center', backgroundColor: '#FBF8F0', borderColor: '#E3E3DE', borderRadius: 8, borderWidth: 1, height: 50, justifyContent: 'center', width: 48 },
   weekSessionDay: { color: '#72726C', fontSize: 10, fontWeight: '900' },
   weekSessionNumber: { color: '#111111', fontSize: 16, fontWeight: '900' },
   weekSessionMain: { flex: 1, gap: 3 },
-  filterPill: { backgroundColor: '#FFFFFF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
+  filterPill: { backgroundColor: '#FBF8F0', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
   filterText: { fontSize: 12, fontWeight: '800' },
   insightGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  insightCard: { width: '48%', minHeight: 150, backgroundColor: '#FFFFFF', borderColor: '#E8E8E5', borderWidth: 1, borderRadius: 16, padding: 14, gap: 8 },
-  insightSignalCard: { backgroundColor: '#FFFFFF' },
+  insightCard: { width: '48%', minHeight: 150, backgroundColor: '#FBF8F0', borderColor: '#E8E8E5', borderWidth: 1, borderRadius: 16, padding: 14, gap: 8 },
+  insightSignalCard: { backgroundColor: '#FBF8F0' },
   insightIcon: { width: 22, height: 22, borderRadius: 11 },
   categoryCardTop: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
   tapCue: { color: '#7A7A74', fontSize: 11, fontWeight: '700' },
@@ -7241,24 +8094,24 @@ const styles = StyleSheet.create({
   attemptMiniGrid: { gap: 10 },
   attemptMiniCard: { backgroundColor: '#FBFBF9', borderColor: '#ECECE8', borderRadius: 14, borderWidth: 1, gap: 6, padding: 10 },
   figureInner: { gap: 8 },
-  analysisSubcard: { backgroundColor: '#F7F7F5', borderRadius: 12, gap: 6, padding: 10 },
+  analysisSubcard: { backgroundColor: '#F2EEE5', borderRadius: 12, gap: 6, padding: 10 },
   figureResult: { color: '#1B1B19', flexShrink: 1, fontSize: 13, fontWeight: '700', lineHeight: 19 },
-  figureInterpretation: { backgroundColor: '#F7F7F5', borderRadius: 12, color: '#22221F', flexShrink: 1, fontSize: 12, fontWeight: '600', lineHeight: 18, padding: 10 },
-  visualInterpretationBox: { backgroundColor: '#F7F7F5', borderColor: '#E6E6E1', borderRadius: 12, borderWidth: 1, gap: 4, padding: 10 },
+  figureInterpretation: { backgroundColor: '#F2EEE5', borderRadius: 12, color: '#22221F', flexShrink: 1, fontSize: 12, fontWeight: '600', lineHeight: 18, padding: 10 },
+  visualInterpretationBox: { backgroundColor: '#F2EEE5', borderColor: '#E6E6E1', borderRadius: 12, borderWidth: 1, gap: 4, padding: 10 },
   figureInterpretationText: { color: '#22221F', flexShrink: 1, fontSize: 12, fontWeight: '600', lineHeight: 18 },
   figureLimitation: { color: '#74746F', flexShrink: 1, fontSize: 11, fontWeight: '600', lineHeight: 16 },
   figureEvidence: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  figureEvidenceItem: { backgroundColor: '#F7F7F5', borderColor: '#E8E8E4', borderRadius: 12, borderWidth: 1, minWidth: '30%', paddingHorizontal: 10, paddingVertical: 8 },
+  figureEvidenceItem: { backgroundColor: '#F2EEE5', borderColor: '#E8E8E4', borderRadius: 12, borderWidth: 1, minWidth: '30%', paddingHorizontal: 10, paddingVertical: 8 },
   figureEvidenceLabel: { color: '#6F6F69', fontSize: 10, fontWeight: '800', textTransform: 'uppercase' },
   figureEvidenceValue: { color: '#111111', flexShrink: 1, fontSize: 15, fontWeight: '800', marginTop: 3 },
   boxPlotWrap: { backgroundColor: '#FBFBF9', borderColor: '#ECECE8', borderRadius: 14, borderWidth: 1, gap: 8, padding: 12 },
   boxPlotHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
   boxPlot: { height: 42, justifyContent: 'center', position: 'relative' },
   boxWhisker: { backgroundColor: '#BDBDB7', height: 2, left: 0, position: 'absolute', right: 0 },
-  boxRange: { backgroundColor: '#FFFFFF', borderRadius: 8, borderWidth: 2, height: 24, position: 'absolute' },
+  boxRange: { backgroundColor: '#FBF8F0', borderRadius: 8, borderWidth: 2, height: 24, position: 'absolute' },
   boxMedian: { borderRadius: 2, height: 30, marginLeft: -1, position: 'absolute', width: 2 },
   boxTick: { backgroundColor: '#777771', height: 18, marginLeft: -1, position: 'absolute', width: 2 },
-  boxPlotEmpty: { alignItems: 'center', backgroundColor: '#F7F7F5', borderRadius: 12, minHeight: 56, justifyContent: 'center', padding: 12 },
+  boxPlotEmpty: { alignItems: 'center', backgroundColor: '#F2EEE5', borderRadius: 12, minHeight: 56, justifyContent: 'center', padding: 12 },
   adaptationChartWrap: { backgroundColor: '#FBFBF9', borderColor: '#ECECE8', borderRadius: 16, borderWidth: 1, gap: 8, padding: 12 },
   adaptationChart: { height: 188, overflow: 'hidden' },
   multiLineChart: { backgroundColor: '#FBFBF9', borderColor: '#ECECE8', borderRadius: 14, borderWidth: 1, height: 172, overflow: 'hidden' },
@@ -7270,14 +8123,14 @@ const styles = StyleSheet.create({
   relationshipFill: { borderRadius: 999, height: 5 },
   miniBarRow: { gap: 7, paddingVertical: 6 },
   miniBarLabelWrap: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', gap: 10 },
-  dayEvidenceCard: { backgroundColor: '#F7F7F5', borderRadius: 12, gap: 4, padding: 10 },
-  changeCard: { backgroundColor: '#F7F7F5', borderRadius: 12, gap: 4, padding: 10 },
+  dayEvidenceCard: { backgroundColor: '#F2EEE5', borderRadius: 12, gap: 4, padding: 10 },
+  changeCard: { backgroundColor: '#F2EEE5', borderRadius: 12, gap: 4, padding: 10 },
   spark: { height: 38, marginTop: 'auto', overflow: 'visible', position: 'relative' },
   sparkEmpty: { alignItems: 'center', height: 38, justifyContent: 'center', marginTop: 'auto' },
   detailTabs: { height: 42, flexDirection: 'row', justifyContent: 'space-around', borderBottomWidth: 1, borderBottomColor: '#E2E2DE' },
   detailTab: { color: '#33332F', fontSize: 12, fontWeight: '700' },
   detailTabActive: { color: '#15812C', fontWeight: '900' },
-  chartCard: { backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: '#E8E8E5', gap: 8, padding: 14 },
+  chartCard: { backgroundColor: '#FBF8F0', borderRadius: 16, borderWidth: 1, borderColor: '#E8E8E5', gap: 8, padding: 14 },
   chartHeaderRow: { alignItems: 'flex-start', flexDirection: 'row', gap: 10, justifyContent: 'space-between', position: 'relative', zIndex: 2 },
   chartTitle: { color: '#111111', flex: 1, fontSize: 18, fontWeight: '800', textAlign: 'center' },
   chartFilterWrap: { alignItems: 'flex-end', position: 'relative', zIndex: 4 },
@@ -7285,22 +8138,22 @@ const styles = StyleSheet.create({
   chartFilterIconActive: { backgroundColor: '#111111', borderColor: '#111111' },
   chartFilterIconText: { color: '#111111', fontSize: 16, fontWeight: '900', marginTop: -2 },
   chartFilterIconTextActive: { color: '#FFFFFF' },
-  chartFilterPopover: { backgroundColor: '#FFFFFF', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 8, padding: 12, position: 'absolute', right: 0, top: 34, width: 260, shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 14 },
+  chartFilterPopover: { backgroundColor: '#FBF8F0', borderColor: '#DADAD5', borderRadius: 14, borderWidth: 1, gap: 8, padding: 12, position: 'absolute', right: 0, top: 34, width: 260, shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 14 },
   chartSubtitle: { color: '#777771', fontSize: 12, fontWeight: '600', textAlign: 'center' },
   scatterWrap: { gap: 6 },
   scatter: { height: 220, borderLeftWidth: 1, borderBottomWidth: 1, borderColor: '#D8D8D4' },
-  scatterEmpty: { alignItems: 'center', backgroundColor: '#F7F7F5', borderRadius: 12, minHeight: 140, justifyContent: 'center', padding: 16 },
+  scatterEmpty: { alignItems: 'center', backgroundColor: '#F2EEE5', borderRadius: 12, minHeight: 140, justifyContent: 'center', padding: 16 },
   gridLine: { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: '#ECECE8' },
   dot: { position: 'absolute', width: 7, height: 7, borderRadius: 4, backgroundColor: '#24883B' },
   insightLine: { paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#E8E8E4', flexDirection: 'row', justifyContent: 'space-between' },
   insightMetric: { flex: 1, gap: 4 },
   metricStrip: { flexDirection: 'row', gap: 10 },
-  metric: { flex: 1, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E8E8E5', borderRadius: 14, padding: 12 },
+  metric: { flex: 1, backgroundColor: '#FBF8F0', borderWidth: 1, borderColor: '#E8E8E5', borderRadius: 14, padding: 12 },
   metricValue: { color: '#111111', flexShrink: 1, fontSize: 18, fontWeight: '800' },
   metricLabel: { marginTop: 4, fontSize: 12, fontWeight: '600', color: '#6B6B65' },
   jsonBox: { backgroundColor: '#111111', borderRadius: 8, padding: 12 },
   jsonText: { color: '#EAEAE6', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 10, lineHeight: 15 },
-  nav: { position: 'absolute', left: 0, right: 0, bottom: 0, minHeight: 82, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#E3E3DF', flexDirection: 'row', paddingTop: 8, paddingBottom: 10 },
+  nav: { position: 'absolute', left: 0, right: 0, bottom: 0, minHeight: 82, backgroundColor: '#FBF8F0', borderTopWidth: 1, borderTopColor: '#E3E3DF', flexDirection: 'row', paddingTop: 8, paddingBottom: 10 },
   navItem: { flex: 1, alignItems: 'center', gap: 3 },
   navIcon: { color: '#111111', fontSize: 18 },
   navLabel: { color: '#111111', fontSize: 10, fontWeight: '700' },

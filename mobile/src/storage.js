@@ -9,11 +9,18 @@ export const emptyExercise = {
   contacts: '',
   reps: '',
   sets: '',
+  distance: '',
   duration_minutes: '',
   intensity_value: '',
   intensity_unit: '%',
   intent_percent: '',
   rom: 'full',
+  tempo: '',
+  // Force-Velocity coverage tags (defaulted from the library on selection).
+  quality: '',
+  specificity: '',
+  laterality: '',
+  variation: '',
 };
 
 export const defaultData = {
@@ -57,10 +64,13 @@ export const defaultData = {
     exercises: [],
   },
   checkInDraft: {
+    // check_in_date defaults to "today" when the Check In screen opens (see App.js);
+    // it is not seeded here so a persisted draft never re-opens on a stale day.
+    check_in_date: '',
     pain_score: 0,
     pain_location: '',
+    // Recovery is a single Fatigue<->Fresh scale stored in freshness_score (high = fresh).
     freshness_score: 0,
-    soreness_score: 0,
     primary_metric: 'performance_score',
     primary_value: '',
     primary_unit: '',
@@ -177,7 +187,6 @@ function migrateCheckInDraft(checkInDraft = {}, version) {
     pain_score: checkInDraft.pain_score ?? defaultData.checkInDraft.pain_score,
     pain_location: checkInDraft.pain_location ?? defaultData.checkInDraft.pain_location,
     freshness_score: checkInDraft.freshness_score ?? defaultData.checkInDraft.freshness_score,
-    soreness_score: checkInDraft.soreness_score ?? defaultData.checkInDraft.soreness_score,
   };
 }
 
