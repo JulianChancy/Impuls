@@ -2535,7 +2535,6 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
   const hasPlannedSession = planned.id !== 'empty_plan';
   const displayName = String(data.profile?.name || '').trim();
 
-  const initials = (displayName || 'You').split(' ').filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase() || 'YOU';
   const readinessNum = toNumber(analysis.latest?.readiness);
   const readinessPct = Math.max(0, Math.min(1, readinessNum / 10));
   const ringDash = `${(readinessPct * 314).toFixed(1)} 314`;
@@ -2550,7 +2549,6 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
           <Text style={styles.date}>{todayLabel()}</Text>
           <Text style={styles.h1}>{displayName ? `Morning, ${displayName}` : 'Welcome back'}</Text>
         </View>
-        <View style={styles.avatar}><Text style={styles.avatarText}>{initials}</Text></View>
       </View>
 
       <View style={styles.card}>
