@@ -35,13 +35,13 @@ export const LATERALITY_OPTIONS = [
   ['unilateral', 'Unilateral'],
 ];
 
+// Range of motion = depth only. Setup modifiers like deficit/heels-elevated belong in
+// the free-text `variation` field, not here, so the choices stay self-explanatory.
 export const ROM_OPTIONS = [
   ['full', 'Full'],
   ['parallel', 'Parallel'],
   ['quarter', 'Quarter'],
   ['partial', 'Partial'],
-  ['deficit', 'Deficit'],
-  ['elevated', 'Elevated'],
 ];
 
 // Type metadata. `fields` is which load inputs show; `quality` is the default FV tag.
@@ -78,6 +78,12 @@ function ex(name, type, specificity = 'general', laterality = 'bilateral', quali
   return { name, type, specificity, laterality, quality: quality || defaultQualityForType(type) };
 }
 
+// Tag a run of entries with an umbrella sub-group (e.g. "Back squat", "Pogos") so the
+// picker can show a family -> sub-group -> exercise hierarchy for the big families.
+function withGroup(group, entries) {
+  return entries.map((entry) => ({ ...entry, group }));
+}
+
 export const FAMILY_ORDER = [
   'Squat derivatives',
   'Olympic derivatives',
@@ -93,22 +99,28 @@ export const FAMILY_ORDER = [
 
 const FAMILIES = {
   'Squat derivatives': [
-    ex('Back squat (high-bar)', 'strength', 'general'),
-    ex('Back squat (low-bar)', 'strength', 'general'),
-    ex('Front squat', 'strength', 'intermediate'),
-    ex('Box squat', 'strength', 'general'),
-    ex('Safety-bar squat', 'strength', 'general'),
-    ex('Paused squat', 'strength', 'general'),
-    ex('Tempo squat', 'strength', 'general'),
-    ex('Pin / Anderson squat', 'strength', 'general'),
-    ex('1.5-rep squat', 'strength', 'general'),
-    ex('Quarter squat', 'strength', 'specific', 'bilateral', 'strength_speed'),
-    ex('Partial squat', 'strength', 'specific', 'bilateral', 'strength_speed'),
-    ex('Heels-elevated / cyclist squat', 'strength', 'intermediate'),
-    ex('Goblet squat', 'general', 'general'),
-    ex('Belt squat', 'strength', 'general'),
-    ex('Hack squat (machine)', 'general', 'general'),
-    ex('Overhead squat', 'skill', 'general'),
+    ...withGroup('Back squat', [
+      ex('Back squat (high-bar)', 'strength', 'general'),
+      ex('Back squat (low-bar)', 'strength', 'general'),
+      ex('Paused squat', 'strength', 'general'),
+      ex('Tempo squat', 'strength', 'general'),
+      ex('Pin / Anderson squat', 'strength', 'general'),
+      ex('1.5-rep squat', 'strength', 'general'),
+      ex('Box squat', 'strength', 'general'),
+      ex('Safety-bar squat', 'strength', 'general'),
+    ]),
+    ...withGroup('Front & specialty', [
+      ex('Front squat', 'strength', 'intermediate'),
+      ex('Heels-elevated / cyclist squat', 'strength', 'intermediate'),
+      ex('Goblet squat', 'general', 'general'),
+      ex('Overhead squat', 'skill', 'general'),
+    ]),
+    ...withGroup('Partial-range & machine', [
+      ex('Quarter squat', 'strength', 'specific', 'bilateral', 'strength_speed'),
+      ex('Partial squat', 'strength', 'specific', 'bilateral', 'strength_speed'),
+      ex('Belt squat', 'strength', 'general'),
+      ex('Hack squat (machine)', 'general', 'general'),
+    ]),
   ],
   'Olympic derivatives': [
     ex('Power clean', 'power_ballistic', 'specific', 'bilateral', 'strength_speed'),
@@ -163,49 +175,61 @@ const FAMILIES = {
     ex('Step-down', 'general', 'intermediate', 'unilateral'),
   ],
   Plyometrics: [
-    ex('Double-leg pogo', 'plyometric', 'specific'),
-    ex('Single-leg pogo', 'plyometric', 'specific', 'unilateral'),
-    ex('Ankle / stiffness hops', 'plyometric', 'specific'),
-    ex('Lateral pogo', 'plyometric', 'specific'),
-    ex('Pogo-to-broad', 'plyometric', 'specific'),
-    ex('Alternate-leg bounds', 'plyometric', 'specific', 'unilateral'),
-    ex('Single-leg bounds', 'plyometric', 'specific', 'unilateral'),
-    ex('Speed bounds', 'plyometric', 'specific'),
-    ex('A-bounds', 'plyometric', 'specific'),
-    ex('Lateral bounds', 'plyometric', 'specific', 'unilateral'),
-    ex('Combination bounds', 'plyometric', 'specific'),
-    ex('Depth jump', 'plyometric', 'specific'),
-    ex('Drop jump', 'plyometric', 'specific'),
-    ex('Depth jump to box', 'plyometric', 'specific'),
-    ex('Depth jump to broad', 'plyometric', 'specific'),
-    ex('Altitude / landing drops', 'plyometric', 'specific'),
-    ex('Depth-to-hurdle', 'plyometric', 'specific'),
-    ex('Countermovement jump', 'plyometric', 'specific'),
-    ex('Squat jump', 'plyometric', 'specific'),
-    ex('Box jump', 'plyometric', 'intermediate'),
-    ex('Broad / standing long jump', 'plyometric', 'specific'),
-    ex('Vertical jump to target', 'plyometric', 'specific'),
-    ex('Tuck jump', 'plyometric', 'intermediate'),
-    ex('Hurdle hops', 'plyometric', 'specific'),
-    ex('Banded jumps', 'plyometric', 'specific'),
-    ex('Approach jump', 'plyometric', 'specific'),
-    ex('Repeated / continuous jumps', 'plyometric', 'specific'),
-    ex('Single-leg box jump', 'plyometric', 'specific', 'unilateral'),
+    ...withGroup('Pogos', [
+      ex('Double-leg pogo', 'plyometric', 'specific'),
+      ex('Single-leg pogo', 'plyometric', 'specific', 'unilateral'),
+      ex('Ankle / stiffness hops', 'plyometric', 'specific'),
+      ex('Lateral pogo', 'plyometric', 'specific'),
+      ex('Pogo-to-broad', 'plyometric', 'specific'),
+    ]),
+    ...withGroup('Bounds', [
+      ex('Alternate-leg bounds', 'plyometric', 'specific', 'unilateral'),
+      ex('Single-leg bounds', 'plyometric', 'specific', 'unilateral'),
+      ex('Speed bounds', 'plyometric', 'specific'),
+      ex('A-bounds', 'plyometric', 'specific'),
+      ex('Lateral bounds', 'plyometric', 'specific', 'unilateral'),
+      ex('Combination bounds', 'plyometric', 'specific'),
+    ]),
+    ...withGroup('Shock & depth', [
+      ex('Depth jump', 'plyometric', 'specific'),
+      ex('Drop jump', 'plyometric', 'specific'),
+      ex('Depth jump to box', 'plyometric', 'specific'),
+      ex('Depth jump to broad', 'plyometric', 'specific'),
+      ex('Altitude / landing drops', 'plyometric', 'specific'),
+      ex('Depth-to-hurdle', 'plyometric', 'specific'),
+    ]),
+    ...withGroup('Jumps', [
+      ex('Countermovement jump', 'plyometric', 'specific'),
+      ex('Squat jump', 'plyometric', 'specific'),
+      ex('Box jump', 'plyometric', 'intermediate'),
+      ex('Broad / standing long jump', 'plyometric', 'specific'),
+      ex('Vertical jump to target', 'plyometric', 'specific'),
+      ex('Tuck jump', 'plyometric', 'intermediate'),
+      ex('Hurdle hops', 'plyometric', 'specific'),
+      ex('Banded jumps', 'plyometric', 'specific'),
+      ex('Approach jump', 'plyometric', 'specific'),
+      ex('Repeated / continuous jumps', 'plyometric', 'specific'),
+      ex('Single-leg box jump', 'plyometric', 'specific', 'unilateral'),
+    ]),
   ],
   'Sprints & speed': [
-    ex('Acceleration (10-30m)', 'sprint', 'specific'),
-    ex('Flying / max-velocity sprint', 'sprint', 'specific'),
-    ex('Resisted sprint (sled / band)', 'sprint', 'intermediate'),
-    ex('Assisted / overspeed sprint', 'sprint', 'specific'),
-    ex('Hill sprint', 'sprint', 'intermediate'),
-    ex('Repeated sprints', 'sprint', 'intermediate'),
-    ex('A-skip', 'sprint', 'general'),
-    ex('B-skip', 'sprint', 'general'),
-    ex('Dribble / ankling', 'sprint', 'general'),
-    ex('Wicket runs', 'sprint', 'intermediate'),
-    ex('Wall drives', 'sprint', 'general'),
-    ex('Falling / 3-point start', 'sprint', 'intermediate'),
-    ex('Straight-leg bounds', 'sprint', 'general'),
+    ...withGroup('Sprint runs', [
+      ex('Acceleration (10-30m)', 'sprint', 'specific'),
+      ex('Flying / max-velocity sprint', 'sprint', 'specific'),
+      ex('Resisted sprint (sled / band)', 'sprint', 'intermediate'),
+      ex('Assisted / overspeed sprint', 'sprint', 'specific'),
+      ex('Hill sprint', 'sprint', 'intermediate'),
+      ex('Repeated sprints', 'sprint', 'intermediate'),
+    ]),
+    ...withGroup('Drills', [
+      ex('A-skip', 'sprint', 'general'),
+      ex('B-skip', 'sprint', 'general'),
+      ex('Dribble / ankling', 'sprint', 'general'),
+      ex('Wicket runs', 'sprint', 'intermediate'),
+      ex('Wall drives', 'sprint', 'general'),
+      ex('Falling / 3-point start', 'sprint', 'intermediate'),
+      ex('Straight-leg bounds', 'sprint', 'general'),
+    ]),
   ],
   'Ballistic / power': [
     ex('Loaded jump squat (barbell)', 'power_ballistic', 'specific', 'bilateral', 'speed_strength'),

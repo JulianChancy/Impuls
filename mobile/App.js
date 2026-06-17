@@ -5197,13 +5197,13 @@ function ReadEvidence({ read }) {
   return (
     <View style={styles.evidenceBox}>
       {scalarItems.map(([key, value]) => (
-        <View key={key} style={styles.evidenceRow}>
+        <View key={key} style={styles.readEvidenceRow}>
           <Text style={styles.evidenceKey}>{formatEvidenceLabel(key)}</Text>
           <Text style={styles.evidenceVal}>{typeof value === 'number' ? (Math.round(value * 100) / 100) : String(value)}</Text>
         </View>
       ))}
       {shares ? Object.entries(shares).map(([key, value]) => (
-        <View key={`share-${key}`} style={styles.evidenceRow}>
+        <View key={`share-${key}`} style={styles.readEvidenceRow}>
           <Text style={styles.evidenceKey}>{formatEvidenceLabel(key)} share</Text>
           <Text style={styles.evidenceVal}>{Math.round((Number(value) || 0) * 100)}%</Text>
         </View>
@@ -6911,8 +6911,43 @@ function ExerciseFields({ draft, update }) {
           <ChipWrap options={ROM_OPTIONS} value={draft.rom || 'full'} onChange={(value) => update('rom', value)} />
         </View>
       ) : null}
-      {has('tempo') ? <Input label="Tempo (e.g. 3-1-X-0)" value={String(draft.tempo || '')} onChangeText={(value) => update('tempo', value)} /> : null}
+      {has('tempo') ? <TempoField value={draft.tempo} onChange={(value) => update('tempo', value)} /> : null}
     </>
+  );
+}
+
+// Segmented tempo control: four phase cells composing an "ecc-pause-con-pause" string
+// (e.g. 3-1-X-0). Clearer than a free-text field and guides the format.
+function TempoField({ value, onChange }) {
+  const parts = String(value || '').split('-');
+  const phases = ['Lower', 'Hold', 'Raise', 'Hold'];
+  const get = (index) => parts[index] || '';
+  const setPart = (index, raw) => {
+    const cleaned = raw.replace(/[^0-9xX]/g, '').slice(0, 1).toUpperCase();
+    const next = [0, 1, 2, 3].map((slot) => (slot === index ? cleaned : (parts[slot] || '')));
+    onChange(next.every((part) => part === '') ? '' : next.join('-'));
+  };
+  return (
+    <View style={styles.inputWrap}>
+      <Text style={styles.inputLabel}>Tempo</Text>
+      <View style={styles.tempoRow}>
+        {phases.map((label, index) => (
+          <View key={label + index} style={styles.tempoCell}>
+            <TextInput
+              style={styles.tempoInput}
+              value={String(get(index))}
+              onChangeText={(raw) => setPart(index, raw)}
+              placeholder="–"
+              placeholderTextColor="#B9B9B2"
+              maxLength={1}
+              textAlign="center"
+            />
+            <Text style={styles.tempoCellLabel}>{label}</Text>
+          </View>
+        ))}
+      </View>
+      <Text style={styles.tempoHint}>seconds per phase · X = explosive</Text>
+    </View>
   );
 }
 
@@ -6929,24 +6964,52 @@ function libraryEntryToDraft(entry) {
   };
 }
 
-// Editable Force-Velocity coverage tags. Pre-filled from the library; user-overridable.
-function ExerciseTagsEditor({ draft, update }) {
+// A library pick already carries its FV tags, so an exercise is "custom" only when its
+// name is not in the library (then the user sets coverage themselves).
+function isCustomExercise(draft) {
+  const name = (draft.exercise_name || '').trim();
+  if (!name) return false;
+  return !EXERCISE_LIBRARY.some((entry) => entry.name === name);
+}
+
+function CoverageChip({ label }) {
+  if (!label) return null;
+  return <View style={styles.coverageChip}><Text style={styles.coverageChipText}>{label}</Text></View>;
+}
+
+// Coverage tags. For library exercises the FV quality/specificity/laterality are
+// inferred and shown read-only; only custom exercises expose the editable tags.
+function ExerciseCoverageSection({ draft, update, isCustom }) {
+  if (isCustom) {
+    return (
+      <View style={styles.tagsCard}>
+        <Text style={styles.tagsTitle}>Coverage tags (custom)</Text>
+        <Text style={styles.inputLabel}>FV quality</Text>
+        <ChipWrap options={QUALITY_OPTIONS} value={draft.quality || ''} onChange={(value) => update('quality', value)} />
+        <Text style={styles.inputLabel}>Specificity</Text>
+        <ChipWrap options={SPECIFICITY_OPTIONS} value={draft.specificity || 'general'} onChange={(value) => update('specificity', value)} />
+        <Text style={styles.inputLabel}>Laterality</Text>
+        <ChipWrap options={LATERALITY_OPTIONS} value={draft.laterality || 'bilateral'} onChange={(value) => update('laterality', value)} />
+        <Input label="Variation (optional)" value={String(draft.variation || '')} onChangeText={(value) => update('variation', value)} />
+      </View>
+    );
+  }
+  const specificityLabel = (SPECIFICITY_OPTIONS.find(([id]) => id === draft.specificity) || [])[1];
   return (
     <View style={styles.tagsCard}>
-      <Text style={styles.tagsTitle}>Coverage tags</Text>
-      <Text style={styles.inputLabel}>FV quality</Text>
-      <ChipWrap options={QUALITY_OPTIONS} value={draft.quality || ''} onChange={(value) => update('quality', value)} />
-      <Text style={styles.inputLabel}>Specificity</Text>
-      <ChipWrap options={SPECIFICITY_OPTIONS} value={draft.specificity || 'general'} onChange={(value) => update('specificity', value)} />
-      <Text style={styles.inputLabel}>Laterality</Text>
-      <ChipWrap options={LATERALITY_OPTIONS} value={draft.laterality || 'bilateral'} onChange={(value) => update('laterality', value)} />
+      <Text style={styles.tagsTitle}>Coverage · inferred</Text>
+      <View style={styles.coverageChips}>
+        <CoverageChip label={QUALITY_META[draft.quality]?.label} />
+        <CoverageChip label={specificityLabel} />
+        {draft.laterality === 'unilateral' ? <CoverageChip label="Single-leg" /> : null}
+      </View>
       <Input label="Variation (optional)" value={String(draft.variation || '')} onChangeText={(value) => update('variation', value)} />
     </View>
   );
 }
 
 // Library-first exercise builder: tap to open the searchable picker, then edit
-// per-type load fields and coverage tags. Used by every add/edit-exercise flow.
+// per-type load fields. Coverage is inferred from the library (editable only if custom).
 function ExerciseDraftEditor({ draft, update, showTags = true }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const applyPick = (entry) => {
@@ -6964,7 +7027,7 @@ function ExerciseDraftEditor({ draft, update, showTags = true }) {
       {chosen ? (
         <>
           <ExerciseFields draft={draft} update={update} />
-          {showTags ? <ExerciseTagsEditor draft={draft} update={update} /> : null}
+          {showTags ? <ExerciseCoverageSection draft={draft} update={update} isCustom={isCustomExercise(draft)} /> : null}
         </>
       ) : null}
       <ExercisePicker visible={pickerOpen} onClose={() => setPickerOpen(false)} onPick={applyPick} />
@@ -6977,6 +7040,7 @@ function ExerciseDraftEditor({ draft, update, showTags = true }) {
 function ExercisePicker({ visible, onClose, onPick }) {
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  const [expandedFamily, setExpandedFamily] = useState(null);
   const [customMode, setCustomMode] = useState(false);
   const [customName, setCustomName] = useState('');
   const [customType, setCustomType] = useState('');
@@ -6984,6 +7048,7 @@ function ExercisePicker({ visible, onClose, onPick }) {
   function reset() {
     setQuery('');
     setTypeFilter('');
+    setExpandedFamily(null);
     setCustomMode(false);
     setCustomName('');
     setCustomType('');
@@ -6996,11 +7061,40 @@ function ExercisePicker({ visible, onClose, onPick }) {
     pick({ name: customName.trim(), type: customType, quality: defaultQualityForType(customType), specificity: 'general', laterality: 'bilateral' });
   }
 
+  const searching = query.trim().length > 0;
   const results = searchLibrary(query, typeFilter);
-  const grouped = FAMILY_ORDER
+  const families = FAMILY_ORDER
     .map((family) => [family, results.filter((entry) => entry.family === family)])
     .filter(([, items]) => items.length);
   const typeFilterOptions = [['', 'All'], ...TYPE_OPTIONS];
+
+  const renderRow = (entry) => (
+    <Pressable key={entry.name} style={styles.exRow} onPress={() => pick(entry)}>
+      <View style={styles.flex}>
+        <Text style={styles.pickerRowName}>{entry.name}</Text>
+        <Text style={styles.pickerRowMeta}>{(TYPE_META[entry.type] || {}).label}{entry.laterality === 'unilateral' ? ' · single-leg' : ''}</Text>
+      </View>
+      <Text style={styles.pickerRowChevron}>›</Text>
+    </Pressable>
+  );
+
+  // Render a family's exercises, sub-grouped under their umbrella headers (e.g. Pogos, Bounds).
+  const renderFamilyItems = (items) => {
+    const order = [];
+    const byGroup = {};
+    items.forEach((entry) => {
+      const group = entry.group || '';
+      if (!(group in byGroup)) { byGroup[group] = []; order.push(group); }
+      byGroup[group].push(entry);
+    });
+    const hasGroups = order.some((group) => group);
+    return order.map((group) => (
+      <View key={group || 'ungrouped'}>
+        {hasGroups && group ? <Text style={styles.pickerSubgroupTitle}>{group}</Text> : null}
+        {byGroup[group].map(renderRow)}
+      </View>
+    ));
+  };
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={close}>
@@ -7032,21 +7126,27 @@ function ExercisePicker({ visible, onClose, onPick }) {
                 ))}
               </ScrollView>
               <ScrollView style={styles.pickerScroll} keyboardShouldPersistTaps="handled">
-                {grouped.map(([family, items]) => (
-                  <View key={family} style={styles.pickerGroup}>
-                    <Text style={styles.pickerGroupTitle}>{family}</Text>
-                    {items.map((entry) => (
-                      <Pressable key={entry.name} style={styles.pickerRow} onPress={() => pick(entry)}>
-                        <View style={styles.flex}>
-                          <Text style={styles.pickerRowName}>{entry.name}</Text>
-                          <Text style={styles.pickerRowMeta}>{(TYPE_META[entry.type] || {}).label} · {entry.specificity}{entry.laterality === 'unilateral' ? ' · single-leg' : ''}</Text>
-                        </View>
-                        <View style={styles.qualityTag}><Text style={styles.qualityTagText}>{QUALITY_META[entry.quality]?.label || '—'}</Text></View>
-                      </Pressable>
-                    ))}
-                  </View>
-                ))}
-                {grouped.length === 0 ? <Text style={styles.pickerEmpty}>No matches. Try "Create custom".</Text> : null}
+                {families.length === 0 ? <Text style={styles.pickerEmpty}>No matches. Try "Create custom".</Text> : null}
+                {searching
+                  ? families.map(([family, items]) => (
+                    <View key={family} style={styles.pickerGroup}>
+                      <Text style={styles.pickerGroupTitle}>{family}</Text>
+                      {renderFamilyItems(items)}
+                    </View>
+                  ))
+                  : families.map(([family, items]) => {
+                    const open = expandedFamily === family;
+                    return (
+                      <View key={family} style={styles.pickerFamily}>
+                        <Pressable style={styles.pickerFamilyHeader} onPress={() => setExpandedFamily(open ? null : family)}>
+                          <Text style={[styles.pickerFamilyName, styles.flex]}>{family}</Text>
+                          <Text style={styles.pickerFamilyCount}>{items.length}</Text>
+                          <Text style={styles.pickerFamilyChevron}>{open ? '▾' : '▸'}</Text>
+                        </Pressable>
+                        {open ? <View style={styles.pickerFamilyBody}>{renderFamilyItems(items)}</View> : null}
+                      </View>
+                    );
+                  })}
                 <Pressable style={styles.pickerCustomBtn} onPress={() => { setCustomMode(true); setCustomName(query); }}>
                   <Text style={styles.pickerCustomText}>+ Create custom exercise</Text>
                 </Pressable>
@@ -7099,12 +7199,12 @@ function TemplatePicker({ visible, onClose, onPick }) {
           </View>
           <ScrollView style={styles.pickerScroll}>
             {SESSION_TEMPLATES.map((template) => (
-              <Pressable key={template.name} style={styles.pickerRow} onPress={() => onPick(template)}>
+              <Pressable key={template.name} style={styles.exRow} onPress={() => onPick(template)}>
                 <View style={styles.flex}>
                   <Text style={styles.pickerRowName}>{template.name}</Text>
                   <Text style={styles.pickerRowMeta}>{template.focus} · {template.items.length} exercises</Text>
                 </View>
-                <Text style={styles.chevron}>›</Text>
+                <Text style={styles.pickerRowChevron}>›</Text>
               </Pressable>
             ))}
           </ScrollView>
@@ -7743,9 +7843,27 @@ const styles = StyleSheet.create({
   pickerScroll: { marginTop: 6 },
   pickerGroup: { marginBottom: 14 },
   pickerGroupTitle: { fontSize: 11, color: '#6F6F69', fontFamily: MONO, letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6 },
-  pickerRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#ECE7DA', backgroundColor: '#FBF8F0', borderRadius: 12, paddingVertical: 11, paddingHorizontal: 13, marginBottom: 7 },
+  // Collapsible family accordion (browse mode).
+  pickerFamily: { borderBottomWidth: 1, borderBottomColor: '#E6E1D5' },
+  pickerFamilyHeader: { flexDirection: 'row', alignItems: 'center', paddingVertical: 15 },
+  pickerFamilyName: { fontSize: 16.5, color: '#181A14', fontFamily: SERIF, fontWeight: '600' },
+  pickerFamilyCount: { fontSize: 12, color: '#9A9A93', fontFamily: MONO, marginRight: 10 },
+  pickerFamilyChevron: { fontSize: 13, color: '#9A9A93', width: 16, textAlign: 'center' },
+  pickerFamilyBody: { paddingBottom: 8 },
+  pickerSubgroupTitle: { fontSize: 10.5, color: '#8A8A82', fontFamily: MONO, letterSpacing: 0.5, textTransform: 'uppercase', marginTop: 8, marginBottom: 5, marginLeft: 2 },
+  // exRow is the exercise/template card row (distinct from the legacy chip-container pickerRow).
+  exRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#ECE7DA', backgroundColor: '#FBF8F0', borderRadius: 12, paddingVertical: 13, paddingHorizontal: 14, marginBottom: 8 },
   pickerRowName: { fontSize: 15.5, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
-  pickerRowMeta: { fontSize: 11, color: '#74746F', fontFamily: MONO, letterSpacing: 0.2, marginTop: 2 },
+  pickerRowMeta: { fontSize: 11, color: '#9A9A93', fontFamily: MONO, letterSpacing: 0.3, marginTop: 3, textTransform: 'uppercase' },
+  pickerRowChevron: { fontSize: 20, color: '#C4C4BC', marginLeft: 8 },
+  coverageChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
+  coverageChip: { borderWidth: 1, borderColor: '#D9E6DC', backgroundColor: '#EEF5EF', borderRadius: 8, paddingHorizontal: 9, paddingVertical: 4 },
+  coverageChipText: { fontSize: 11, color: '#1F7A40', fontFamily: MONO, letterSpacing: 0.2 },
+  tempoRow: { flexDirection: 'row', gap: 8 },
+  tempoCell: { flex: 1, alignItems: 'center' },
+  tempoInput: { width: '100%', height: 46, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 10, fontSize: 18, color: '#181A14', fontFamily: SERIF },
+  tempoCellLabel: { fontSize: 10, color: '#74746F', fontFamily: MONO, letterSpacing: 0.2, marginTop: 4, textTransform: 'uppercase' },
+  tempoHint: { fontSize: 11.5, color: '#9A9A93', fontFamily: SERIF, fontStyle: 'italic', marginTop: 6 },
   pickerEmpty: { fontSize: 14, color: '#74746F', fontFamily: SERIF, fontStyle: 'italic', textAlign: 'center', marginVertical: 16 },
   pickerCustomBtn: { borderWidth: 1, borderColor: '#1F8A3E', borderStyle: 'dashed', borderRadius: 12, paddingVertical: 13, alignItems: 'center', marginBottom: 24, marginTop: 2 },
   pickerCustomText: { fontSize: 15, fontWeight: '700', color: '#1F8A3E', fontFamily: SERIF },
@@ -7766,13 +7884,11 @@ const styles = StyleSheet.create({
   readConfidence: { fontSize: 10, color: '#9A9A93', fontFamily: MONO, letterSpacing: 0.3 },
   readSentence: { fontSize: 18, color: '#181A14', fontFamily: SERIF, lineHeight: 25, marginTop: 6, marginBottom: 4 },
   evidenceBox: { marginTop: 8, borderTopWidth: 1, borderTopColor: '#ECE7DA', paddingTop: 8 },
-  evidenceRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 },
+  readEvidenceRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 },
   evidenceKey: { fontSize: 12.5, color: '#74746F', fontFamily: SERIF },
   evidenceVal: { fontSize: 12.5, color: '#181A14', fontFamily: MONO },
   radarLegend: { flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 14, marginTop: 6 },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   legendSwatch: { width: 11, height: 11, borderRadius: 3 },
-  legendText: { fontSize: 11, color: '#5E5E58', fontFamily: MONO, letterSpacing: 0.2 },
   pairedWrap: { marginTop: 10, gap: 10 },
   pairedRow: { gap: 4 },
   pairedLabel: { fontSize: 12, color: '#5E5E58', fontFamily: MONO, letterSpacing: 0.2 },
