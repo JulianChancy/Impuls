@@ -3397,11 +3397,18 @@ def app_detect_deficit(block_analysis, metric_stats):
         return {"deficit": "unknown", "confidence": "collecting", "rationale": "No coverage logged yet — plan and log a block to read your deficit.", "shares": {}, "target": DEFICIT_TARGETS["balanced"], "responsiveness": {}}
 
     shares = {key: total[key] / grand for key in QUALITY_CURVE_KEYS}
+    # Force end (low velocity) vs velocity end (high velocity) of the curve.
     force_share = shares["max_strength"] + shares["strength_speed"]
-    fast_share = shares["speed_strength"] + shares["reactive_strength"] + shares["max_speed"]
+    velocity_share = shares["speed_strength"] + shares["reactive_strength"] + shares["max_speed"]
     reactive_speed = shares["reactive_strength"] + shares["max_speed"]
     perf_trend = (metric_stats.get("performance") or {}).get("trend")
     output_flat = _finite(perf_trend) and perf_trend <= 0.02
+
+    # "Balanced" needs breadth, not just a fallback: most qualities meaningfully dosed and
+    # no single quality dominating. A reactive-heavy / force-light spread is NOT balanced.
+    present = sum(1 for key in QUALITY_CURVE_KEYS if shares[key] >= 0.10)
+    max_share = max(shares.values())
+    is_balanced = present >= 4 and max_share <= 0.40
 
     week_outputs = [week.get("bestOutput") for week in weeks]
     responsiveness = {}
@@ -3411,12 +3418,18 @@ def app_detect_deficit(block_analysis, metric_stats):
         if len(pairs) >= 3:
             responsiveness[key] = app_pearson([p[0] for p in pairs], [p[1] for p in pairs])
 
-    if reactive_speed < 0.18 and force_share >= 0.45:
+    if reactive_speed < 0.18 and force_share >= 0.40:
         deficit, rationale = "reactive", "Your programme is force-heavy with little reactive or speed dose."
-    elif force_share < 0.20 and fast_share >= 0.60:
+    elif force_share < 0.30 and velocity_share >= 0.45:
         deficit, rationale = "force", "Your programme is velocity-heavy with a thin maximal-strength base."
-    elif output_flat and force_share >= 0.40:
+    elif output_flat and force_share >= 0.40 and reactive_speed < 0.30:
         deficit, rationale = "conversion", "Strength dose is high but output is flat — a force-to-velocity conversion gap."
+    elif not is_balanced:
+        # Skewed, but not a clean force/velocity case: name the thinner end of the curve.
+        if force_share <= velocity_share:
+            deficit, rationale = "force", "Your coverage leans to the velocity end — the max-strength base is light."
+        else:
+            deficit, rationale = "reactive", "Your coverage leans to the force end — reactive and speed work is light."
     else:
         candidates = [(key, r) for key, r in responsiveness.items() if _finite(r) and r > 0.3 and shares[key] < 0.18]
         if candidates:

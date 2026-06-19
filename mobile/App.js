@@ -420,6 +420,54 @@ function DateStepper({ value, onChange }) {
   );
 }
 
+// Tap-to-open single-date picker: shows the chosen day, expands a month calendar to pick
+// any date directly (no day-by-day stepping). Reuses the month-grid helpers + styles.
+function DateField({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [visibleMonth, setVisibleMonth] = useState(value || isoDate());
+  const selected = value || isoDate();
+  const days = monthCalendarDays(visibleMonth);
+  return (
+    <View>
+      <Pressable style={styles.dateFieldBtn} onPress={() => { setVisibleMonth(selected); setOpen((current) => !current); }}>
+        <Text style={styles.dateFieldValue}>{friendlyDateLabel(selected)}</Text>
+        <Text style={styles.dateFieldHint}>{open ? 'Close' : 'Change'}</Text>
+      </Pressable>
+      {open ? (
+        <View style={styles.dateRangePickerCard}>
+          <View style={styles.miniCalendarHeader}>
+            <Pressable style={styles.miniCalendarArrow} onPress={() => setVisibleMonth((current) => addMonths(current, -1))}><Text style={styles.chevron}>‹</Text></Pressable>
+            <Text style={styles.miniCalendarTitle}>{monthLabel(visibleMonth)}</Text>
+            <Pressable style={styles.miniCalendarArrow} onPress={() => setVisibleMonth((current) => addMonths(current, 1))}><Text style={styles.chevron}>›</Text></Pressable>
+          </View>
+          <View style={styles.monthWeekHeader}>
+            {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label) => (
+              <Text key={label} style={styles.monthWeekHeaderText}>{label}</Text>
+            ))}
+          </View>
+          <View style={styles.rangeCalendarGrid}>
+            {days.map((day) => {
+              const isSelected = day.iso === selected;
+              return (
+                <Pressable
+                  key={day.iso}
+                  style={[styles.rangeDayCell, day.outsideMonth && styles.rangeDayOutside, isSelected && styles.rangeDaySelected]}
+                  onPress={() => { onChange(day.iso); setOpen(false); }}
+                >
+                  <Text style={[styles.rangeDayText, day.outsideMonth && styles.rangeDayTextOutside, isSelected && styles.rangeDayTextSelected]}>{day.day}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Pressable style={styles.dateTodayLink} onPress={() => { onChange(isoDate()); setOpen(false); }}>
+            <Text style={styles.dateTodayText}>Jump to today</Text>
+          </Pressable>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function addMonths(dateValue, amount) {
   const date = dateFromIso(dateValue);
   const originalDay = date.getDate();
@@ -2760,22 +2808,6 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSee
   const painYes = Number(draft.pain_score) > 0;
   const dayRead = readDay(Number(draft.freshness_score) || 0, Number(draft.pain_score) || 0);
 
-  function Scale10({ field, tone }) {
-    const value = Number(draft[field]) || 0;
-    return (
-      <View style={styles.scale5}>
-        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => {
-          const on = value === n;
-          return (
-            <Pressable key={n} style={[styles.scaleBtn, on && (tone === 'warn' ? styles.scaleBtnWarn : styles.scaleBtnSel)]} onPress={() => updateDraft(field, n)}>
-              <Text style={[styles.scaleBtnText, on && styles.scaleBtnTextSel]}>{n}</Text>
-            </Pressable>
-          );
-        })}
-      </View>
-    );
-  }
-
   return (
     <View style={styles.screen}>
       <View style={styles.checkinTop}>
@@ -2791,7 +2823,7 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSee
 
       <View style={styles.qGroup}>
         <Text style={styles.q}>How fresh do you feel?</Text>
-        <Scale10 field="freshness_score" />
+        <SliderField label="Recovery" value={draft.freshness_score} onChange={(value) => updateDraft('freshness_score', value)} />
         <View style={styles.scaleEnds}><Text style={styles.label}>Fatigued</Text><Text style={styles.label}>Fresh</Text></View>
       </View>
 
@@ -2807,7 +2839,7 @@ function CheckInScreen({ draft, updateDraft, saveCheckIn, setScreen, tutorialSee
         </View>
         {painYes ? (
           <View style={styles.painExtra}>
-            <Scale10 field="pain_score" tone="warn" />
+            <SliderField label="Pain level" value={draft.pain_score} onChange={(value) => updateDraft('pain_score', value)} />
             <View style={styles.scaleEnds}><Text style={styles.label}>Barely there</Text><Text style={styles.label}>Severe</Text></View>
             <Input label="Where? (optional)" value={String(draft.pain_location || '')} onChangeText={(value) => updateDraft('pain_location', value)} />
           </View>
@@ -3189,7 +3221,7 @@ function ReviewLineSvg({ series, height = 150, compact = false }) {
 
 function PerformanceLogScreen({ savePerformanceLog, setScreen }) {
   const [mode, setMode] = useState('jump');
-  const [form, setForm] = useState({ date: isoDate(), performance_score: '', height: '', height_unit: 'cm', ft: '', ft_unit: 'seconds', weight: '', weight_unit: 'kg', lift_name: '', bar_velocity: '' });
+  const [form, setForm] = useState({ date: isoDate(), performance_score: 5, height: '', height_unit: 'cm', ft: '', ft_unit: 'seconds', weight: '', weight_unit: 'kg', lift_name: '', bar_velocity: '' });
   const up = (key, value) => setForm((current) => ({ ...current, [key]: value }));
   return (
     <View style={styles.screen}>
@@ -3199,7 +3231,7 @@ function PerformanceLogScreen({ savePerformanceLog, setScreen }) {
       </View>
       <View style={styles.qGroup}>
         <Text style={styles.q}>For which day?</Text>
-        <DateStepper value={form.date} onChange={(value) => up('date', value)} />
+        <DateField value={form.date} onChange={(value) => up('date', value)} />
       </View>
       <View style={styles.toggleRow}>
         <Pressable style={[styles.toggleBtn, mode === 'jump' && styles.toggleBtnSel]} onPress={() => setMode('jump')}><Text style={[styles.toggleBtnText, mode === 'jump' && styles.toggleBtnTextSel]}>Best jump</Text></Pressable>
@@ -3208,7 +3240,7 @@ function PerformanceLogScreen({ savePerformanceLog, setScreen }) {
       <Text style={styles.muted}>Log whatever you measured — fields are optional.</Text>
       {mode === 'jump' ? (
         <View style={styles.card}>
-          <Input label="Session score (0–10)" value={form.performance_score} onChangeText={(value) => up('performance_score', value)} />
+          <SliderField label="Performance score" value={form.performance_score} onChange={(value) => up('performance_score', value)} />
           <Input label="Max touch height" value={form.height} onChangeText={(value) => up('height', value)} />
           <ChipWrap options={jumpDistanceUnitOptions} value={form.height_unit} onChange={(value) => up('height_unit', value)} />
           <Input label="Flight time (optional)" value={form.ft} onChangeText={(value) => up('ft', value)} />
@@ -3839,6 +3871,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
   const [openBlockId, setOpenBlockId] = useState(null);
   const [adding, setAdding] = useState(false);
   const [newBlock, setNewBlock] = useState({ name: '', weeks: '4' });
+  const [confirmDeleteBlockId, setConfirmDeleteBlockId] = useState(null);
 
   function ensureMacroDraft(draft) {
     draft.macro_blocks = draft.macro_blocks || [];
@@ -3951,19 +3984,37 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
     setSelectedDate(date);
   }
 
+  // Direct commit (no Alert) so it works on web too; the UI does a two-tap confirm.
   function deleteBlockById(blockId) {
-    Alert.alert('Delete block?', 'This removes the block and its sessions.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => commitProgramme((draft) => {
-        const macroItem = currentMacro(draft);
-        if (!macroItem) return;
-        macroItem.blocks = (macroItem.blocks || []).filter((item) => item.id !== blockId);
-        if (draft.selected_block_id === blockId) {
-          draft.selected_block_id = macroItem.blocks[0]?.id || null;
-          draft.selected_week_id = macroItem.blocks[0]?.weeks?.[0]?.id || null;
-        }
-      }) },
-    ]);
+    commitProgramme((draft) => {
+      const macroItem = currentMacro(draft);
+      if (!macroItem) return;
+      macroItem.blocks = (macroItem.blocks || []).filter((item) => item.id !== blockId);
+      if (draft.selected_block_id === blockId) {
+        draft.selected_block_id = macroItem.blocks[0]?.id || null;
+        draft.selected_week_id = macroItem.blocks[0]?.weeks?.[0]?.id || null;
+      }
+    });
+    setConfirmDeleteBlockId(null);
+  }
+
+  // Move a block's start: shift the block + every week + every session by the same delta,
+  // so the weeks the user built stay intact and consecutive.
+  function shiftBlockStart(blockId, deltaDays) {
+    if (!deltaDays) return;
+    commitProgramme((draft) => {
+      const macroItem = currentMacro(draft);
+      const target = (macroItem?.blocks || []).find((item) => item.id === blockId);
+      if (!target) return;
+      const shift = (value) => (value ? addDays(value, deltaDays) : value);
+      target.start_date = shift(target.start_date || target.weeks?.[0]?.start_date || isoDate());
+      target.end_date = shift(target.end_date);
+      (target.weeks || []).forEach((weekItem) => {
+        weekItem.start_date = shift(weekItem.start_date);
+        weekItem.end_date = shift(weekItem.end_date);
+        (weekItem.sessions || []).forEach((session) => { session.date = shift(session.date); });
+      });
+    });
   }
 
   function selectMacro(macroId) {
@@ -4233,7 +4284,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
                 <Text style={styles.exName}>{blockItem.block_name || `Block ${index + 1}`}{isCurrent ? '  ·  current' : ''}</Text>
                 <Text style={styles.exPrescription}>{weeks} week{weeks === 1 ? '' : 's'} · {dateRangeSummary(blockItem.start_date, blockItem.end_date)}</Text>
               </View>
-              <Pressable onPress={() => setOpenBlockId(open ? null : blockItem.id)}><Text style={styles.textLink}>{open ? 'Done' : 'Edit'}</Text></Pressable>
+              <Pressable onPress={() => { setOpenBlockId(open ? null : blockItem.id); setConfirmDeleteBlockId(null); }}><Text style={styles.textLink}>{open ? 'Done' : 'Edit'}</Text></Pressable>
             </View>
             {open ? (
               <View style={styles.painExtra}>
@@ -4246,9 +4297,24 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
                     <Pressable style={styles.stepBtn} onPress={() => addWeek(blockItem.id)}><Text style={styles.stepBtnText}>+</Text></Pressable>
                   </View>
                 </View>
+                <View style={styles.rowBetween}>
+                  <Text style={styles.label}>Block starts</Text>
+                  <View style={styles.stepRow}>
+                    <Pressable style={styles.stepBtn} hitSlop={6} onPress={() => shiftBlockStart(blockItem.id, -7)}><Text style={styles.stepBtnText}>‹‹</Text></Pressable>
+                    <Pressable style={styles.stepBtn} hitSlop={6} onPress={() => shiftBlockStart(blockItem.id, -1)}><Text style={styles.stepBtnText}>‹</Text></Pressable>
+                    <Text style={styles.stepDateVal}>{friendlyDateLabel(blockItem.start_date || blockItem.weeks?.[0]?.start_date)}</Text>
+                    <Pressable style={styles.stepBtn} hitSlop={6} onPress={() => shiftBlockStart(blockItem.id, 1)}><Text style={styles.stepBtnText}>›</Text></Pressable>
+                    <Pressable style={styles.stepBtn} hitSlop={6} onPress={() => shiftBlockStart(blockItem.id, 7)}><Text style={styles.stepBtnText}>››</Text></Pressable>
+                  </View>
+                </View>
+                <Text style={styles.calendarMetaText}>Moving the start shifts the whole block — weeks and sessions move with it.</Text>
                 <View style={styles.twoCol}>
                   <Pressable style={styles.ghostBtn} onPress={() => selectBlockById(blockItem.id)}><Text style={styles.ghostBtnText}>{isCurrent ? 'Current block' : 'Set current'}</Text></Pressable>
-                  <Pressable style={styles.ghostBtn} onPress={() => deleteBlockById(blockItem.id)}><Text style={[styles.ghostBtnText, styles.dangerText]}>Delete</Text></Pressable>
+                  {confirmDeleteBlockId === blockItem.id ? (
+                    <Pressable style={[styles.ghostBtn, styles.dangerBtn]} onPress={() => deleteBlockById(blockItem.id)}><Text style={[styles.ghostBtnText, styles.dangerText]}>Confirm delete</Text></Pressable>
+                  ) : (
+                    <Pressable style={styles.ghostBtn} onPress={() => setConfirmDeleteBlockId(blockItem.id)}><Text style={[styles.ghostBtnText, styles.dangerText]}>Delete</Text></Pressable>
+                  )}
                 </View>
               </View>
             ) : (
@@ -7818,6 +7884,11 @@ const styles = StyleSheet.create({
   dateCenter: { flex: 1, height: 52, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   dateCenterText: { fontSize: 17, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
   dateReset: { fontSize: 11, color: '#1F8A3E', fontFamily: MONO, letterSpacing: 0.3, marginTop: 1 },
+  dateFieldBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', height: 52, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 12, paddingHorizontal: 16 },
+  dateFieldValue: { fontSize: 16, color: '#181A14', fontFamily: SERIF, fontWeight: '600' },
+  dateFieldHint: { fontSize: 11, color: '#1F8A3E', fontFamily: MONO, letterSpacing: 0.3, textTransform: 'uppercase' },
+  dateTodayLink: { paddingVertical: 10, alignItems: 'center', marginTop: 4 },
+  dateTodayText: { fontSize: 13, color: '#1F8A3E', fontFamily: MONO, letterSpacing: 0.3 },
   libraryPickBtn: { borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 12, paddingVertical: 12, paddingHorizontal: 14, marginBottom: 10 },
   libraryPickText: { fontSize: 16, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
   libraryPickMeta: { fontSize: 11, color: '#74746F', fontFamily: MONO, letterSpacing: 0.3, marginTop: 2, textTransform: 'uppercase' },
@@ -7918,6 +7989,8 @@ const styles = StyleSheet.create({
   exPrescription: { fontSize: 13, color: '#5E5E58', fontFamily: MONO, marginTop: 2 },
   editGap: { marginLeft: 14 },
   dangerText: { color: '#C2422B' },
+  dangerBtn: { borderColor: '#E6C9C2', backgroundColor: '#FBF1EF' },
+  stepDateVal: { fontSize: 14, fontWeight: '600', color: '#181A14', fontFamily: SERIF, minWidth: 78, textAlign: 'center' },
   stepRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
   stepBtn: { width: 34, height: 34, borderRadius: 17, borderWidth: 1, borderColor: '#E6E6E1', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FBF8F0' },
   stepBtnText: { fontSize: 20, color: '#181A14' },

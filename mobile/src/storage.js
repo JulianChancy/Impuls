@@ -70,7 +70,8 @@ export const defaultData = {
     pain_score: 0,
     pain_location: '',
     // Recovery is a single Fatigue<->Fresh scale stored in freshness_score (high = fresh).
-    freshness_score: 0,
+    // Defaults to a neutral 5 so the slider starts centred rather than at "fully fatigued".
+    freshness_score: 5,
     primary_metric: 'performance_score',
     primary_value: '',
     primary_unit: '',
