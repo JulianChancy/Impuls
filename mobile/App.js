@@ -3642,6 +3642,19 @@ function CalendarScreen({
     });
   }
 
+  function movePlannedExercise(sessionId, exerciseId, direction) {
+    commitProgramme((draft) => {
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (!target) return;
+      const list = target.exercises || [];
+      const index = list.findIndex((exercise) => exercise.id === exerciseId);
+      const swapWith = index + direction;
+      if (index < 0 || swapWith < 0 || swapWith >= list.length) return;
+      [list[index], list[swapWith]] = [list[swapWith], list[index]];
+      target.exercises = numberExercises(list);
+    });
+  }
+
   function setSessionField(sessionId, key, value) {
     commitProgramme((draft) => {
       const target = findPlannedSession(draft, sessionId)?.session;
@@ -3804,13 +3817,17 @@ function CalendarScreen({
             const editing = editingExId === exercise.id;
             return (
               <View key={exercise.id} style={styles.exItem}>
-                <Pressable style={styles.exHeader} onPress={() => setOpenExerciseId(open ? null : exercise.id)}>
-                  <View style={styles.flex}>
+                <View style={styles.exHeader}>
+                  <Pressable style={styles.flex} onPress={() => setOpenExerciseId(open ? null : exercise.id)}>
                     <Text style={styles.exName}>{index + 1}. {exercise.exercise_name || 'Exercise'}</Text>
                     <Text style={styles.exPrescription}>{exercisePrescription(exercise)}</Text>
+                  </Pressable>
+                  <View style={styles.reorderControls}>
+                    <Pressable style={[styles.reorderBtn, index === 0 && styles.reorderBtnDisabled]} disabled={index === 0} onPress={() => movePlannedExercise(session.id, exercise.id, -1)}><Text style={styles.reorderBtnText}>↑</Text></Pressable>
+                    <Pressable style={[styles.reorderBtn, index === (session.exercises || []).length - 1 && styles.reorderBtnDisabled]} disabled={index === (session.exercises || []).length - 1} onPress={() => movePlannedExercise(session.id, exercise.id, 1)}><Text style={styles.reorderBtnText}>↓</Text></Pressable>
+                    <Pressable onPress={() => setOpenExerciseId(open ? null : exercise.id)}><Text style={styles.chevron}>{open ? '⌃' : '⌄'}</Text></Pressable>
                   </View>
-                  <Text style={styles.chevron}>{open ? '⌃' : '⌄'}</Text>
-                </Pressable>
+                </View>
                 {open ? (
                   <View style={styles.painExtra}>
                     <CalendarExerciseMetrics
