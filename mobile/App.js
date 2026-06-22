@@ -385,17 +385,35 @@ function progressionFactor(mode, weekIndex, total) {
   if (mode === 'deload') return weekIndex === total ? 0.6 : 1 + 0.08 * weekIndex;
   return 1;
 }
-// Scale an exercise's single primary load driver by the weekly factor.
-function scaleExerciseLoad(ex, factor) {
+// What dimension progressive overload scales each week.
+const OVERLOAD_OPTIONS = [
+  ['volume', 'Volume'],
+  ['intensity', 'Intensity'],
+  ['both', 'Both'],
+];
+
+// Apply progressive overload by scaling an exercise's volume driver, intensity driver, or both.
+function applyOverload(ex, factor, dim = 'volume') {
   if (!factor || factor === 1) return { ...ex };
   const clone = { ...ex };
   const scaled = (value) => Math.round(jsNum(value) * factor);
   const t = ex.movement_type;
-  if (t === 'plyometric') clone.contacts = scaled(ex.contacts) || ex.contacts;
-  else if (t === 'sprint') clone.reps = scaled(ex.reps) || ex.reps;
-  else if (t === 'endurance' || t === 'skill') clone.duration_minutes = scaled(ex.duration_minutes) || ex.duration_minutes;
-  else if ((ex.intensity_unit || '%') === '%') clone.intensity_value = Math.min(100, scaled(ex.intensity_value)) || ex.intensity_value;
-  else clone.intensity_value = scaled(ex.intensity_value) || ex.intensity_value;
+  const bumpVolume = () => {
+    if (t === 'plyometric') clone.contacts = scaled(ex.contacts) || ex.contacts;
+    else if (t === 'sprint') clone.reps = scaled(ex.reps) || ex.reps;
+    else if (t === 'endurance' || t === 'skill') clone.duration_minutes = scaled(ex.duration_minutes) || ex.duration_minutes;
+    else clone.reps = scaled(ex.reps) || ex.reps; // strength / general / power_ballistic / rehab
+  };
+  const bumpIntensity = () => {
+    if (t === 'strength' || t === 'general' || t === 'power_ballistic' || t === 'rehab') {
+      const cap = (ex.intensity_unit || '%') === '%' ? 100 : Infinity;
+      clone.intensity_value = Math.min(cap, scaled(ex.intensity_value)) || ex.intensity_value;
+    } else {
+      clone.intent_percent = Math.min(100, scaled(ex.intent_percent)) || ex.intent_percent;
+    }
+  };
+  if (dim === 'volume' || dim === 'both') bumpVolume();
+  if (dim === 'intensity' || dim === 'both') bumpIntensity();
   return clone;
 }
 
@@ -4354,6 +4372,7 @@ function EditBlockCalendarScreen({
   const [templateWeekday, setTemplateWeekday] = useState('1');
   const [repeatCount, setRepeatCount] = useState('3');
   const [repeatProgression, setRepeatProgression] = useState('flat');
+  const [overloadDim, setOverloadDim] = useState('volume');
   const [templateOpen, setTemplateOpen] = useState(false);
   const programme = data.programme;
   const macro = currentMacro(programme);
@@ -4623,7 +4642,7 @@ function EditBlockCalendarScreen({
             id: createId('planned'),
             date: addDays(start, dayOffset(session.date, sourceStart)),
             completed: false,
-            exercises: (session.exercises || []).map((exercise) => ({ ...scaleExerciseLoad(exercise, factor), id: createId('planned_exercise') })),
+            exercises: (session.exercises || []).map((exercise) => ({ ...applyOverload(exercise, factor, overloadDim), id: createId('planned_exercise') })),
           })),
         });
       }
@@ -4634,15 +4653,38 @@ function EditBlockCalendarScreen({
   function insertTemplate(template) {
     setTemplateOpen(false);
     commitProgramme((draft) => {
+      // Custom templates carry full exercises; curated ones carry library item refs.
+      const exercises = Array.isArray(template.exercises)
+        ? template.exercises.map((exercise) => ({ ...exercise, id: createId('planned_exercise') }))
+        : (template.items || []).map((item) => ({ ...templateItemToExercise(item), id: createId('planned_exercise') }));
       ensureProgrammeWeek(draft, selectedDate).sessions.push({
         id: createId('planned'),
         date: selectedDate,
         session_name: template.name,
-        focus: template.focus,
+        focus: template.focus || '',
         duration: '',
         completed: false,
-        exercises: template.items.map((item) => ({ ...templateItemToExercise(item), id: createId('planned_exercise') })),
+        exercises,
       });
+    });
+  }
+
+  function saveSessionAsTemplate(session) {
+    commitProgramme((draft) => {
+      draft.session_templates = draft.session_templates || [];
+      draft.session_templates.push({
+        id: createId('tmpl'),
+        name: session.session_name || 'Custom template',
+        focus: session.focus || '',
+        custom: true,
+        exercises: (session.exercises || []).map((exercise) => ({ ...exercise })),
+      });
+    });
+  }
+
+  function deleteTemplate(templateId) {
+    commitProgramme((draft) => {
+      draft.session_templates = (draft.session_templates || []).filter((template) => template.id !== templateId);
     });
   }
 
@@ -4706,7 +4748,7 @@ function EditBlockCalendarScreen({
             </Pressable>
           ))}
         </View>
-        <Text style={styles.label}>Progression</Text>
+        <Text style={styles.label}>Progressive overload</Text>
         <View style={styles.chipWrap}>
           {PROGRESSION_OPTIONS.map(([id, label]) => (
             <Pressable key={id} style={[styles.chip, repeatProgression === id && styles.chipActive]} onPress={() => setRepeatProgression(id)}>
@@ -4714,9 +4756,22 @@ function EditBlockCalendarScreen({
             </Pressable>
           ))}
         </View>
+        {repeatProgression !== 'flat' ? (
+          <>
+            <Text style={styles.label}>Overload what?</Text>
+            <View style={styles.chipWrap}>
+              {OVERLOAD_OPTIONS.map(([id, label]) => (
+                <Pressable key={id} style={[styles.chip, overloadDim === id && styles.chipActive]} onPress={() => setOverloadDim(id)}>
+                  <Text style={[styles.chipText, overloadDim === id && styles.chipTextActive]}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={styles.calendarMetaText}>Each new week scales {overloadDim === 'both' ? 'volume and intensity' : overloadDim} up automatically.</Text>
+          </>
+        ) : null}
         <ActionButton title={`Repeat week ${repeatCount}×`} tone="black" onPress={repeatWeekWithProgression} />
       </View>
-      <TemplatePicker visible={templateOpen} onClose={() => setTemplateOpen(false)} onPick={insertTemplate} />
+      <TemplatePicker visible={templateOpen} onClose={() => setTemplateOpen(false)} onPick={insertTemplate} custom={programme.session_templates || []} onDelete={deleteTemplate} />
       <View style={styles.calendarPanel}>
         <Text style={styles.sectionTitle}>This Week</Text>
         {weekSessions.length === 0 ? <Text style={styles.muted}>No sessions in this week yet.</Text> : null}
@@ -4750,6 +4805,7 @@ function EditBlockCalendarScreen({
             <Pressable style={styles.miniButton} onPress={() => updatePlannedSession(session.id, 'date', selectedDate)}><Text style={styles.miniButtonText}>To Day</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => copySession(session)}><Text style={styles.miniButtonText}>Copy</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => duplicateSession(session)}><Text style={styles.miniButtonText}>Dup</Text></Pressable>
+            <Pressable style={styles.miniButton} onPress={() => saveSessionAsTemplate(session)}><Text style={styles.miniButtonText}>Save tmpl</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => deletePlannedSession(session.id)}><Text style={styles.miniButtonText}>Del</Text></Pressable>
           </View>
         </View>
@@ -4836,6 +4892,19 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
     });
   }
 
+  function moveExercise(exerciseId, direction) {
+    commitProgramme((draft) => {
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (!target) return;
+      const list = target.exercises || [];
+      const index = list.findIndex((exercise) => exercise.id === exerciseId);
+      const swapWith = index + direction;
+      if (index < 0 || swapWith < 0 || swapWith >= list.length) return;
+      [list[index], list[swapWith]] = [list[swapWith], list[index]];
+      target.exercises = numberExercises(list);
+    });
+  }
+
   function addPlannedExercise() {
     const exercise = {
       ...draftExercise,
@@ -4912,7 +4981,11 @@ function EditPlannedSessionScreen({ data, setData, sessionId, returnScreen = 'ed
           <View key={exercise.id} style={styles.card}>
             <View style={styles.rowBetween}>
               <Text style={[styles.cardTitle, styles.flex]}>{index + 1}. {exercise.exercise_name || 'Exercise'}</Text>
-              <Pressable onPress={() => setEditingId(open ? null : exercise.id)}><Text style={styles.textLink}>{open ? 'Done' : 'Edit'}</Text></Pressable>
+              <View style={styles.reorderControls}>
+                <Pressable style={[styles.reorderBtn, index === 0 && styles.reorderBtnDisabled]} disabled={index === 0} onPress={() => moveExercise(exercise.id, -1)}><Text style={styles.reorderBtnText}>↑</Text></Pressable>
+                <Pressable style={[styles.reorderBtn, index === exercises.length - 1 && styles.reorderBtnDisabled]} disabled={index === exercises.length - 1} onPress={() => moveExercise(exercise.id, 1)}><Text style={styles.reorderBtnText}>↓</Text></Pressable>
+                <Pressable onPress={() => setEditingId(open ? null : exercise.id)}><Text style={styles.textLink}>{open ? 'Done' : 'Edit'}</Text></Pressable>
+              </View>
             </View>
             <Text style={styles.calendarMetaText}>{exercise.movement_type.replace('_', ' ')} · {exercisePrescription(exercise)}</Text>
             {open ? (
@@ -7251,8 +7324,9 @@ function LoadShapePreview({ block, currentWeekId }) {
   );
 }
 
-// Pick a curated session template (pre-tagged exercises) to drop onto a day.
-function TemplatePicker({ visible, onClose, onPick }) {
+// Pick a session template to drop onto a day: the user's saved templates first
+// ("Save tmpl" on any session), then the curated starters.
+function TemplatePicker({ visible, onClose, onPick, custom = [], onDelete }) {
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <View style={styles.pickerBackdrop}>
@@ -7262,6 +7336,17 @@ function TemplatePicker({ visible, onClose, onPick }) {
             <Pressable onPress={onClose}><Text style={styles.pickerClose}>Done</Text></Pressable>
           </View>
           <ScrollView style={styles.pickerScroll}>
+            {custom.length ? <Text style={styles.pickerGroupTitle}>Your templates</Text> : null}
+            {custom.map((template) => (
+              <View key={template.id} style={styles.exRow}>
+                <Pressable style={styles.flex} onPress={() => onPick(template)}>
+                  <Text style={styles.pickerRowName}>{template.name}</Text>
+                  <Text style={styles.pickerRowMeta}>{template.focus ? `${template.focus} · ` : ''}{(template.exercises || []).length} exercises</Text>
+                </Pressable>
+                {onDelete ? <Pressable hitSlop={8} onPress={() => onDelete(template.id)}><Text style={styles.dangerText}>Remove</Text></Pressable> : null}
+              </View>
+            ))}
+            <Text style={styles.pickerGroupTitle}>Starter templates</Text>
             {SESSION_TEMPLATES.map((template) => (
               <Pressable key={template.name} style={styles.exRow} onPress={() => onPick(template)}>
                 <View style={styles.flex}>
@@ -7990,6 +8075,10 @@ const styles = StyleSheet.create({
   editGap: { marginLeft: 14 },
   dangerText: { color: '#C2422B' },
   dangerBtn: { borderColor: '#E6C9C2', backgroundColor: '#FBF1EF' },
+  reorderControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  reorderBtn: { width: 30, height: 30, borderRadius: 8, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', alignItems: 'center', justifyContent: 'center' },
+  reorderBtnDisabled: { opacity: 0.3 },
+  reorderBtnText: { fontSize: 15, color: '#181A14', fontFamily: SERIF },
   stepDateVal: { fontSize: 14, fontWeight: '600', color: '#181A14', fontFamily: SERIF, minWidth: 78, textAlign: 'center' },
   stepRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
   stepBtn: { width: 34, height: 34, borderRadius: 17, borderWidth: 1, borderColor: '#E6E6E1', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FBF8F0' },

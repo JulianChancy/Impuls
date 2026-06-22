@@ -55,6 +55,8 @@ export const defaultData = {
     selected_week_id: null,
     copied_session: null,
     day_notes: {},
+    // User-saved session templates (with exercises), reusable across the block.
+    session_templates: [],
     macro_blocks: [],
   },
   activeSession: {
@@ -125,6 +127,7 @@ function migrateProgramme(programme = {}) {
       selected_week_id: selectedWeek,
       copied_session: programme.copied_session || null,
       day_notes: programme.day_notes || {},
+      session_templates: Array.isArray(programme.session_templates) ? programme.session_templates : [],
     };
   }
 
@@ -133,6 +136,7 @@ function migrateProgramme(programme = {}) {
     calendar_name: cleanOldProgrammeName(programme.calendar_name, 'Off-Season 2024'),
     copied_session: programme.copied_session || null,
     day_notes: programme.day_notes || {},
+    session_templates: Array.isArray(programme.session_templates) ? programme.session_templates : [],
   };
 }
 

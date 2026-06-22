@@ -45,10 +45,14 @@ create table if not exists public.programmes (
   selected_week_id uuid,
   day_notes jsonb not null default '{}'::jsonb,
   copied_session jsonb,
+  session_templates jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint programmes_user_id_key unique (user_id)
 );
+
+-- Existing projects can run this safely to add user-saved session templates:
+alter table if exists public.programmes add column if not exists session_templates jsonb not null default '[]'::jsonb;
 
 create table if not exists public.macro_blocks (
   id uuid primary key default gen_random_uuid(),

@@ -299,6 +299,7 @@ export async function loadAppDataFromSupabase(userId) {
     selected_week_id: programmeRow.selected_week_id,
     day_notes: programmeRow.day_notes || {},
     copied_session: programmeRow.copied_session || null,
+    session_templates: Array.isArray(programmeRow.session_templates) ? programmeRow.session_templates : [],
     macro_blocks: macroBlocks
       .filter((macro) => macro.programme_id === programmeRow.id)
       .map((macro) => ({
@@ -384,18 +385,27 @@ export async function saveProfile(userId, profile) {
 
 export async function saveProgramme(userId, programme) {
   requireUserId(userId);
-  const programmeRow = await singleOrThrow(
-    upsertRow('programmes', stripUndefined({
-      id: uuidOrUndefined(programme.id),
-      user_id: userId,
-      calendar_name: programme.calendar_name || defaultData.programme.calendar_name,
-      selected_macro_id: uuidOrNull(programme.selected_macro_id),
-      selected_block_id: uuidOrNull(programme.selected_block_id),
-      selected_week_id: uuidOrNull(programme.selected_week_id),
-      day_notes: programme.day_notes || {},
-      copied_session: programme.copied_session || null,
-    }), 'user_id')
-  );
+  const programmeBase = {
+    id: uuidOrUndefined(programme.id),
+    user_id: userId,
+    calendar_name: programme.calendar_name || defaultData.programme.calendar_name,
+    selected_macro_id: uuidOrNull(programme.selected_macro_id),
+    selected_block_id: uuidOrNull(programme.selected_block_id),
+    selected_week_id: uuidOrNull(programme.selected_week_id),
+    day_notes: programme.day_notes || {},
+    copied_session: programme.copied_session || null,
+  };
+  let programmeRow;
+  try {
+    programmeRow = await singleOrThrow(
+      upsertRow('programmes', stripUndefined({ ...programmeBase, session_templates: programme.session_templates || [] }), 'user_id')
+    );
+  } catch (error) {
+    const schemaMessage = `${error?.message || ''} ${error?.details || ''}`;
+    if (!/session_templates/i.test(schemaMessage)) throw error;
+    console.warn('[SUPABASE SAVE] programmes.session_templates column missing. Saving without custom templates. Run the session_templates migration in supabase/schema.sql.', error);
+    programmeRow = await singleOrThrow(upsertRow('programmes', stripUndefined(programmeBase), 'user_id'));
+  }
 
   const macroIdMap = {};
   const blockIdMap = {};
