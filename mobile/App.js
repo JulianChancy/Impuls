@@ -667,6 +667,13 @@ function currentPlannedSessions(programme) {
   return currentWeek(programme)?.sessions || [];
 }
 
+// Place a session on its day, replacing any existing session(s) on that date — one session
+// per day. Used by paste / template apply / repeat so applying never stacks duplicates.
+function placeSessionInWeek(week, session) {
+  week.sessions = (week.sessions || []).filter((existing) => existing.date !== session.date);
+  week.sessions.push(session);
+}
+
 function ensureProgrammeWeek(programme, dateValue = isoDate()) {
   programme.macro_blocks = programme.macro_blocks || [];
   let macro = currentMacro(programme);
@@ -3609,7 +3616,7 @@ function CalendarScreen({
   function addSession() {
     const name = newSessionName.trim() || 'New session';
     commitProgramme((draft) => {
-      ensureProgrammeWeek(draft, selectedDate).sessions.push({
+      placeSessionInWeek(ensureProgrammeWeek(draft, selectedDate), {
         id: createId('planned_session'),
         session_name: name,
         focus: '',
@@ -3690,22 +3697,6 @@ function CalendarScreen({
     commitProgramme((draft) => {
       (draft.macro_blocks || []).forEach((macroItem) => (macroItem.blocks || []).forEach((blockItem) => (blockItem.weeks || []).forEach((weekItem) => {
         weekItem.sessions = (weekItem.sessions || []).filter((session) => session.id !== sessionId);
-      })));
-    });
-    setEditSessionId(null);
-  }
-
-  function duplicateSession(sessionId) {
-    commitProgramme((draft) => {
-      (draft.macro_blocks || []).forEach((macroItem) => (macroItem.blocks || []).forEach((blockItem) => (blockItem.weeks || []).forEach((weekItem) => {
-        const index = (weekItem.sessions || []).findIndex((session) => session.id === sessionId);
-        if (index >= 0) {
-          const copy = JSON.parse(JSON.stringify(weekItem.sessions[index]));
-          copy.id = createId('planned_session');
-          copy.session_name = `${weekItem.sessions[index].session_name || 'Session'} (copy)`;
-          copy.exercises = (copy.exercises || []).map((exercise) => ({ ...exercise, id: createId('planned_exercise') }));
-          weekItem.sessions.splice(index + 1, 0, copy);
-        }
       })));
     });
     setEditSessionId(null);
@@ -3839,10 +3830,7 @@ function CalendarScreen({
                 <Input label="Focus" value={session.focus || ''} onChangeText={(value) => setSessionField(session.id, 'focus', value)} />
                 <Input label="Duration" value={session.duration || ''} onChangeText={(value) => setSessionField(session.id, 'duration', value)} />
               </View>
-              <View style={styles.twoCol}>
-                <Pressable style={styles.ghostBtn} onPress={() => duplicateSession(session.id)}><Text style={styles.ghostBtnText}>Duplicate</Text></Pressable>
-                <Pressable style={styles.ghostBtn} onPress={() => deleteSession(session.id)}><Text style={[styles.ghostBtnText, styles.dangerText]}>Delete</Text></Pressable>
-              </View>
+              <Pressable style={[styles.ghostBtn, styles.dangerBtn]} onPress={() => deleteSession(session.id)}><Text style={[styles.ghostBtnText, styles.dangerText]}>Delete session</Text></Pressable>
             </View>
           ) : null}
           {(session.exercises || []).length === 0 ? <Text style={styles.muted}>No exercises yet — add your first below.</Text> : null}
@@ -3894,18 +3882,14 @@ function CalendarScreen({
         </View>
       ))}
 
-      {selectedDaySessions.length > 0 || showAddSession ? (
-        showAddSession ? (
-          <View style={styles.builderCard}>
-            <Input label="Session name" value={newSessionName} onChangeText={setNewSessionName} />
-            <View style={styles.twoCol}>
-              <Pressable style={styles.ghostBtn} onPress={() => setShowAddSession(false)}><Text style={styles.ghostBtnText}>Cancel</Text></Pressable>
-              <Pressable style={[styles.primaryBtn, styles.flex]} onPress={addSession}><Text style={styles.primaryBtnText}>Add session</Text></Pressable>
-            </View>
+      {showAddSession ? (
+        <View style={styles.builderCard}>
+          <Input label="Session name" value={newSessionName} onChangeText={setNewSessionName} />
+          <View style={styles.twoCol}>
+            <Pressable style={styles.ghostBtn} onPress={() => setShowAddSession(false)}><Text style={styles.ghostBtnText}>Cancel</Text></Pressable>
+            <Pressable style={[styles.primaryBtn, styles.flex]} onPress={addSession}><Text style={styles.primaryBtnText}>Add session</Text></Pressable>
           </View>
-        ) : (
-          <Pressable style={styles.adds} onPress={() => setShowAddSession(true)}><Text style={styles.addsText}>+ Add another session</Text></Pressable>
-        )
+        </View>
       ) : null}
 
       <View style={styles.card}>
@@ -4582,7 +4566,7 @@ function EditBlockCalendarScreen({
       const targetWeek = ensureWeekForDate(targetBlock, dateValue);
       const nextSession = sessionTemplateFromDraft(dateValue);
       createdId = nextSession.id;
-      targetWeek.sessions.push(nextSession);
+      placeSessionInWeek(targetWeek, nextSession);
     });
     setNewSession({ session_name: '', focus: '', duration: '', date: selectedDate });
     if (!createdId) return;
@@ -4598,7 +4582,6 @@ function EditBlockCalendarScreen({
       return;
     }
     let created = 0;
-    let skipped = 0;
     let nextSelectedWeekId = null;
     commitProgramme((draft) => {
       let targetBlock = currentBlock(draft);
@@ -4614,21 +4597,14 @@ function EditBlockCalendarScreen({
         const mondayFirstWeekday = jsWeekday === 0 ? 7 : jsWeekday;
         if (mondayFirstWeekday !== weekday) continue;
         const targetWeek = ensureWeekForDate(targetBlock, date);
-        const exists = (targetWeek.sessions || []).some(
-          (session) => session.date === date && String(session.session_name || '').trim().toLowerCase() === sessionName.toLowerCase()
-        );
-        if (exists) {
-          skipped += 1;
-          continue;
-        }
-        targetWeek.sessions = targetWeek.sessions || [];
-        targetWeek.sessions.push(sessionTemplateFromDraft(date));
+        // One session per day: replace whatever is on that date.
+        placeSessionInWeek(targetWeek, sessionTemplateFromDraft(date));
         if (!nextSelectedWeekId) nextSelectedWeekId = targetWeek.id;
         created += 1;
       }
       if (nextSelectedWeekId) draft.selected_week_id = nextSelectedWeekId;
     });
-    Alert.alert('Template applied', `${created} session${created === 1 ? '' : 's'} added.${skipped ? ` ${skipped} skipped (already existed).` : ''}`);
+    Alert.alert('Template applied', `${created} session${created === 1 ? '' : 's'} set.`);
   }
 
   function applyTemplateToSpecificDate() {
@@ -4648,7 +4624,7 @@ function EditBlockCalendarScreen({
   function pasteSession() {
     if (!programme.copied_session) return;
     commitProgramme((draft) => {
-      ensureProgrammeWeek(draft, selectedDate).sessions.push({
+      placeSessionInWeek(ensureProgrammeWeek(draft, selectedDate), {
         ...draft.copied_session,
         id: createId('planned'),
         date: selectedDate,
@@ -4657,55 +4633,50 @@ function EditBlockCalendarScreen({
     });
   }
 
-  function duplicateSession(session) {
-    commitProgramme((draft) => {
-      ensureProgrammeWeek(draft, session.date || selectedDate).sessions.push({
-        ...session,
-        id: createId('planned'),
-        session_name: session.session_name,
-        completed: false,
-      });
-    });
-  }
-
-  // Build one week, then repeat it across the next N weeks with an optional load progression.
+  // Repeat the selected week across the rest of the block with optional progressive overload.
+  // Fills the block's existing following weeks (replacing their sessions); only adds new weeks
+  // if the block doesn't have enough. One session per day — never stacks duplicates.
   function repeatWeekWithProgression() {
     const count = Number(repeatCount) || 0;
     if (count < 1) return;
     commitProgramme((draft) => {
       const selectedBlock = currentBlock(draft);
       if (!selectedBlock) return;
+      const weeks = selectedBlock.weeks || [];
+      weeks.sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
       // Prefer the week containing the selected day; fall back to the selected/first week.
-      const source = (selectedBlock.weeks || []).find((item) => {
+      let sourceIndex = weeks.findIndex((item) => {
         const start = item.start_date;
         const end = item.end_date || (start ? addDays(start, 6) : null);
         return start && end && selectedDate >= start && selectedDate <= end;
-      }) || (selectedBlock.weeks || []).find((item) => item.id === draft.selected_week_id) || (selectedBlock.weeks || [])[0];
+      });
+      if (sourceIndex < 0) sourceIndex = weeks.findIndex((item) => item.id === draft.selected_week_id);
+      if (sourceIndex < 0) sourceIndex = 0;
+      const source = weeks[sourceIndex];
       if (!source) return;
       const sourceStart = source.start_date || startOfWeekIso(selectedDate);
       let lastEnd = source.end_date || addDays(sourceStart, 6);
       for (let i = 1; i <= count; i += 1) {
-        const start = addDays(lastEnd, 1);
-        const end = addDays(start, 6);
-        lastEnd = end;
+        let target = weeks[sourceIndex + i];
+        if (!target) {
+          const start = addDays(lastEnd, 1);
+          target = { id: createId('week'), week_name: '', start_date: start, end_date: addDays(start, 6), sessions: [] };
+          weeks.push(target);
+        }
+        const targetStart = target.start_date || addDays(lastEnd, 1);
+        lastEnd = target.end_date || addDays(targetStart, 6);
         const factor = progressionFactor(repeatProgression, i, count);
-        selectedBlock.weeks.push({
-          id: createId('week'),
-          week_name: '',
-          start_date: start,
-          end_date: end,
-          sessions: (source.sessions || []).map((session) => ({
-            ...session,
-            id: createId('planned'),
-            date: addDays(start, dayOffset(session.date, sourceStart)),
-            completed: false,
-            exercises: (session.exercises || []).map((exercise) => ({ ...applyOverload(exercise, factor, overloadDim), id: createId('planned_exercise') })),
-          })),
-        });
+        // Replace the target week's sessions with overloaded copies of the source week.
+        target.sessions = (source.sessions || []).map((session) => ({
+          ...session,
+          id: createId('planned'),
+          date: addDays(targetStart, dayOffset(session.date, sourceStart)),
+          completed: false,
+          exercises: (session.exercises || []).map((exercise) => ({ ...applyOverload(exercise, factor, overloadDim), id: createId('planned_exercise') })),
+        }));
       }
-      // Extend the block so its stated range covers the weeks we just added.
       if (!selectedBlock.end_date || lastEnd > selectedBlock.end_date) selectedBlock.end_date = lastEnd;
-      selectedBlock.weeks.sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
+      weeks.sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
     });
   }
 
@@ -4716,7 +4687,7 @@ function EditBlockCalendarScreen({
       const exercises = Array.isArray(template.exercises)
         ? template.exercises.map((exercise) => ({ ...exercise, id: createId('planned_exercise') }))
         : (template.items || []).map((item) => ({ ...templateItemToExercise(item), id: createId('planned_exercise') }));
-      ensureProgrammeWeek(draft, selectedDate).sessions.push({
+      placeSessionInWeek(ensureProgrammeWeek(draft, selectedDate), {
         id: createId('planned'),
         date: selectedDate,
         session_name: template.name,
@@ -4863,7 +4834,6 @@ function EditBlockCalendarScreen({
             <Pressable style={styles.miniButton} onPress={() => openSessionAnalysis(session.id, session.date || selectedDate)}><Text style={styles.miniButtonText}>Analyse Session</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => updatePlannedSession(session.id, 'date', selectedDate)}><Text style={styles.miniButtonText}>To Day</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => copySession(session)}><Text style={styles.miniButtonText}>Copy</Text></Pressable>
-            <Pressable style={styles.miniButton} onPress={() => duplicateSession(session)}><Text style={styles.miniButtonText}>Dup</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => saveSessionAsTemplate(session)}><Text style={styles.miniButtonText}>Save tmpl</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => deletePlannedSession(session.id)}><Text style={styles.miniButtonText}>Del</Text></Pressable>
           </View>
