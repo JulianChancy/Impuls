@@ -396,20 +396,29 @@ const OVERLOAD_OPTIONS = [
 function applyOverload(ex, factor, dim = 'volume') {
   if (!factor || factor === 1) return { ...ex };
   const clone = { ...ex };
-  const scaled = (value) => Math.round(jsNum(value) * factor);
+  // Round so a scale-up always lands at least +1 and a scale-down at least -1. Otherwise a
+  // small % on a small number (e.g. +5% of 5 reps = 5.25 -> 5) rounds to no visible change.
+  const step = (value, cap = Infinity) => {
+    const base = jsNum(value);
+    if (!base) return base;
+    let next = Math.round(base * factor);
+    if (factor > 1 && next <= base) next = base + 1;
+    if (factor < 1 && next >= base) next = base - 1;
+    return Math.max(0, Math.min(cap, next));
+  };
   const t = ex.movement_type;
   const bumpVolume = () => {
-    if (t === 'plyometric') clone.contacts = scaled(ex.contacts) || ex.contacts;
-    else if (t === 'sprint') clone.reps = scaled(ex.reps) || ex.reps;
-    else if (t === 'endurance' || t === 'skill') clone.duration_minutes = scaled(ex.duration_minutes) || ex.duration_minutes;
-    else clone.reps = scaled(ex.reps) || ex.reps; // strength / general / power_ballistic / rehab
+    if (t === 'plyometric') clone.contacts = step(ex.contacts) || ex.contacts;
+    else if (t === 'sprint') clone.reps = step(ex.reps) || ex.reps;
+    else if (t === 'endurance' || t === 'skill') clone.duration_minutes = step(ex.duration_minutes) || ex.duration_minutes;
+    else clone.reps = step(ex.reps) || ex.reps; // strength / general / power_ballistic / rehab
   };
   const bumpIntensity = () => {
     if (t === 'strength' || t === 'general' || t === 'power_ballistic' || t === 'rehab') {
       const cap = (ex.intensity_unit || '%') === '%' ? 100 : Infinity;
-      clone.intensity_value = Math.min(cap, scaled(ex.intensity_value)) || ex.intensity_value;
+      clone.intensity_value = step(ex.intensity_value, cap) || ex.intensity_value;
     } else {
-      clone.intent_percent = Math.min(100, scaled(ex.intent_percent)) || ex.intent_percent;
+      clone.intent_percent = step(ex.intent_percent, 100) || ex.intent_percent;
     }
   };
   if (dim === 'volume' || dim === 'both') bumpVolume();
@@ -3477,11 +3486,6 @@ function CalendarScreen({
   const [showAddSession, setShowAddSession] = useState(false);
   const [newSessionName, setNewSessionName] = useState('');
   const [editSessionId, setEditSessionId] = useState(null);
-  const [planToolsOpen, setPlanToolsOpen] = useState(false);
-  const [templateOpen, setTemplateOpen] = useState(false);
-  const [repeatCount, setRepeatCount] = useState('3');
-  const [repeatProgression, setRepeatProgression] = useState('flat');
-  const [overloadDim, setOverloadDim] = useState('volume');
   const weekDays = weekDayLabels(startOfWeekIso(selectedDate));
   const monthDays = monthCalendarDays(selectedDate);
   const yearMonths = monthsInYear(selectedDate);
@@ -3660,25 +3664,7 @@ function CalendarScreen({
     });
   }
 
-  // ----- Build-faster tools, surfaced on the Plan screen -----
-  function insertTemplateOnDay(template) {
-    setTemplateOpen(false);
-    commitProgramme((draft) => {
-      const exercises = Array.isArray(template.exercises)
-        ? template.exercises.map((exercise) => ({ ...exercise, id: createId('planned_exercise') }))
-        : (template.items || []).map((item) => ({ ...templateItemToExercise(item), id: createId('planned_exercise') }));
-      ensureProgrammeWeek(draft, selectedDate).sessions.push({
-        id: createId('planned'),
-        date: selectedDate,
-        session_name: template.name,
-        focus: template.focus || '',
-        duration: '',
-        completed: false,
-        exercises,
-      });
-    });
-  }
-
+  // Save a session (with its exercises) as a reusable template; apply it from the block planner.
   function saveSessionAsTemplate(session) {
     commitProgramme((draft) => {
       draft.session_templates = draft.session_templates || [];
@@ -3692,50 +3678,6 @@ function CalendarScreen({
     });
   }
 
-  function deleteTemplate(templateId) {
-    commitProgramme((draft) => {
-      draft.session_templates = (draft.session_templates || []).filter((template) => template.id !== templateId);
-    });
-  }
-
-  // Repeat the selected week across the rest of the block, with optional progressive overload.
-  function repeatWeekAcrossBlock() {
-    const count = Number(repeatCount) || 0;
-    if (count < 1) return;
-    commitProgramme((draft) => {
-      const selectedBlock = currentBlock(draft);
-      if (!selectedBlock) return;
-      // Prefer the week containing the selected day; fall back to the selected/first week.
-      const source = (selectedBlock.weeks || []).find((item) => {
-        const start = item.start_date;
-        const end = item.end_date || (start ? addDays(start, 6) : null);
-        return start && end && selectedDate >= start && selectedDate <= end;
-      }) || (selectedBlock.weeks || []).find((item) => item.id === draft.selected_week_id) || (selectedBlock.weeks || [])[0];
-      if (!source) return;
-      const sourceStart = source.start_date || startOfWeekIso(selectedDate);
-      let lastEnd = source.end_date || addDays(sourceStart, 6);
-      for (let i = 1; i <= count; i += 1) {
-        const start = addDays(lastEnd, 1);
-        const end = addDays(start, 6);
-        lastEnd = end;
-        const factor = progressionFactor(repeatProgression, i, count);
-        selectedBlock.weeks.push({
-          id: createId('week'),
-          week_name: '',
-          start_date: start,
-          end_date: end,
-          sessions: (source.sessions || []).map((session) => ({
-            ...session,
-            id: createId('planned'),
-            date: addDays(start, dayOffset(session.date, sourceStart)),
-            completed: false,
-            exercises: (session.exercises || []).map((exercise) => ({ ...applyOverload(exercise, factor, overloadDim), id: createId('planned_exercise') })),
-          })),
-        });
-      }
-      selectedBlock.weeks.sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
-    });
-  }
 
   function setSessionField(sessionId, key, value) {
     commitProgramme((draft) => {
@@ -3863,48 +3805,14 @@ function CalendarScreen({
           })}
         </View>
       )}
-      <View style={styles.calendarPanel}>
-        <Pressable style={styles.rowBetween} onPress={() => setPlanToolsOpen((open) => !open)}>
-          <Text style={styles.sectionTitle}>⚡ Build faster</Text>
-          <Text style={styles.textLink}>{planToolsOpen ? 'Hide' : 'Templates · repeat week · overload'}</Text>
-        </Pressable>
-        {planToolsOpen ? (
-          <View style={styles.painExtra}>
-            <ActionButton title="+ Use a template" tone="outline" onPress={() => setTemplateOpen(true)} />
-            <Text style={styles.label}>Repeat this week across the block</Text>
-            <View style={styles.chipWrap}>
-              {['1', '2', '3', '4', '5'].map((count) => (
-                <Pressable key={count} style={[styles.chip, repeatCount === count && styles.chipActive]} onPress={() => setRepeatCount(count)}>
-                  <Text style={[styles.chipText, repeatCount === count && styles.chipTextActive]}>{count}×</Text>
-                </Pressable>
-              ))}
-            </View>
-            <Text style={styles.label}>Progressive overload</Text>
-            <View style={styles.chipWrap}>
-              {PROGRESSION_OPTIONS.map(([id, label]) => (
-                <Pressable key={id} style={[styles.chip, repeatProgression === id && styles.chipActive]} onPress={() => setRepeatProgression(id)}>
-                  <Text style={[styles.chipText, repeatProgression === id && styles.chipTextActive]}>{label}</Text>
-                </Pressable>
-              ))}
-            </View>
-            {repeatProgression !== 'flat' ? (
-              <>
-                <Text style={styles.label}>Overload what?</Text>
-                <View style={styles.chipWrap}>
-                  {OVERLOAD_OPTIONS.map(([id, label]) => (
-                    <Pressable key={id} style={[styles.chip, overloadDim === id && styles.chipActive]} onPress={() => setOverloadDim(id)}>
-                      <Text style={[styles.chipText, overloadDim === id && styles.chipTextActive]}>{label}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-                <Text style={styles.calendarMetaText}>Each new week scales {overloadDim === 'both' ? 'volume and intensity' : overloadDim} up automatically.</Text>
-              </>
-            ) : null}
-            <ActionButton title={`Repeat week ${repeatCount}× across the block`} tone="black" onPress={repeatWeekAcrossBlock} />
-          </View>
-        ) : null}
-      </View>
-      <TemplatePicker visible={templateOpen} onClose={() => setTemplateOpen(false)} onPick={insertTemplateOnDay} custom={programme.session_templates || []} onDelete={deleteTemplate} />
+      <Pressable style={styles.buildFasterBtn} onPress={() => setScreen('editBlockCalendar')}>
+        <Text style={styles.buildFasterIcon}>⚡</Text>
+        <View style={styles.flex}>
+          <Text style={styles.buildFasterTitle}>Build faster</Text>
+          <Text style={styles.buildFasterSub}>Templates · repeat week · progressive overload</Text>
+        </View>
+        <Text style={styles.chevron}>›</Text>
+      </Pressable>
 
       <Text style={styles.daySectionLabel}>{new Date(`${selectedDate}T00:00:00`).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' })}</Text>
 
@@ -4469,6 +4377,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
                   </View>
                 </View>
                 <Text style={styles.calendarMetaText}>Moving the start shifts the whole block — weeks and sessions move with it.</Text>
+                <Pressable style={styles.primaryBtn} onPress={() => selectBlockAndOpen(blockItem.id)}><Text style={styles.primaryBtnText}>⚡ Plan sessions &amp; build</Text></Pressable>
                 <View style={styles.twoCol}>
                   <Pressable style={styles.ghostBtn} onPress={() => selectBlockById(blockItem.id)}><Text style={styles.ghostBtnText}>{isCurrent ? 'Current block' : 'Set current'}</Text></Pressable>
                   {confirmDeleteBlockId === blockItem.id ? (
@@ -4794,6 +4703,8 @@ function EditBlockCalendarScreen({
           })),
         });
       }
+      // Extend the block so its stated range covers the weeks we just added.
+      if (!selectedBlock.end_date || lastEnd > selectedBlock.end_date) selectedBlock.end_date = lastEnd;
       selectedBlock.weeks.sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
     });
   }
@@ -4858,7 +4769,7 @@ function EditBlockCalendarScreen({
 
   return (
     <View style={styles.screen}>
-      <Header title={block?.block_name || 'Edit Training Block'} onBack={() => setScreen('editCalendar')} />
+      <Header title={block?.block_name || 'Build block'} onBack={() => setScreen('calendar')} />
       <View style={styles.rowBetween}>
         <Text style={styles.label}>{[macro?.macro_block_name, block?.block_name].filter(Boolean).join(' / ') || 'No block named yet'}</Text>
         <View style={styles.inlineActions}>
@@ -8117,6 +8028,10 @@ const styles = StyleSheet.create({
   dateCenter: { flex: 1, height: 52, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   dateCenterText: { fontSize: 17, fontWeight: '600', color: '#181A14', fontFamily: SERIF },
   dateReset: { fontSize: 11, color: '#1F8A3E', fontFamily: MONO, letterSpacing: 0.3, marginTop: 1 },
+  buildFasterBtn: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F3F8F0', borderWidth: 1, borderColor: '#CFE0D2', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 16, marginBottom: 8 },
+  buildFasterIcon: { fontSize: 20 },
+  buildFasterTitle: { fontSize: 16, fontWeight: '700', color: '#1F7A40', fontFamily: SERIF },
+  buildFasterSub: { fontSize: 12, color: '#5E5E58', fontFamily: SERIF, marginTop: 1 },
   dateFieldBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', height: 52, borderWidth: 1, borderColor: '#E6E6E1', backgroundColor: '#FBF8F0', borderRadius: 12, paddingHorizontal: 16 },
   dateFieldValue: { fontSize: 16, color: '#181A14', fontFamily: SERIF, fontWeight: '600' },
   dateFieldHint: { fontSize: 11, color: '#1F8A3E', fontFamily: MONO, letterSpacing: 0.3, textTransform: 'uppercase' },
