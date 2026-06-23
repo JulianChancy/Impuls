@@ -4545,6 +4545,17 @@ function EditBlockCalendarScreen({
     });
   }
 
+  // Move a session onto a date, dropping any other session already there (one session per day).
+  function moveSessionToDate(sessionId, date) {
+    commitProgramme((draft) => {
+      (draft.macro_blocks || []).forEach((macroItem) => (macroItem.blocks || []).forEach((blockItem) => (blockItem.weeks || []).forEach((weekItem) => {
+        weekItem.sessions = (weekItem.sessions || []).filter((session) => session.id === sessionId || session.date !== date);
+      })));
+      const target = findPlannedSession(draft, sessionId)?.session;
+      if (target) target.date = date;
+    });
+  }
+
   function addPlannedSession() {
     const dateValue = (selectedDate || '').trim();
     if (!isValidDateText(dateValue)) {
@@ -4832,7 +4843,7 @@ function EditBlockCalendarScreen({
           </Pressable>
           <View style={styles.programmeActions}>
             <Pressable style={styles.miniButton} onPress={() => openSessionAnalysis(session.id, session.date || selectedDate)}><Text style={styles.miniButtonText}>Analyse Session</Text></Pressable>
-            <Pressable style={styles.miniButton} onPress={() => updatePlannedSession(session.id, 'date', selectedDate)}><Text style={styles.miniButtonText}>To Day</Text></Pressable>
+            <Pressable style={styles.miniButton} onPress={() => moveSessionToDate(session.id, selectedDate)}><Text style={styles.miniButtonText}>To Day</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => copySession(session)}><Text style={styles.miniButtonText}>Copy</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => saveSessionAsTemplate(session)}><Text style={styles.miniButtonText}>Save tmpl</Text></Pressable>
             <Pressable style={styles.miniButton} onPress={() => deletePlannedSession(session.id)}><Text style={styles.miniButtonText}>Del</Text></Pressable>
