@@ -3477,6 +3477,11 @@ function CalendarScreen({
   const [showAddSession, setShowAddSession] = useState(false);
   const [newSessionName, setNewSessionName] = useState('');
   const [editSessionId, setEditSessionId] = useState(null);
+  const [planToolsOpen, setPlanToolsOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
+  const [repeatCount, setRepeatCount] = useState('3');
+  const [repeatProgression, setRepeatProgression] = useState('flat');
+  const [overloadDim, setOverloadDim] = useState('volume');
   const weekDays = weekDayLabels(startOfWeekIso(selectedDate));
   const monthDays = monthCalendarDays(selectedDate);
   const yearMonths = monthsInYear(selectedDate);
@@ -3655,6 +3660,83 @@ function CalendarScreen({
     });
   }
 
+  // ----- Build-faster tools, surfaced on the Plan screen -----
+  function insertTemplateOnDay(template) {
+    setTemplateOpen(false);
+    commitProgramme((draft) => {
+      const exercises = Array.isArray(template.exercises)
+        ? template.exercises.map((exercise) => ({ ...exercise, id: createId('planned_exercise') }))
+        : (template.items || []).map((item) => ({ ...templateItemToExercise(item), id: createId('planned_exercise') }));
+      ensureProgrammeWeek(draft, selectedDate).sessions.push({
+        id: createId('planned'),
+        date: selectedDate,
+        session_name: template.name,
+        focus: template.focus || '',
+        duration: '',
+        completed: false,
+        exercises,
+      });
+    });
+  }
+
+  function saveSessionAsTemplate(session) {
+    commitProgramme((draft) => {
+      draft.session_templates = draft.session_templates || [];
+      draft.session_templates.push({
+        id: createId('tmpl'),
+        name: session.session_name || 'Custom template',
+        focus: session.focus || '',
+        custom: true,
+        exercises: (session.exercises || []).map((exercise) => ({ ...exercise })),
+      });
+    });
+  }
+
+  function deleteTemplate(templateId) {
+    commitProgramme((draft) => {
+      draft.session_templates = (draft.session_templates || []).filter((template) => template.id !== templateId);
+    });
+  }
+
+  // Repeat the selected week across the rest of the block, with optional progressive overload.
+  function repeatWeekAcrossBlock() {
+    const count = Number(repeatCount) || 0;
+    if (count < 1) return;
+    commitProgramme((draft) => {
+      const selectedBlock = currentBlock(draft);
+      if (!selectedBlock) return;
+      // Prefer the week containing the selected day; fall back to the selected/first week.
+      const source = (selectedBlock.weeks || []).find((item) => {
+        const start = item.start_date;
+        const end = item.end_date || (start ? addDays(start, 6) : null);
+        return start && end && selectedDate >= start && selectedDate <= end;
+      }) || (selectedBlock.weeks || []).find((item) => item.id === draft.selected_week_id) || (selectedBlock.weeks || [])[0];
+      if (!source) return;
+      const sourceStart = source.start_date || startOfWeekIso(selectedDate);
+      let lastEnd = source.end_date || addDays(sourceStart, 6);
+      for (let i = 1; i <= count; i += 1) {
+        const start = addDays(lastEnd, 1);
+        const end = addDays(start, 6);
+        lastEnd = end;
+        const factor = progressionFactor(repeatProgression, i, count);
+        selectedBlock.weeks.push({
+          id: createId('week'),
+          week_name: '',
+          start_date: start,
+          end_date: end,
+          sessions: (source.sessions || []).map((session) => ({
+            ...session,
+            id: createId('planned'),
+            date: addDays(start, dayOffset(session.date, sourceStart)),
+            completed: false,
+            exercises: (session.exercises || []).map((exercise) => ({ ...applyOverload(exercise, factor, overloadDim), id: createId('planned_exercise') })),
+          })),
+        });
+      }
+      selectedBlock.weeks.sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
+    });
+  }
+
   function setSessionField(sessionId, key, value) {
     commitProgramme((draft) => {
       const target = findPlannedSession(draft, sessionId)?.session;
@@ -3781,6 +3863,49 @@ function CalendarScreen({
           })}
         </View>
       )}
+      <View style={styles.calendarPanel}>
+        <Pressable style={styles.rowBetween} onPress={() => setPlanToolsOpen((open) => !open)}>
+          <Text style={styles.sectionTitle}>⚡ Build faster</Text>
+          <Text style={styles.textLink}>{planToolsOpen ? 'Hide' : 'Templates · repeat week · overload'}</Text>
+        </Pressable>
+        {planToolsOpen ? (
+          <View style={styles.painExtra}>
+            <ActionButton title="+ Use a template" tone="outline" onPress={() => setTemplateOpen(true)} />
+            <Text style={styles.label}>Repeat this week across the block</Text>
+            <View style={styles.chipWrap}>
+              {['1', '2', '3', '4', '5'].map((count) => (
+                <Pressable key={count} style={[styles.chip, repeatCount === count && styles.chipActive]} onPress={() => setRepeatCount(count)}>
+                  <Text style={[styles.chipText, repeatCount === count && styles.chipTextActive]}>{count}×</Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={styles.label}>Progressive overload</Text>
+            <View style={styles.chipWrap}>
+              {PROGRESSION_OPTIONS.map(([id, label]) => (
+                <Pressable key={id} style={[styles.chip, repeatProgression === id && styles.chipActive]} onPress={() => setRepeatProgression(id)}>
+                  <Text style={[styles.chipText, repeatProgression === id && styles.chipTextActive]}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+            {repeatProgression !== 'flat' ? (
+              <>
+                <Text style={styles.label}>Overload what?</Text>
+                <View style={styles.chipWrap}>
+                  {OVERLOAD_OPTIONS.map(([id, label]) => (
+                    <Pressable key={id} style={[styles.chip, overloadDim === id && styles.chipActive]} onPress={() => setOverloadDim(id)}>
+                      <Text style={[styles.chipText, overloadDim === id && styles.chipTextActive]}>{label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <Text style={styles.calendarMetaText}>Each new week scales {overloadDim === 'both' ? 'volume and intensity' : overloadDim} up automatically.</Text>
+              </>
+            ) : null}
+            <ActionButton title={`Repeat week ${repeatCount}× across the block`} tone="black" onPress={repeatWeekAcrossBlock} />
+          </View>
+        ) : null}
+      </View>
+      <TemplatePicker visible={templateOpen} onClose={() => setTemplateOpen(false)} onPick={insertTemplateOnDay} custom={programme.session_templates || []} onDelete={deleteTemplate} />
+
       <Text style={styles.daySectionLabel}>{new Date(`${selectedDate}T00:00:00`).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' })}</Text>
 
       {selectedDaySessions.length === 0 && !showAddSession ? (
@@ -3795,6 +3920,7 @@ function CalendarScreen({
           <View style={styles.rowBetween}>
             <Text style={[styles.cardTitle, styles.flex]}>{session.session_name}</Text>
             <Pressable onPress={() => analysePlannedSession(session)}><Text style={styles.textLink}>Analyse</Text></Pressable>
+            <Pressable style={styles.editGap} onPress={() => saveSessionAsTemplate(session)}><Text style={styles.textLink}>Save tmpl</Text></Pressable>
             <Pressable style={styles.editGap} onPress={() => setEditSessionId(editSessionId === session.id ? null : session.id)}><Text style={styles.textLink}>{editSessionId === session.id ? 'Done' : 'Edit'}</Text></Pressable>
           </View>
           {sessionLoadNote(session) ? <Text style={styles.exPrescription}>{sessionLoadNote(session)}</Text> : null}
@@ -4640,7 +4766,12 @@ function EditBlockCalendarScreen({
     commitProgramme((draft) => {
       const selectedBlock = currentBlock(draft);
       if (!selectedBlock) return;
-      const source = (selectedBlock.weeks || []).find((item) => item.id === draft.selected_week_id) || (selectedBlock.weeks || [])[0];
+      // Prefer the week containing the selected day; fall back to the selected/first week.
+      const source = (selectedBlock.weeks || []).find((item) => {
+        const start = item.start_date;
+        const end = item.end_date || (start ? addDays(start, 6) : null);
+        return start && end && selectedDate >= start && selectedDate <= end;
+      }) || (selectedBlock.weeks || []).find((item) => item.id === draft.selected_week_id) || (selectedBlock.weeks || [])[0];
       if (!source) return;
       const sourceStart = source.start_date || startOfWeekIso(selectedDate);
       let lastEnd = source.end_date || addDays(sourceStart, 6);
