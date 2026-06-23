@@ -667,10 +667,22 @@ function currentPlannedSessions(programme) {
   return currentWeek(programme)?.sessions || [];
 }
 
-// Place a session on its day, replacing any existing session(s) on that date — one session
-// per day. Used by paste / template apply / repeat so applying never stacks duplicates.
-function placeSessionInWeek(week, session) {
-  week.sessions = (week.sessions || []).filter((existing) => existing.date !== session.date);
+// One session per day across the WHOLE current block. Sessions are displayed by date but stored
+// per week-object, so we must clear the date from every week (not just one) before adding —
+// otherwise duplicates on the same day can hide in different week objects.
+function placeSessionInProgramme(programme, session) {
+  ensureProgrammeWeek(programme, session.date);
+  const block = currentBlock(programme);
+  if (!block) return;
+  block.weeks = block.weeks || [];
+  block.weeks.forEach((week) => { week.sessions = (week.sessions || []).filter((existing) => existing.date !== session.date); });
+  const week = block.weeks.find((item) => {
+    const start = item.start_date;
+    const end = item.end_date || (start ? addDays(start, 6) : null);
+    return start && end && session.date >= start && session.date <= end;
+  }) || block.weeks.find((item) => item.id === programme.selected_week_id) || block.weeks[0];
+  if (!week) return;
+  week.sessions = week.sessions || [];
   week.sessions.push(session);
 }
 
@@ -3616,7 +3628,7 @@ function CalendarScreen({
   function addSession() {
     const name = newSessionName.trim() || 'New session';
     commitProgramme((draft) => {
-      placeSessionInWeek(ensureProgrammeWeek(draft, selectedDate), {
+      placeSessionInProgramme(draft, {
         id: createId('planned_session'),
         session_name: name,
         focus: '',
@@ -4406,7 +4418,7 @@ function EditBlockCalendarScreen({
 }) {
   const [newSession, setNewSession] = useState({ session_name: '', focus: '', duration: '', date: selectedDate || isoDate() });
   const [templateWeekday, setTemplateWeekday] = useState('1');
-  const [repeatCount, setRepeatCount] = useState('3');
+  const [repeatWeeks, setRepeatWeeks] = useState('4');
   const [repeatProgression, setRepeatProgression] = useState('flat');
   const [overloadDim, setOverloadDim] = useState('volume');
   const [templateOpen, setTemplateOpen] = useState(false);
@@ -4577,7 +4589,7 @@ function EditBlockCalendarScreen({
       const targetWeek = ensureWeekForDate(targetBlock, dateValue);
       const nextSession = sessionTemplateFromDraft(dateValue);
       createdId = nextSession.id;
-      placeSessionInWeek(targetWeek, nextSession);
+      placeSessionInProgramme(draft, nextSession);
     });
     setNewSession({ session_name: '', focus: '', duration: '', date: selectedDate });
     if (!createdId) return;
@@ -4609,7 +4621,7 @@ function EditBlockCalendarScreen({
         if (mondayFirstWeekday !== weekday) continue;
         const targetWeek = ensureWeekForDate(targetBlock, date);
         // One session per day: replace whatever is on that date.
-        placeSessionInWeek(targetWeek, sessionTemplateFromDraft(date));
+        placeSessionInProgramme(draft, sessionTemplateFromDraft(date));
         if (!nextSelectedWeekId) nextSelectedWeekId = targetWeek.id;
         created += 1;
       }
@@ -4635,7 +4647,7 @@ function EditBlockCalendarScreen({
   function pasteSession() {
     if (!programme.copied_session) return;
     commitProgramme((draft) => {
-      placeSessionInWeek(ensureProgrammeWeek(draft, selectedDate), {
+      placeSessionInProgramme(draft, {
         ...draft.copied_session,
         id: createId('planned'),
         date: selectedDate,
@@ -4644,50 +4656,39 @@ function EditBlockCalendarScreen({
     });
   }
 
-  // Repeat the selected week across the rest of the block with optional progressive overload.
-  // Fills the block's existing following weeks (replacing their sessions); only adds new weeks
-  // if the block doesn't have enough. One session per day — never stacks duplicates.
+  // Repeat the selected week for the next N weeks, each consecutive (weekly), with optional
+  // progressive overload. Places each session by date through the block-wide one-per-day helper.
   function repeatWeekWithProgression() {
-    const count = Number(repeatCount) || 0;
+    const count = Number(repeatWeeks) || 0;
     if (count < 1) return;
     commitProgramme((draft) => {
       const selectedBlock = currentBlock(draft);
       if (!selectedBlock) return;
-      const weeks = selectedBlock.weeks || [];
-      weeks.sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
+      const weeks = [...(selectedBlock.weeks || [])].sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
       // Prefer the week containing the selected day; fall back to the selected/first week.
-      let sourceIndex = weeks.findIndex((item) => {
+      const source = weeks.find((item) => {
         const start = item.start_date;
         const end = item.end_date || (start ? addDays(start, 6) : null);
         return start && end && selectedDate >= start && selectedDate <= end;
-      });
-      if (sourceIndex < 0) sourceIndex = weeks.findIndex((item) => item.id === draft.selected_week_id);
-      if (sourceIndex < 0) sourceIndex = 0;
-      const source = weeks[sourceIndex];
+      }) || weeks.find((item) => item.id === draft.selected_week_id) || weeks[0];
       if (!source) return;
       const sourceStart = source.start_date || startOfWeekIso(selectedDate);
-      let lastEnd = source.end_date || addDays(sourceStart, 6);
+      const sourceSessions = (source.sessions || []).map((session) => ({ ...session })); // snapshot before mutating
       for (let i = 1; i <= count; i += 1) {
-        let target = weeks[sourceIndex + i];
-        if (!target) {
-          const start = addDays(lastEnd, 1);
-          target = { id: createId('week'), week_name: '', start_date: start, end_date: addDays(start, 6), sessions: [] };
-          weeks.push(target);
-        }
-        const targetStart = target.start_date || addDays(lastEnd, 1);
-        lastEnd = target.end_date || addDays(targetStart, 6);
+        const weekStart = addDays(sourceStart, 7 * i); // consecutive weeks
         const factor = progressionFactor(repeatProgression, i, count);
-        // Replace the target week's sessions with overloaded copies of the source week.
-        target.sessions = (source.sessions || []).map((session) => ({
-          ...session,
-          id: createId('planned'),
-          date: addDays(targetStart, dayOffset(session.date, sourceStart)),
-          completed: false,
-          exercises: (session.exercises || []).map((exercise) => ({ ...applyOverload(exercise, factor, overloadDim), id: createId('planned_exercise') })),
-        }));
+        sourceSessions.forEach((session) => {
+          placeSessionInProgramme(draft, {
+            ...session,
+            id: createId('planned'),
+            date: addDays(weekStart, dayOffset(session.date, sourceStart)),
+            completed: false,
+            exercises: (session.exercises || []).map((exercise) => ({ ...applyOverload(exercise, factor, overloadDim), id: createId('planned_exercise') })),
+          });
+        });
       }
+      const lastEnd = addDays(sourceStart, 7 * count + 6);
       if (!selectedBlock.end_date || lastEnd > selectedBlock.end_date) selectedBlock.end_date = lastEnd;
-      weeks.sort((a, b) => String(a.start_date || '').localeCompare(String(b.start_date || '')));
     });
   }
 
@@ -4698,7 +4699,7 @@ function EditBlockCalendarScreen({
       const exercises = Array.isArray(template.exercises)
         ? template.exercises.map((exercise) => ({ ...exercise, id: createId('planned_exercise') }))
         : (template.items || []).map((item) => ({ ...templateItemToExercise(item), id: createId('planned_exercise') }));
-      placeSessionInWeek(ensureProgrammeWeek(draft, selectedDate), {
+      placeSessionInProgramme(draft, {
         id: createId('planned'),
         date: selectedDate,
         session_name: template.name,
@@ -4781,14 +4782,7 @@ function EditBlockCalendarScreen({
       <View style={styles.calendarPanel}>
         <Text style={styles.sectionTitle}>Build faster</Text>
         <ActionButton title="+ Use a template" tone="outline" onPress={() => setTemplateOpen(true)} />
-        <Text style={styles.label}>Repeat this week</Text>
-        <View style={styles.chipWrap}>
-          {['1', '2', '3', '4', '5'].map((count) => (
-            <Pressable key={count} style={[styles.chip, repeatCount === count && styles.chipActive]} onPress={() => setRepeatCount(count)}>
-              <Text style={[styles.chipText, repeatCount === count && styles.chipTextActive]}>{count}×</Text>
-            </Pressable>
-          ))}
-        </View>
+        <Input label="Repeat this week for how many weeks?" value={repeatWeeks} onChangeText={(value) => setRepeatWeeks(value.replace(/[^0-9]/g, ''))} />
         <Text style={styles.label}>Progressive overload</Text>
         <View style={styles.chipWrap}>
           {PROGRESSION_OPTIONS.map(([id, label]) => (
@@ -4810,7 +4804,7 @@ function EditBlockCalendarScreen({
             <Text style={styles.calendarMetaText}>Each new week scales {overloadDim === 'both' ? 'volume and intensity' : overloadDim} up automatically.</Text>
           </>
         ) : null}
-        <ActionButton title={`Repeat week ${repeatCount}×`} tone="black" onPress={repeatWeekWithProgression} />
+        <ActionButton title={`Repeat for ${repeatWeeks || 0} week${repeatWeeks === '1' ? '' : 's'}`} tone="black" onPress={repeatWeekWithProgression} />
       </View>
       <TemplatePicker visible={templateOpen} onClose={() => setTemplateOpen(false)} onPick={insertTemplate} custom={programme.session_templates || []} onDelete={deleteTemplate} />
       <View style={styles.calendarPanel}>
