@@ -1936,7 +1936,8 @@ export default function App() {
       })
       .catch((error) => {
         if (!cancelled) {
-          setAnalysis(null);
+          // Keep the last good analysis so a transient refetch failure (e.g. backend
+          // waking up) doesn't blank the whole app and wipe the screen you're editing.
           setAnalysisError(error.message || 'Analysis backend unavailable.');
         }
       })
@@ -2629,10 +2630,19 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
   const hasPlannedSession = planned.id !== 'empty_plan';
   const displayName = String(data.profile?.name || '').trim();
 
-  const readinessNum = toNumber(analysis.latest?.readiness);
+  const lastVal = (key) => {
+    const pts = metricSeries(analysis, key);
+    for (let i = pts.length - 1; i >= 0; i -= 1) {
+      if (Number.isFinite(pts[i]?.value)) return pts[i].value;
+    }
+    const fallback = Number(analysis.latest?.[key]);
+    return Number.isFinite(fallback) ? fallback : null;
+  };
+  const readinessVal = lastVal('readiness');
+  const readinessNum = Number.isFinite(readinessVal) ? readinessVal : 0;
   const readinessPct = Math.max(0, Math.min(1, readinessNum / 10));
   const ringDash = `${(readinessPct * 314).toFixed(1)} 314`;
-  const readline = readinessNum >= 7.5 ? 'Readiness is high today' : readinessNum >= 5 ? 'Readiness is moderate today' : readinessNum > 0 ? 'Readiness is low today' : 'Log a check-in to see your readiness';
+  const readline = readinessVal === null ? 'Log a check-in to see your readiness' : readinessNum >= 7.5 ? 'Readiness is high' : readinessNum >= 5 ? 'Readiness is moderate' : 'Readiness is low';
   const noticed = analysis?.adaptationInsight?.label || 'Keep logging to surface your patterns';
   const sessionMeta = hasPlannedSession ? exercisePrescriptionSummary(planned) : 'No session planned for today';
 
@@ -2653,7 +2663,7 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
               <Circle cx="60" cy="60" r="50" stroke="#1F8A3E" strokeWidth="11" fill="none" strokeLinecap="round" strokeDasharray={ringDash} transform="rotate(-90 60 60)" />
             </Svg>
             <View style={styles.ringValue}>
-              <Text style={styles.ringNum}>{pretty(analysis.latest?.readiness, 1)}</Text>
+              <Text style={styles.ringNum}>{readinessVal === null ? '—' : pretty(readinessVal, 1)}</Text>
               <Text style={styles.ringScale}>/10</Text>
             </View>
           </View>
@@ -2663,9 +2673,9 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
           </View>
         </View>
         <View style={styles.statRow}>
-          <View style={styles.statCell}><Text style={styles.statCellLabel}>Recovery</Text><Text style={styles.statCellValue}>{pretty(analysis.latest?.freshness, 1)}</Text></View>
-          <View style={styles.statCell}><Text style={styles.statCellLabel}>Load</Text><Text style={styles.statCellValue}>{pretty(analysis.latest?.load, 0)}</Text></View>
-          <View style={styles.statCell}><Text style={styles.statCellLabel}>Pain</Text><Text style={styles.statCellValue}>{pretty(analysis.latest?.pain, 0)}</Text></View>
+          <View style={styles.statCell}><Text style={styles.statCellLabel}>Recovery</Text><Text style={styles.statCellValue}>{pretty(lastVal('freshness'), 1)}</Text></View>
+          <View style={styles.statCell}><Text style={styles.statCellLabel}>Load</Text><Text style={styles.statCellValue}>{pretty(lastVal('load'), 0)}</Text></View>
+          <View style={styles.statCell}><Text style={styles.statCellLabel}>Pain</Text><Text style={styles.statCellValue}>{pretty(lastVal('pain'), 0)}</Text></View>
         </View>
       </View>
 

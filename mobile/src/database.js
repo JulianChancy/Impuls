@@ -76,17 +76,28 @@ function exerciseRow(userId, parentKey, parentId, exercise, position = 0) {
 // retry the upsert without these so planning still saves.
 const EXERCISE_TAG_COLUMNS = ['distance', 'tempo', 'quality', 'specificity', 'laterality', 'variation'];
 
+function missingColumnFrom(error) {
+  const msg = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`;
+  // PostgREST: "Could not find the 'tempo' column ..."; Postgres 42703: column "tempo" ... does not exist
+  const match = msg.match(/'([a-z0-9_]+)' column|column "([a-z0-9_]+)"|the '([a-z0-9_]+)' column/i);
+  return (match && (match[1] || match[2] || match[3])) || null;
+}
+
 async function upsertExerciseRow(table, row, onConflict) {
-  try {
-    return await singleOrThrow(upsertRow(table, row, onConflict));
-  } catch (error) {
-    const schemaMessage = `${error?.message || ''} ${error?.details || ''}`;
-    if (!EXERCISE_TAG_COLUMNS.some((col) => schemaMessage.includes(col))) throw error;
-    console.warn('[SUPABASE SAVE] Exercise FV-tag columns missing. Saving without coverage tags. Run the exercise-tag migration in supabase/schema.sql.', error);
-    const legacy = { ...row };
-    EXERCISE_TAG_COLUMNS.forEach((col) => delete legacy[col]);
-    return singleOrThrow(upsertRow(table, legacy, onConflict));
+  // Resilient to a Supabase schema that hasn't run every migration yet: if a column
+  // doesn't exist, drop just that field and retry, so planning still saves.
+  const attempt = { ...row };
+  for (let i = 0; i < 12; i += 1) {
+    try {
+      return await singleOrThrow(upsertRow(table, attempt, onConflict));
+    } catch (error) {
+      const col = missingColumnFrom(error);
+      if (!col || !(col in attempt) || col === 'id' || col === 'user_id') throw error;
+      console.warn(`[SUPABASE SAVE] '${table}.${col}' column missing — saving without it. Run the migration in supabase/schema.sql.`, error);
+      delete attempt[col];
+    }
   }
+  return singleOrThrow(upsertRow(table, attempt, onConflict));
 }
 
 function exerciseFromRow(row) {
