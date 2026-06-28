@@ -3819,7 +3819,6 @@ function CalendarScreen({
         </View>
       )}
       <Pressable style={styles.buildFasterBtn} onPress={() => setScreen('editBlockCalendar')}>
-        <Text style={styles.buildFasterIcon}>⚡</Text>
         <View style={styles.flex}>
           <Text style={styles.buildFasterTitle}>Build faster</Text>
           <Text style={styles.buildFasterSub}>Templates · repeat week · progressive overload</Text>
@@ -4383,7 +4382,7 @@ function EditCalendarScreen({ data, setData, updateProgramme, setSelectedDate, s
                   </View>
                 </View>
                 <Text style={styles.calendarMetaText}>Moving the start shifts the whole block — weeks and sessions move with it.</Text>
-                <Pressable style={styles.primaryBtn} onPress={() => selectBlockAndOpen(blockItem.id)}><Text style={styles.primaryBtnText}>⚡ Plan sessions &amp; build</Text></Pressable>
+                <Pressable style={styles.primaryBtn} onPress={() => selectBlockAndOpen(blockItem.id)}><Text style={styles.primaryBtnText}>Plan sessions &amp; build</Text></Pressable>
                 <View style={styles.twoCol}>
                   <Pressable style={styles.ghostBtn} onPress={() => selectBlockById(blockItem.id)}><Text style={styles.ghostBtnText}>{isCurrent ? 'Current block' : 'Set current'}</Text></Pressable>
                   {confirmDeleteBlockId === blockItem.id ? (
@@ -4432,6 +4431,7 @@ function EditBlockCalendarScreen({
   const [repeatProgression, setRepeatProgression] = useState('flat');
   const [overloadDim, setOverloadDim] = useState('volume');
   const [templateOpen, setTemplateOpen] = useState(false);
+  const [confirmDeleteWeek, setConfirmDeleteWeek] = useState(false);
   const programme = data.programme;
   const macro = currentMacro(programme);
   const block = currentBlock(programme);
@@ -4503,6 +4503,7 @@ function EditBlockCalendarScreen({
   }
 
   function moveWeek(direction) {
+    setConfirmDeleteWeek(false);
     const weeks = block?.weeks || [];
     const currentIndex = weeks.findIndex((item) => item.id === week?.id);
     const nextWeek = weeks[currentIndex + direction];
@@ -4521,6 +4522,7 @@ function EditBlockCalendarScreen({
   }
 
   function addWeek() {
+    setConfirmDeleteWeek(false);
     let nextRange = { start: isoDate(), end: addDays(isoDate(), 6) };
     commitProgramme((draft) => {
       let selectedBlock = currentBlock(draft);
@@ -4543,18 +4545,30 @@ function EditBlockCalendarScreen({
     setNewSession((current) => ({ ...current, date: nextRange.start }));
   }
 
+  // Delete the whole selected week, including every session in it. If it's the only week in
+  // the block, wipe it back to a clean empty week so the block stays valid (rather than no-op).
   function deleteSelectedWeek() {
     let nextDate = selectedDate;
     commitProgramme((draft) => {
       const selectedBlock = currentBlock(draft);
-      if (!selectedBlock) return;
-      if ((selectedBlock.weeks || []).length <= 1) return;
-      const currentIndex = selectedBlock.weeks.findIndex((item) => item.id === draft.selected_week_id);
-      selectedBlock.weeks = selectedBlock.weeks.filter((item) => item.id !== draft.selected_week_id);
-      const nextWeek = selectedBlock.weeks[Math.max(0, currentIndex - 1)] || selectedBlock.weeks[0];
+      const weeksList = selectedBlock?.weeks || [];
+      if (!selectedBlock || !weeksList.length) return;
+      const foundIndex = weeksList.findIndex((item) => item.id === draft.selected_week_id);
+      const targetIndex = foundIndex === -1 ? 0 : foundIndex;
+      const start = weeksList[targetIndex]?.start_date || startOfWeekIso(selectedDate);
+      if (weeksList.length <= 1) {
+        const freshId = createId('week');
+        selectedBlock.weeks = [{ id: freshId, week_name: '', start_date: start, end_date: addDays(start, 6), sessions: [] }];
+        draft.selected_week_id = freshId;
+        nextDate = start;
+        return;
+      }
+      selectedBlock.weeks = weeksList.filter((_, index) => index !== targetIndex);
+      const nextWeek = selectedBlock.weeks[Math.max(0, targetIndex - 1)] || selectedBlock.weeks[0];
       draft.selected_week_id = nextWeek?.id;
       nextDate = nextWeek?.start_date || selectedDate;
     });
+    setConfirmDeleteWeek(false);
     setSelectedDate(nextDate);
     setNewSession((current) => ({ ...current, date: nextDate }));
   }
@@ -4767,7 +4781,11 @@ function EditBlockCalendarScreen({
         <Text style={styles.label}>{[macro?.macro_block_name, block?.block_name].filter(Boolean).join(' / ') || 'No block named yet'}</Text>
         <View style={styles.inlineActions}>
           <Pressable style={styles.smallPill} onPress={addWeek}><Text style={styles.smallPillText}>+ Week</Text></Pressable>
-          <Pressable style={styles.smallPill} onPress={deleteSelectedWeek}><Text style={styles.smallPillText}>Delete Week</Text></Pressable>
+          {confirmDeleteWeek ? (
+            <Pressable style={[styles.smallPill, styles.dangerPill]} onPress={deleteSelectedWeek}><Text style={styles.smallPillText}>Confirm delete</Text></Pressable>
+          ) : (
+            <Pressable style={styles.smallPill} onPress={() => setConfirmDeleteWeek(true)}><Text style={styles.smallPillText}>Delete week</Text></Pressable>
+          )}
         </View>
       </View>
       <View style={styles.weekNav}>
@@ -8372,6 +8390,7 @@ const styles = StyleSheet.create({
   treeCard: { backgroundColor: '#FBF8F0', borderColor: '#E8E8E5', borderRadius: 8, borderWidth: 1, gap: 4, padding: 10 },
   treeCardActive: { borderColor: '#2FA044', backgroundColor: '#F2FBF4' },
   smallPill: { backgroundColor: '#111111', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
+  dangerPill: { backgroundColor: '#C2422B' },
   smallPillText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
   programmeEditRow: { backgroundColor: '#FBF8F0', borderColor: '#E8E8E5', borderRadius: 8, borderWidth: 1, gap: 10, padding: 12 },
   programmeEditMain: { gap: 10 },
