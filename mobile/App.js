@@ -2185,6 +2185,8 @@ export default function App() {
       if (h !== null) { entry.height_or_distance = h; entry.height_or_distance_unit = payload.height_unit || 'cm'; }
       const ft = posNum(payload.ft);
       if (ft !== null) { entry.ft = ft; entry.ft_unit = payload.ft_unit || 'seconds'; }
+      const gct = posNum(payload.gct);
+      if (gct !== null) { entry.gct = gct; entry.gct_unit = payload.gct_unit || 'milliseconds'; }
     } else {
       entry.performance_type = 'lift';
       const w = posNum(payload.weight);
@@ -2193,7 +2195,7 @@ export default function App() {
       if (bv !== null) entry.bar_velocity = bv;
       if (String(payload.lift_name ?? '').trim()) entry.lift_name = payload.lift_name.trim();
     }
-    const hasOutput = ['performance_score', 'height_or_distance', 'ft', 'weight', 'bar_velocity'].some((key) => Number.isFinite(entry[key]));
+    const hasOutput = ['performance_score', 'height_or_distance', 'ft', 'gct', 'weight', 'bar_velocity'].some((key) => Number.isFinite(entry[key]));
     if (!hasOutput) { setScreen('today'); return; }
     setLastSavedCheckInId(entry.id);
     setData((current) => ({ ...current, checkIns: [entry, ...current.checkIns] }));
@@ -3277,7 +3279,7 @@ function ReviewLineSvg({ series, height = 150, compact = false }) {
 
 function PerformanceLogScreen({ savePerformanceLog, setScreen }) {
   const [mode, setMode] = useState('jump');
-  const [form, setForm] = useState({ date: isoDate(), performance_score: 5, height: '', height_unit: 'cm', ft: '', ft_unit: 'seconds', weight: '', weight_unit: 'kg', lift_name: '', bar_velocity: '' });
+  const [form, setForm] = useState({ date: isoDate(), performance_score: 5, height: '', height_unit: 'cm', ft: '', ft_unit: 'seconds', gct: '', gct_unit: 'milliseconds', weight: '', weight_unit: 'kg', lift_name: '', bar_velocity: '' });
   const up = (key, value) => setForm((current) => ({ ...current, [key]: value }));
   return (
     <View style={styles.screen}>
@@ -3301,6 +3303,7 @@ function PerformanceLogScreen({ savePerformanceLog, setScreen }) {
           <ChipWrap options={jumpDistanceUnitOptions} value={form.height_unit} onChange={(value) => up('height_unit', value)} />
           <Input label="Flight time (optional)" value={form.ft} onChangeText={(value) => up('ft', value)} />
           <ChipWrap options={sprintTimeUnitOptions} value={form.ft_unit} onChange={(value) => up('ft_unit', value)} />
+          <Input label="Ground contact / GCT (ms, optional)" value={form.gct} onChangeText={(value) => up('gct', value)} />
         </View>
       ) : (
         <View style={styles.card}>
