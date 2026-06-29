@@ -1202,9 +1202,15 @@ function fallbackMetricPoints(data, key) {
     let value = null;
     if (key === 'performance') value = storedNumber(checkIn.performance_score);
     else if (key === 'rsi') {
-      const ft = storedNumber(checkIn.ft);
-      const gct = storedNumber(checkIn.gct);
-      value = ft !== null && gct > 0 ? ft / gct : null;
+      const ft = normaliseTimeClient(checkIn.ft, checkIn.ft_unit);
+      const gct = normaliseTimeClient(checkIn.gct, checkIn.gct_unit);
+      value = Number.isFinite(ft) && Number.isFinite(gct) && ft > 0 && gct > 0 ? ft / gct : null;
+    } else if (['ft', 'gct', 'sprint_time'].includes(key)) {
+      const t = normaliseTimeClient(checkIn[key], checkIn[`${key}_unit`]);
+      value = Number.isFinite(t) && t > 0 ? t : null;
+    } else if (['height_or_distance', 'distance'].includes(key)) {
+      const d = normaliseDistanceClient(checkIn[key], checkIn[`${key}_unit`]);
+      value = Number.isFinite(d) && d > 0 ? d : null;
     } else value = storedNumber(checkIn[key]);
     return {
       id: checkIn.id,
@@ -1280,6 +1286,30 @@ function displayMetricValue(key, value, digits = 1) {
   const precision = ['ft', 'gct'].includes(key) ? 0 : digits;
   const unit = metricUnitLabel(key);
   return `${pretty(displayValue, precision)}${unit ? ` ${unit}` : ''}`;
+}
+
+// --- descriptive-chart helpers: keep charts truthful, labelled, and free of empty points ---
+// Metrics where a value of 0 (or below) means "not measured", not a real reading.
+const POSITIVE_ONLY_METRICS = ['height_or_distance', 'distance', 'ft', 'gct', 'rsi', 'sprint_time', 'weight', 'bar_velocity'];
+function isPositiveOnlyMetric(key) {
+  return POSITIVE_ONLY_METRICS.includes(key);
+}
+// Which way is an improvement? Used so a falling GCT/sprint line reads as progress, not decline.
+function metricBetterDirection(key) {
+  if (['gct', 'sprint_time', 'pain', 'pain_delta', 'fatigue', 'soreness'].includes(key)) return 'lower';
+  if (['performance', 'height_or_distance', 'distance', 'ft', 'rsi', 'weight', 'bar_velocity'].includes(key)) return 'higher';
+  return null;
+}
+function metricDirectionNote(key) {
+  const dir = metricBetterDirection(key);
+  return dir === 'lower' ? 'Lower is better' : dir === 'higher' ? 'Higher is better' : '';
+}
+// Drop null/NaN everywhere; for positive-only metrics also drop 0/negative blanks. Chronological, capped.
+function cleanMetricPoints(points, key, limit = 12) {
+  return [...(points || [])]
+    .filter((point) => Number.isFinite(point?.value) && (!isPositiveOnlyMetric(key) || point.value > 0))
+    .sort((a, b) => new Date(a.date) - new Date(b.date))
+    .slice(-limit);
 }
 
 function metricTrendFromPerformanceAnalysis(analysis, key) {
@@ -6263,14 +6293,14 @@ function MetricFigure({ title, metric, points, insight, compact = false, filterC
   const stats = insight?.stats || metricStats(null, metric.key);
   const evidence = [
     ['n', stats.count],
-    ['Mean', stats.avg === null ? '-' : pretty(stats.avg, 1)],
-    ['SD', stats.sd === null ? '-' : pretty(stats.sd, 1)],
+    ['Mean', stats.avg === null ? '-' : displayMetricValue(metric.key, stats.avg, 1)],
+    ['SD', stats.sd === null ? '-' : pretty(stats.sd, 2)],
     ['Slope', stats.trend === null ? '-' : pretty(stats.trend, 2)],
     ['Status', insight?.status || 'Collecting'],
   ];
   if (!compact) {
-    evidence.push(['Min', stats.min === null ? '-' : pretty(stats.min, 1)]);
-    evidence.push(['Max', stats.max === null ? '-' : pretty(stats.max, 1)]);
+    evidence.push(['Min', stats.min === null ? '-' : displayMetricValue(metric.key, stats.min, 1)]);
+    evidence.push(['Max', stats.max === null ? '-' : displayMetricValue(metric.key, stats.max, 1)]);
   }
 
   return (
@@ -6305,7 +6335,7 @@ function FigureEvidence({ items }) {
 
 function TimeSeriesChart({ points, color, metric = { key: 'performance', label: 'Metric' } }) {
   const kind = metricChartKind(metric);
-  const display = chronologicalMetricPoints(points, 12);
+  const display = cleanMetricPoints(points, metric.key, 12);
 
   if (!display.length) {
     return (
@@ -6361,27 +6391,29 @@ function TimeSeriesChart({ points, color, metric = { key: 'performance', label: 
             <Line x1={padding.left} y1={padding.top} x2={padding.left} y2={chartHeight - padding.bottom} stroke="#D8D8D4" strokeWidth="1" />
             <Line x1={padding.left} y1={chartHeight - padding.bottom} x2={chartWidth - padding.right} y2={chartHeight - padding.bottom} stroke="#D8D8D4" strokeWidth="1" />
             <Line x1={padding.left} y1={padding.top + (chartHeight - padding.top - padding.bottom) / 2} x2={chartWidth - padding.right} y2={padding.top + (chartHeight - padding.top - padding.bottom) / 2} stroke="#ECECE8" strokeWidth="1" />
-            <SvgText x={6} y={padding.top + 4} fill="#777771" fontSize="10" fontWeight="700">{pretty(max, 1)}</SvgText>
-            <SvgText x={6} y={chartHeight - padding.bottom} fill="#777771" fontSize="10" fontWeight="700">{pretty(min, 1)}</SvgText>
+            <SvgText x={4} y={padding.top + 4} fill="#777771" fontSize="9" fontWeight="700">{displayMetricValue(metric.key, max, 1)}</SvgText>
+            <SvgText x={4} y={padding.top + (chartHeight - padding.top - padding.bottom) / 2 + 3} fill="#A6A69E" fontSize="9" fontWeight="700">{displayMetricValue(metric.key, (max + min) / 2, 1)}</SvgText>
+            <SvgText x={4} y={chartHeight - padding.bottom} fill="#777771" fontSize="9" fontWeight="700">{displayMetricValue(metric.key, min, 1)}</SvgText>
             <SvgText x={padding.left} y={chartHeight - 8} fill="#777771" fontSize="10" fontWeight="700">{dateShort(display[0].date)}</SvgText>
             <SvgText x={chartWidth - padding.right} y={chartHeight - 8} fill="#777771" fontSize="10" fontWeight="700" textAnchor="end">{dateShort(display[display.length - 1].date)}</SvgText>
             <Path d={path} fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
             {coords.map((coord, index) => (
               <Circle key={`${coord.point.id}-${coord.point.date}-${index}`} cx={coord.x} cy={coord.y} r={3.5} fill="#FFFFFF" stroke={color} strokeWidth="2" />
             ))}
+            <SvgText x={chartWidth - padding.right} y={Math.max(padding.top + 9, coords[coords.length - 1].y - 8)} fill={color} fontSize="10" fontWeight="800" textAnchor="end">{displayMetricValue(metric.key, coords[coords.length - 1].point.value, 1)}</SvgText>
           </Svg>
         </View>
       )}
       <View style={styles.axisFooter}>
-        <Text style={styles.axisLabel}>X: Date</Text>
-        <Text style={styles.axisLabel}>Range {pretty(min, 1)} - {pretty(max, 1)}</Text>
+        <Text style={styles.axisLabel}>{metricDirectionNote(metric.key) || 'X: Date'}</Text>
+        <Text style={styles.axisLabel}>Range {displayMetricValue(metric.key, min, 1)} – {displayMetricValue(metric.key, max, 1)}</Text>
       </View>
     </View>
   );
 }
 
 function renderBoxPlot(points, metric) {
-  const stats = boxStats(points);
+  const stats = boxStats(cleanMetricPoints(points, metric.key, 9999));
   if (!stats) {
     return (
       <View style={styles.boxPlotEmpty}>
@@ -6406,9 +6438,9 @@ function renderBoxPlot(points, metric) {
         <View style={[styles.boxTick, { left: position(stats.max) }]} />
       </View>
       <View style={styles.axisFooter}>
-        <Text style={styles.axisLabel}>Min {pretty(stats.min, 1)}</Text>
-        <Text style={styles.axisLabel}>Median {pretty(stats.median, 1)}</Text>
-        <Text style={styles.axisLabel}>Max {pretty(stats.max, 1)}</Text>
+        <Text style={styles.axisLabel}>Min {displayMetricValue(metric.key, stats.min, 1)}</Text>
+        <Text style={styles.axisLabel}>Median {displayMetricValue(metric.key, stats.median, 1)}</Text>
+        <Text style={styles.axisLabel}>Max {displayMetricValue(metric.key, stats.max, 1)}</Text>
       </View>
     </View>
   );
@@ -6693,11 +6725,11 @@ function AdaptationLineChart({ series }) {
       .filter(Boolean);
 
     if (coords.length < 2) return null;
-    return { ...item, coords, path: smoothSvgPath(coords) };
+    return { ...item, coords, path: smoothSvgPath(coords), lastValue: values[values.length - 1] };
   }).filter(Boolean);
 
   const rawLabels = plottedSeries
-    .map((item) => ({ key: item.key, label: item.label, color: item.color, y: item.coords[item.coords.length - 1].y }))
+    .map((item) => ({ key: item.key, label: item.label, color: item.color, lastValue: item.lastValue, y: item.coords[item.coords.length - 1].y }))
     .sort((a, b) => a.y - b.y)
     .reduce((items, item) => {
       const previous = items[items.length - 1];
@@ -6724,8 +6756,8 @@ function AdaptationLineChart({ series }) {
             return <Circle key={`${item.key}-end`} cx={end.x} cy={end.y} r={4} fill="#FFFFFF" stroke={item.color} strokeWidth="2" />;
           })}
           {labels.map((item) => (
-            <SvgText key={`${item.key}-label`} x={chartWidth - padding.right + 10} y={item.displayY + 4} fill={item.color} fontSize="10" fontWeight="700">
-              {item.label}
+            <SvgText key={`${item.key}-label`} x={chartWidth - padding.right + 10} y={item.displayY + 4} fill={item.color} fontSize="9" fontWeight="700">
+              {`${item.label} ${displayMetricValue(item.key, item.lastValue, 1)}`}
             </SvgText>
           ))}
         </Svg>
@@ -6758,7 +6790,8 @@ function MultiMetricLineChart({ series }) {
   }
 
   const plottedSeries = activeSeries.map((item) => {
-    const values = dates.map((date) => pointForDate(item, date)?.value).filter((value) => Number.isFinite(value));
+    const valid = (value) => Number.isFinite(value) && (!isPositiveOnlyMetric(item.key) || value > 0);
+    const values = dates.map((date) => pointForDate(item, date)?.value).filter(valid);
     if (values.length < 2) return null;
     const min = Math.min(...values);
     const max = Math.max(...values);
@@ -6766,17 +6799,17 @@ function MultiMetricLineChart({ series }) {
     const coords = dates
       .map((date, index) => {
         const point = pointForDate(item, date);
-        if (!point || !Number.isFinite(point.value)) return null;
+        if (!point || !valid(point.value)) return null;
         return scaleSvgPoint(point.value, index, dates.length, min, range, chartWidth, chartHeight, padding);
       })
       .filter(Boolean);
     if (coords.length < 2) return null;
-    return { ...item, coords, path: smoothSvgPath(coords) };
+    return { ...item, coords, path: smoothSvgPath(coords), lastValue: values[values.length - 1] };
   }).filter(Boolean);
 
   return (
     <View style={styles.axisChartWrap}>
-      <Text style={styles.yAxisLabel}>Y: Normalized metric value</Text>
+      <Text style={styles.yAxisLabel}>Each line scaled to its own range · labels show latest value</Text>
       <View style={styles.multiLineChart}>
         <Svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`}>
           <Line x1={padding.left} y1={padding.top + 54} x2={chartWidth - padding.right} y2={padding.top + 54} stroke="#ECECE8" strokeWidth="1" />
@@ -6793,8 +6826,8 @@ function MultiMetricLineChart({ series }) {
             const end = item.coords[item.coords.length - 1];
             const y = Math.max(padding.top + 8, Math.min(chartHeight - padding.bottom, end.y + index * 6));
             return (
-              <SvgText key={`${item.key}-label`} x={chartWidth - padding.right + 10} y={y + 4} fill={item.color} fontSize="10" fontWeight="700">
-                {item.label}
+              <SvgText key={`${item.key}-label`} x={chartWidth - padding.right + 10} y={y + 4} fill={item.color} fontSize="9" fontWeight="700">
+                {`${item.label} ${displayMetricValue(item.key, item.lastValue, 1)}`}
               </SvgText>
             );
           })}
@@ -7681,12 +7714,14 @@ function AttemptMetricChart({ series }) {
   return (
     <View style={styles.attemptMiniGrid}>
       {activeSeries.map((item) => {
-        const values = item.points.map((point) => point.value).filter(Number.isFinite);
+        const pts = item.points.filter((point) => Number.isFinite(point.value) && (!isPositiveOnlyMetric(item.key) || point.value > 0));
+        if (pts.length < 2) return null;
+        const values = pts.map((point) => point.value);
         const min = Math.min(...values);
         const max = Math.max(...values);
         const range = max - min || 1;
-        const coords = item.points.map((point, index) => ({
-          ...scaleSvgPoint(point.value, index, item.points.length, min, range, chartWidth, chartHeight, padding),
+        const coords = pts.map((point, index) => ({
+          ...scaleSvgPoint(point.value, index, pts.length, min, range, chartWidth, chartHeight, padding),
           label: point.label,
           value: point.value,
         }));
@@ -7707,6 +7742,7 @@ function AttemptMetricChart({ series }) {
               {coords.map((coord, index) => (
                 <Circle key={`${item.key}-${index}`} cx={coord.x} cy={coord.y} r={3.5} fill="#FFFFFF" stroke={item.color} strokeWidth="2" />
               ))}
+              <SvgText x={chartWidth - padding.right} y={Math.max(padding.top + 9, coords[coords.length - 1].y - 7)} fill={item.color} fontSize="10" fontWeight="800" textAnchor="end">{displayMetricValue(item.key, coords[coords.length - 1].value, 1)}</SvgText>
             </Svg>
             <View style={styles.axisFooter}>
               <Text style={styles.axisLabel}>First attempt</Text>
