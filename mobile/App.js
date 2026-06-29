@@ -33,6 +33,7 @@ import {
   loadAppDataFromSupabase,
   saveCheckIn as saveCheckInToSupabase,
   saveCheckInInsight as saveCheckInInsightToSupabase,
+  deleteCheckIn as deleteCheckInFromSupabase,
   saveProfile as saveProfileToSupabase,
   saveProgramme as saveProgrammeToSupabase,
   saveSession as saveSessionToSupabase,
@@ -317,6 +318,59 @@ function friendlyDateLabel(dateValue) {
   if (dateValue === addDays(today, -1)) return 'Yesterday';
   if (dateValue === addDays(today, 1)) return 'Tomorrow';
   return dateFromIso(dateValue).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+// Build the performance-output fields of a check-in from the Log Performance form. `base` preserves
+// id / linked_session / any subjective fields, so the same builder serves both new logs and edits.
+function buildPerformanceEntry(payload, base = {}) {
+  const posNum = (value) => {
+    const n = Number(value);
+    return String(value ?? '').trim() !== '' && Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const entry = { ...base };
+  ['performance_score', 'height_or_distance', 'height_or_distance_unit', 'ft', 'ft_unit', 'gct', 'gct_unit', 'weight', 'weight_unit', 'bar_velocity', 'lift_name'].forEach((key) => { delete entry[key]; });
+  entry.check_in_datetime = checkInTimestamp(payload.date);
+  if (payload.mode === 'jump') {
+    entry.performance_type = 'jumping';
+    const score = posNum(payload.performance_score);
+    if (score !== null) entry.performance_score = score;
+    const h = posNum(payload.height);
+    if (h !== null) { entry.height_or_distance = h; entry.height_or_distance_unit = payload.height_unit || 'cm'; }
+    const ft = posNum(payload.ft);
+    if (ft !== null) { entry.ft = ft; entry.ft_unit = payload.ft_unit || 'seconds'; }
+    const gct = posNum(payload.gct);
+    if (gct !== null) { entry.gct = gct; entry.gct_unit = payload.gct_unit || 'milliseconds'; }
+  } else {
+    entry.performance_type = 'lift';
+    const w = posNum(payload.weight);
+    if (w !== null) { entry.weight = w; entry.weight_unit = payload.weight_unit || 'kg'; }
+    const bv = posNum(payload.bar_velocity);
+    if (bv !== null) entry.bar_velocity = bv;
+    if (String(payload.lift_name ?? '').trim()) entry.lift_name = payload.lift_name.trim();
+  }
+  return entry;
+}
+
+function performanceEntryHasOutput(entry) {
+  return ['performance_score', 'height_or_distance', 'ft', 'gct', 'weight', 'bar_velocity'].some((key) => Number.isFinite(entry[key]));
+}
+
+// One-line summary of a stored performance log for the editable list.
+function performanceLogSummary(log) {
+  const tShort = (unit) => (['milliseconds', 'ms'].includes(String(unit || '').toLowerCase()) ? 'ms' : 's');
+  if (log.performance_type === 'lift') {
+    const parts = [];
+    if (log.lift_name) parts.push(log.lift_name);
+    if (Number.isFinite(log.weight)) parts.push(`${pretty(log.weight, 1)} ${log.weight_unit || 'kg'}`);
+    if (Number.isFinite(log.bar_velocity)) parts.push(`${pretty(log.bar_velocity, 2)} m/s`);
+    return parts.join(' · ') || 'Lift log';
+  }
+  const parts = [];
+  if (Number.isFinite(log.performance_score)) parts.push(`${pretty(log.performance_score, 0)}/10`);
+  if (Number.isFinite(log.height_or_distance)) parts.push(`${pretty(log.height_or_distance, 1)} ${log.height_or_distance_unit || 'cm'}`);
+  if (Number.isFinite(log.ft)) parts.push(`FT ${pretty(log.ft, 2)} ${tShort(log.ft_unit)}`);
+  if (Number.isFinite(log.gct)) parts.push(`GCT ${pretty(log.gct, 0)} ${tShort(log.gct_unit)}`);
+  return parts.join(' · ') || 'Jump log';
 }
 
 function dayOffset(dateA, dateB) {
@@ -2212,43 +2266,35 @@ export default function App() {
   }
 
   function savePerformanceLog(payload) {
-    const posNum = (value) => {
-      const n = Number(value);
-      return String(value ?? '').trim() !== '' && Number.isFinite(n) && n > 0 ? n : null;
-    };
-    const entry = {
-      id: createId('checkin'),
-      check_in_datetime: checkInTimestamp(payload.date),
-      linked_session_id: data.activeSession?.id || null,
-    };
-    if (payload.mode === 'jump') {
-      // Measured jump session. performance_type tags it as measured output so the
-      // engine can keep it distinct from the quick-log subjective "felt" score.
-      entry.performance_type = 'jumping';
-      const score = posNum(payload.performance_score);
-      if (score !== null) entry.performance_score = score;
-      const h = posNum(payload.height);
-      if (h !== null) { entry.height_or_distance = h; entry.height_or_distance_unit = payload.height_unit || 'cm'; }
-      const ft = posNum(payload.ft);
-      if (ft !== null) { entry.ft = ft; entry.ft_unit = payload.ft_unit || 'seconds'; }
-      const gct = posNum(payload.gct);
-      if (gct !== null) { entry.gct = gct; entry.gct_unit = payload.gct_unit || 'milliseconds'; }
-    } else {
-      entry.performance_type = 'lift';
-      const w = posNum(payload.weight);
-      if (w !== null) { entry.weight = w; entry.weight_unit = payload.weight_unit || 'kg'; }
-      const bv = posNum(payload.bar_velocity);
-      if (bv !== null) entry.bar_velocity = bv;
-      if (String(payload.lift_name ?? '').trim()) entry.lift_name = payload.lift_name.trim();
-    }
-    const hasOutput = ['performance_score', 'height_or_distance', 'ft', 'gct', 'weight', 'bar_velocity'].some((key) => Number.isFinite(entry[key]));
-    if (!hasOutput) { setScreen('today'); return; }
+    // Use a real UUID so the local id matches the Supabase row id — lets the user edit a just-saved
+    // log in-place (upsert) instead of accidentally inserting a duplicate.
+    const entry = buildPerformanceEntry(payload, { id: createPersistentSessionId(), linked_session_id: data.activeSession?.id || null });
+    if (!performanceEntryHasOutput(entry)) { setScreen('today'); return; }
     setLastSavedCheckInId(entry.id);
     setData((current) => ({ ...current, checkIns: [entry, ...current.checkIns] }));
     if (currentUser) {
       saveCheckInToSupabase(currentUser.id, entry).catch((error) => console.error('[SUPABASE SAVE] Performance log failed. Local copy preserved.', error));
     }
     setScreen('today');
+  }
+
+  // Amend a previously logged performance entry in place (preserves its id, so Supabase upserts it).
+  function updatePerformanceLog(id, payload) {
+    const existing = (data.checkIns || []).find((item) => item.id === id);
+    if (!existing) return;
+    const entry = buildPerformanceEntry(payload, { ...existing });
+    if (!performanceEntryHasOutput(entry)) { deletePerformanceLog(id); return; }
+    setData((current) => ({ ...current, checkIns: (current.checkIns || []).map((item) => (item.id === id ? entry : item)) }));
+    if (currentUser) {
+      saveCheckInToSupabase(currentUser.id, entry).catch((error) => console.error('[SUPABASE SAVE] Performance log update failed. Local copy preserved.', error));
+    }
+  }
+
+  function deletePerformanceLog(id) {
+    setData((current) => ({ ...current, checkIns: (current.checkIns || []).filter((item) => item.id !== id) }));
+    if (currentUser) {
+      deleteCheckInFromSupabase(currentUser.id, id).catch((error) => console.error('[SUPABASE DELETE] Performance log delete failed. Removed locally.', error));
+    }
   }
 
   function finishSession(options = {}) {
@@ -2556,7 +2602,7 @@ export default function App() {
               />
             )}
             {screen === 'performanceSession' && (
-              <PerformanceLogScreen savePerformanceLog={savePerformanceLog} setScreen={setScreen} />
+              <PerformanceLogScreen data={data} savePerformanceLog={savePerformanceLog} updatePerformanceLog={updatePerformanceLog} deletePerformanceLog={deletePerformanceLog} setScreen={setScreen} />
             )}
             {screen === 'addExercise' && (
               <AddExerciseScreen draft={exerciseDraft} setDraft={setExerciseDraft} addExercise={addExercise} setScreen={setScreen} returnScreen={addExerciseReturnScreen} />
@@ -3323,16 +3369,69 @@ function ReviewLineSvg({ series, height = 150, compact = false }) {
   );
 }
 
-function PerformanceLogScreen({ savePerformanceLog, setScreen }) {
+const BLANK_PERFORMANCE_FORM = { date: isoDate(), performance_score: 5, height: '', height_unit: 'cm', ft: '', ft_unit: 'seconds', gct: '', gct_unit: 'milliseconds', weight: '', weight_unit: 'kg', lift_name: '', bar_velocity: '' };
+
+function PerformanceLogScreen({ data, savePerformanceLog, updatePerformanceLog, deletePerformanceLog, setScreen }) {
   const [mode, setMode] = useState('jump');
-  const [form, setForm] = useState({ date: isoDate(), performance_score: 5, height: '', height_unit: 'cm', ft: '', ft_unit: 'seconds', gct: '', gct_unit: 'milliseconds', weight: '', weight_unit: 'kg', lift_name: '', bar_velocity: '' });
+  const [form, setForm] = useState({ ...BLANK_PERFORMANCE_FORM, date: isoDate() });
+  const [editingId, setEditingId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const up = (key, value) => setForm((current) => ({ ...current, [key]: value }));
+
+  const logs = (data?.checkIns || [])
+    .filter((item) => ['jumping', 'lift'].includes(item.performance_type))
+    .sort((a, b) => new Date(b.check_in_datetime) - new Date(a.check_in_datetime));
+
+  function resetForm() {
+    setEditingId(null);
+    setConfirmDeleteId(null);
+    setMode('jump');
+    setForm({ ...BLANK_PERFORMANCE_FORM, date: isoDate() });
+  }
+
+  function startEdit(log) {
+    setMode(log.performance_type === 'lift' ? 'lift' : 'jump');
+    setForm({
+      date: String(log.check_in_datetime || '').slice(0, 10) || isoDate(),
+      performance_score: Number.isFinite(log.performance_score) ? log.performance_score : 0,
+      height: Number.isFinite(log.height_or_distance) ? String(log.height_or_distance) : '',
+      height_unit: log.height_or_distance_unit || 'cm',
+      ft: Number.isFinite(log.ft) ? String(log.ft) : '',
+      ft_unit: log.ft_unit || 'seconds',
+      gct: Number.isFinite(log.gct) ? String(log.gct) : '',
+      gct_unit: log.gct_unit || 'milliseconds',
+      weight: Number.isFinite(log.weight) ? String(log.weight) : '',
+      weight_unit: log.weight_unit || 'kg',
+      bar_velocity: Number.isFinite(log.bar_velocity) ? String(log.bar_velocity) : '',
+      lift_name: log.lift_name || '',
+    });
+    setEditingId(log.id);
+    setConfirmDeleteId(null);
+  }
+
+  function submit() {
+    if (editingId) {
+      updatePerformanceLog(editingId, { mode, ...form });
+      resetForm();
+    } else {
+      savePerformanceLog({ mode, ...form });
+    }
+  }
+
   return (
     <View style={styles.screen}>
       <View style={styles.checkinTop}>
         <Pressable style={styles.iconBack} onPress={() => setScreen('today')}><Text style={styles.iconBackText}>‹</Text></Pressable>
         <Text style={[styles.h1, styles.flex]}>Log performance</Text>
       </View>
+
+      {editingId ? (
+        <View style={styles.editingBanner}>
+          <Text style={styles.editingBannerText}>Editing a saved log — fix it and tap Save changes.</Text>
+          <Pressable onPress={resetForm} hitSlop={6}><Text style={styles.textLink}>New log</Text></Pressable>
+        </View>
+      ) : null}
+
       <View style={styles.qGroup}>
         <Text style={styles.q}>For which day?</Text>
         <DateField value={form.date} onChange={(value) => up('date', value)} />
@@ -3359,7 +3458,34 @@ function PerformanceLogScreen({ savePerformanceLog, setScreen }) {
           <Input label="Bar velocity (m/s, optional)" value={form.bar_velocity} onChangeText={(value) => up('bar_velocity', value)} />
         </View>
       )}
-      <Pressable style={styles.primaryBtn} onPress={() => savePerformanceLog({ mode, ...form })}><Text style={styles.primaryBtnText}>Save</Text></Pressable>
+      <Pressable style={styles.primaryBtn} onPress={submit}><Text style={styles.primaryBtnText}>{editingId ? 'Save changes' : 'Save'}</Text></Pressable>
+
+      {logs.length ? (
+        <View style={styles.logListWrap}>
+          <Text style={styles.sectionTitle}>Your performance logs</Text>
+          <Text style={styles.muted}>Tap a log to amend a mistaken entry.</Text>
+          {logs.slice(0, 40).map((log) => {
+            const active = editingId === log.id;
+            return (
+              <View key={log.id} style={[styles.logRow, active && styles.logRowActive]}>
+                <Pressable style={styles.flex} onPress={() => (active ? resetForm() : startEdit(log))}>
+                  <Text style={styles.logRowDate}>{friendlyDateLabel(String(log.check_in_datetime || '').slice(0, 10))} · {log.performance_type === 'lift' ? 'Lift' : 'Jump'}{active ? ' · editing' : ''}</Text>
+                  <Text style={styles.logRowSummary}>{performanceLogSummary(log)}</Text>
+                </Pressable>
+                {confirmDeleteId === log.id ? (
+                  <Pressable hitSlop={6} onPress={() => { deletePerformanceLog(log.id); if (editingId === log.id) resetForm(); setConfirmDeleteId(null); }}>
+                    <Text style={[styles.textLink, styles.dangerText]}>Confirm</Text>
+                  </Pressable>
+                ) : (
+                  <Pressable hitSlop={6} onPress={() => setConfirmDeleteId(log.id)}>
+                    <Text style={[styles.textLink, styles.dangerText]}>Delete</Text>
+                  </Pressable>
+                )}
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -8492,6 +8618,13 @@ const styles = StyleSheet.create({
   smallPill: { backgroundColor: '#111111', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
   dangerPill: { backgroundColor: '#C2422B' },
   expandHint: { fontSize: 11, color: '#1F7A40', fontFamily: SERIF, textAlign: 'center', marginTop: 4 },
+  editingBanner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, backgroundColor: '#F3F8F0', borderWidth: 1, borderColor: '#CFE0D2', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, marginBottom: 10 },
+  editingBannerText: { flex: 1, fontSize: 12.5, color: '#1F6A38', fontFamily: SERIF },
+  logListWrap: { marginTop: 22 },
+  logRow: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#FBF8F0', borderWidth: 1, borderColor: '#EAE4D6', borderRadius: 12, paddingVertical: 11, paddingHorizontal: 14, marginTop: 8 },
+  logRowActive: { borderColor: '#1F8A3E', backgroundColor: '#F3F8F0' },
+  logRowDate: { fontSize: 11, fontWeight: '700', color: '#8A8A80', fontFamily: SERIF, letterSpacing: 0.3, textTransform: 'uppercase', marginBottom: 2 },
+  logRowSummary: { fontSize: 14, color: '#23231E', fontFamily: SERIF },
   inspectHeadRow: { flexDirection: 'row', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: '#E3E0D6', paddingBottom: 6, marginTop: 14, marginBottom: 2 },
   inspectHeadCell: { fontSize: 11, fontWeight: '800', color: '#777771', fontFamily: SERIF, letterSpacing: 0.3 },
   inspectHeadRight: { textAlign: 'right' },
