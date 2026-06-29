@@ -2257,10 +2257,14 @@ export default function App() {
 
   function saveCheckIn() {
     const draft = data.checkInDraft;
+    // Only link to a saved session row (FK constraint) — otherwise null, or the check-in fails to persist.
+    const linkedSessionId = (data.sessions || []).some((session) => session.id === data.activeSession?.id)
+      ? data.activeSession.id
+      : null;
     const checkIn = {
       id: createId('checkin'),
       check_in_datetime: checkInTimestamp(draft.check_in_date),
-      linked_session_id: data.activeSession.id,
+      linked_session_id: linkedSessionId,
       pain_score: draft.pain_score,
       pain_location: draft.pain_location,
       freshness_score: draft.freshness_score,
@@ -2305,7 +2309,13 @@ export default function App() {
   function savePerformanceLog(payload) {
     // Use a real UUID so the local id matches the Supabase row id — lets the user edit a just-saved
     // log in-place (upsert) instead of accidentally inserting a duplicate.
-    const entry = buildPerformanceEntry(payload, { id: createPersistentSessionId(), linked_session_id: data.activeSession?.id || null });
+    // Only link to a session that exists as a SAVED row; otherwise null. check_ins.linked_session_id
+    // is a foreign key to sessions(id), so linking to the unsaved in-memory active session made the
+    // insert fail and the log silently vanished on the next reload.
+    const linkedSessionId = (data.sessions || []).some((session) => session.id === data.activeSession?.id)
+      ? data.activeSession.id
+      : null;
+    const entry = buildPerformanceEntry(payload, { id: createPersistentSessionId(), linked_session_id: linkedSessionId });
     if (!performanceEntryHasOutput(entry)) { setScreen('today'); return; }
     setLastSavedCheckInId(entry.id);
     setData((current) => ({ ...current, checkIns: [entry, ...current.checkIns] }));
@@ -2320,6 +2330,10 @@ export default function App() {
     const existing = (data.checkIns || []).find((item) => item.id === id);
     if (!existing) return;
     const entry = buildPerformanceEntry(payload, { ...existing });
+    // Don't carry a dangling session link (FK to sessions) that would reject the upsert.
+    if (entry.linked_session_id && !(data.sessions || []).some((session) => session.id === entry.linked_session_id)) {
+      entry.linked_session_id = null;
+    }
     if (!performanceEntryHasOutput(entry)) { deletePerformanceLog(id); return; }
     setData((current) => ({ ...current, checkIns: (current.checkIns || []).map((item) => (item.id === id ? entry : item)) }));
     if (currentUser) {
@@ -2823,16 +2837,17 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
         </View>
       </View>
 
-      <Pressable style={styles.primaryBtn} onPress={() => setScreen('checkin')}><Text style={styles.primaryBtnText}>Check in</Text></Pressable>
+      <View style={styles.twoCol}>
+        <Pressable style={[styles.primaryBtn, styles.flex]} onPress={() => setScreen('checkin')}><Text style={styles.primaryBtnText}>Check in</Text></Pressable>
+        <Pressable style={[styles.logPerfBtn, styles.flex]} onPress={startTodayPerformance}><Text style={styles.logPerfBtnText}>Log performance</Text></Pressable>
+      </View>
+      <Text style={styles.actionHint}>Check in = how you feel (recovery). Log performance = your jumps &amp; lifts.</Text>
 
       <View style={styles.card}>
         <Text style={styles.label}>Today's session</Text>
         <Text style={styles.cardTitle}>{planned.session_name}</Text>
         <Text style={styles.calendarMetaText}>{sessionMeta}</Text>
-        <View style={styles.twoCol}>
-          <Pressable style={styles.ghostBtn} onPress={() => setScreen('calendar')}><Text style={styles.ghostBtnText}>Start session</Text></Pressable>
-          <Pressable style={styles.ghostBtn} onPress={startTodayPerformance}><Text style={styles.ghostBtnText}>Log performance</Text></Pressable>
-        </View>
+        <Pressable style={styles.ghostBtn} onPress={() => setScreen('calendar')}><Text style={styles.ghostBtnText}>Start session</Text></Pressable>
       </View>
 
       <Pressable style={styles.noticedCard} onPress={() => setScreen('insights')}>
@@ -6452,20 +6467,6 @@ function PerformanceMetricAnalysisChart({ analysis, selectedMetricKey }) {
     );
   }
 
-  // GCT / FT view: the two contact-time metrics together, in their own colours.
-  if (selectedMetricKey === 'gct' || selectedMetricKey === 'ft') {
-    const timeSeries = multiMetricSeriesForKeys(analysis, ['gct', 'ft'], { logsOnly: true });
-    if (timeSeries.some((item) => item.points.length >= 2)) {
-      return (
-        <View style={styles.figureInner}>
-          <Text style={styles.label}>Ground contact &amp; flight time (ms)</Text>
-          <MultiMetricLineChart series={timeSeries} />
-        </View>
-      );
-    }
-    return <Text style={styles.figureLimitation}>Log flight time and ground contact (need two of each) to compare them here.</Text>;
-  }
-
   if (jumpMetricKeys.includes(selectedMetricKey)) {
     if (!hasJumpProfileMetrics(analysis)) {
       return <Text style={styles.figureLimitation}>Jump profile needs height/distance plus FT/GCT or RSI before combined interpretation is available.</Text>;
@@ -8299,6 +8300,9 @@ const styles = StyleSheet.create({
   statCellValue: { color: '#181A14', fontSize: 17, fontWeight: '600', fontFamily: SERIF },
   primaryBtn: { backgroundColor: '#1F8A3E', borderRadius: 16, paddingVertical: 15, alignItems: 'center' },
   primaryBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', fontFamily: SERIF },
+  logPerfBtn: { backgroundColor: '#181A14', borderRadius: 16, paddingVertical: 15, alignItems: 'center' },
+  logPerfBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', fontFamily: SERIF },
+  actionHint: { fontSize: 11.5, color: '#8A8A80', fontFamily: SERIF, fontStyle: 'italic', marginTop: 8, marginBottom: 2, textAlign: 'center' },
   ghostBtn: { flex: 1, backgroundColor: '#FBF8F0', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
   ghostBtnText: { color: '#181A14', fontSize: 15, fontWeight: '600', fontFamily: SERIF },
   noticedCard: { flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#FBF8F0', borderColor: '#E6E6E1', borderWidth: 1, borderRadius: 16, padding: 13 },
