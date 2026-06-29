@@ -1397,14 +1397,29 @@ function metricTrendFromPerformanceAnalysis(analysis, key) {
   return analysis?.performanceMetricAnalysis?.metricTrends?.[key] || analysis?.trendInsights?.[key];
 }
 
-function multiMetricSeriesForKeys(analysis, keys) {
+// A metric point comes from a logged performance entry (a saved check-in) rather than a logged
+// training session when its source row carries check-in identity. Lets the performance view stick
+// to logged outputs and exclude per-set session workout numbers.
+function isPerformanceLogPoint(point) {
+  const checkIn = point?.row?.checkIn;
+  return !!(checkIn && (checkIn.id || checkIn.performance_type || checkIn.check_in_datetime));
+}
+function logSourcedPoints(points) {
+  const arr = points || [];
+  const hasRowMeta = arr.some((point) => point && point.row);
+  if (!hasRowMeta) return arr; // older payloads without source info — can't distinguish, show all
+  return arr.filter(isPerformanceLogPoint);
+}
+
+function multiMetricSeriesForKeys(analysis, keys, { logsOnly = false } = {}) {
   return keys.map((key) => {
     const metric = dashboardMetricConfig(key);
+    const raw = metricSeries(analysis, key);
     return {
       key,
       label: metric.label,
       color: metric.color,
-      points: metricSeries(analysis, key),
+      points: logsOnly ? logSourcedPoints(raw) : raw,
       stats: metricStats(analysis, key),
     };
   });
@@ -2036,31 +2051,41 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [authLoading, currentUser?.id, data?.programme]);
 
+  // Only the parts of `data` the engine actually reads. Refetching is gated on this so typing in
+  // a draft or switching screens doesn't fire a fresh (slow) analysis call — but a new/edited
+  // performance log, session, or programme change always does, which refreshes the charts.
+  const analysisSignature = data
+    ? JSON.stringify({ checkIns: data.checkIns, sessions: data.sessions, programme: data.programme, activeSession: data.activeSession })
+    : '';
+
   useEffect(() => {
     if (!data) return undefined;
     let cancelled = false;
     setAnalysisLoading(true);
     setAnalysisError(null);
 
-    fetchAnalysisWithFallback(data)
-      .then((nextAnalysis) => {
-        if (!cancelled) setAnalysis(nextAnalysis);
-      })
-      .catch((error) => {
-        if (!cancelled) {
+    // Debounce so a burst of edits coalesces into one request instead of a queue of slow ones.
+    const timer = setTimeout(() => {
+      fetchAnalysisWithFallback(data)
+        .then((nextAnalysis) => {
+          if (!cancelled) setAnalysis(nextAnalysis);
+        })
+        .catch((error) => {
           // Keep the last good analysis so a transient refetch failure (e.g. backend
           // waking up) doesn't blank the whole app and wipe the screen you're editing.
-          setAnalysisError(error.message || 'Analysis backend unavailable.');
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setAnalysisLoading(false);
-      });
+          if (!cancelled) setAnalysisError(error.message || 'Analysis backend unavailable.');
+        })
+        .finally(() => {
+          if (!cancelled) setAnalysisLoading(false);
+        });
+    }, 450);
 
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, [data, analysisReloadKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysisSignature, analysisReloadKey]);
 
   useEffect(() => {
     const review = analysis?.checkInReview;
@@ -3410,8 +3435,10 @@ function PerformanceLogScreen({ data, savePerformanceLog, updatePerformanceLog, 
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const up = (key, value) => setForm((current) => ({ ...current, [key]: value }));
 
+  // Show every real performance log (anything with a measured output or a score), regardless of
+  // how performance_type came back from the DB. Recovery-only check-ins (freshness/pain) are excluded.
   const logs = (data?.checkIns || [])
-    .filter((item) => ['jumping', 'lift'].includes(item.performance_type))
+    .filter((item) => ['performance_score', 'height_or_distance', 'ft', 'gct', 'weight', 'bar_velocity'].some((key) => Number.isFinite(Number(item?.[key])) && Number(item[key]) > 0))
     .sort((a, b) => new Date(b.check_in_datetime) - new Date(a.check_in_datetime));
 
   function resetForm() {
@@ -6401,16 +6428,18 @@ function PerformanceMetricAnalysisCard({ analysis, selectedMetricKey }) {
 
 function PerformanceMetricAnalysisChart({ analysis, selectedMetricKey }) {
   if (selectedMetricKey === 'performance') {
-    const metric = dashboardMetricConfig('performance');
-    const points = metricSeries(analysis, 'performance');
-    if (hasJumpProfileMetrics(analysis)) {
+    // Performance view = your logged outputs only (performance score, GCT, RSI), not per-set session numbers.
+    const perfSeries = multiMetricSeriesForKeys(analysis, ['performance', 'gct', 'rsi'], { logsOnly: true });
+    if (perfSeries.some((item) => item.points.length >= 2)) {
       return (
         <View style={styles.figureInner}>
-          <Text style={styles.label}>Jump metric profile</Text>
-          <MultiMetricLineChart series={multiMetricSeriesForKeys(analysis, jumpMetricKeys)} />
+          <Text style={styles.label}>Performance · GCT · RSI (your logs)</Text>
+          <MultiMetricLineChart series={perfSeries} />
         </View>
       );
     }
+    const metric = dashboardMetricConfig('performance');
+    const points = logSourcedPoints(metricSeries(analysis, 'performance'));
     if (points.length < 2) return <Text style={styles.figureLimitation}>Performance metric analysis is collecting.</Text>;
     return (
       <MetricFigure
@@ -6421,6 +6450,20 @@ function PerformanceMetricAnalysisChart({ analysis, selectedMetricKey }) {
         compact
       />
     );
+  }
+
+  // GCT / FT view: the two contact-time metrics together, in their own colours.
+  if (selectedMetricKey === 'gct' || selectedMetricKey === 'ft') {
+    const timeSeries = multiMetricSeriesForKeys(analysis, ['gct', 'ft'], { logsOnly: true });
+    if (timeSeries.some((item) => item.points.length >= 2)) {
+      return (
+        <View style={styles.figureInner}>
+          <Text style={styles.label}>Ground contact &amp; flight time (ms)</Text>
+          <MultiMetricLineChart series={timeSeries} />
+        </View>
+      );
+    }
+    return <Text style={styles.figureLimitation}>Log flight time and ground contact (need two of each) to compare them here.</Text>;
   }
 
   if (jumpMetricKeys.includes(selectedMetricKey)) {

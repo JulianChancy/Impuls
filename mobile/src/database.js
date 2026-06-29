@@ -168,12 +168,15 @@ function checkInFromRow(row) {
     id: row.id,
     check_in_datetime: row.check_in_datetime,
     linked_session_id: row.linked_session_id,
-    pain_score: row.pain_score ?? 0,
+    // Preserve nulls — a recovery check-in has no performance, and a performance log has no
+    // freshness/pain. Defaulting these to 0 / 'jumping' made every reloaded check-in look like a
+    // 0-score jump, polluting the performance list, the performance chart, and readiness.
+    pain_score: row.pain_score ?? null,
     pain_location: row.pain_location || '',
-    freshness_score: row.freshness_score ?? 0,
-    soreness_score: row.soreness_score ?? 0,
-    performance_score: row.performance_score ?? 0,
-    performance_type: row.performance_type || 'jumping',
+    freshness_score: row.freshness_score ?? null,
+    soreness_score: row.soreness_score ?? null,
+    performance_score: row.performance_score ?? null,
+    performance_type: row.performance_type || null,
     gct: row.gct ?? '',
     gct_unit: row.gct_unit || 'seconds',
     ft: row.ft ?? '',
@@ -568,38 +571,21 @@ export async function saveCheckIn(userId, checkIn) {
     unit: checkIn.unit || null,
   });
 
-  try {
-    return await singleOrThrow(supabase.from('check_ins').upsert(fullPayload));
-  } catch (error) {
-    const schemaMessage = `${error?.message || ''} ${error?.details || ''}`;
-    if (!/gct_unit|ft_unit|height_or_distance_unit|distance_unit|sprint_time_unit|weight_unit|bar_velocity_unit/i.test(schemaMessage)) throw error;
-    console.warn('[SUPABASE SAVE] Check-in unit columns missing. Saving legacy fields only.', error);
-    return singleOrThrow(
-      supabase.from('check_ins').upsert(stripUndefined({
-        id: uuidOrUndefined(checkIn.id),
-        user_id: userId,
-        check_in_datetime: checkIn.check_in_datetime || new Date().toISOString(),
-        linked_session_id: uuidOrNull(checkIn.linked_session_id),
-        pain_score: numberOrNull(checkIn.pain_score),
-        pain_location: checkIn.pain_location || null,
-        freshness_score: numberOrNull(checkIn.freshness_score),
-        soreness_score: numberOrNull(checkIn.soreness_score),
-        performance_score: numberOrNull(checkIn.performance_score),
-        performance_type: checkIn.performance_type || null,
-        gct: numberOrNull(checkIn.gct),
-        ft: numberOrNull(checkIn.ft),
-        height_or_distance: numberOrNull(checkIn.height_or_distance),
-        unit: checkIn.unit || null,
-        sprint_time: numberOrNull(checkIn.sprint_time),
-        distance: numberOrNull(checkIn.distance),
-        lift_name: checkIn.lift_name || null,
-        weight: numberOrNull(checkIn.weight),
-        sets: numberOrNull(checkIn.sets),
-        reps: numberOrNull(checkIn.reps),
-        bar_velocity: numberOrNull(checkIn.bar_velocity),
-      }))
-    );
+  // Resilient to a check_ins table that hasn't run every migration: if a column doesn't exist,
+  // drop just that field and retry, so a performance log always persists (rather than silently
+  // failing and vanishing on the next reload).
+  const attempt = { ...fullPayload };
+  for (let i = 0; i < 14; i += 1) {
+    try {
+      return await singleOrThrow(supabase.from('check_ins').upsert(attempt));
+    } catch (error) {
+      const col = missingColumnFrom(error);
+      if (!col || !(col in attempt) || col === 'id' || col === 'user_id') throw error;
+      console.warn(`[SUPABASE SAVE] 'check_ins.${col}' column missing — saving without it. Run the migration in supabase/schema.sql.`, error);
+      delete attempt[col];
+    }
   }
+  return singleOrThrow(supabase.from('check_ins').upsert(attempt));
 }
 
 export async function saveCheckInInsight(userId, review) {

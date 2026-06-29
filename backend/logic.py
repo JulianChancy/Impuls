@@ -3728,15 +3728,21 @@ def app_check_in_metric(check_in, score_key, fallback_key):
 def app_fatigue(check_in):
     # Recovery is now a single Fatigue<->Fresh scale stored in freshness_score (high = fresh).
     # Soreness is no longer collected, so fatigue is simply the inverse of freshness.
-    freshness = _num(app_check_in_metric(check_in, "freshness_score", "freshness"))
-    return 10 - freshness
+    # A performance log carries no freshness, so return None rather than a spurious 0/10.
+    raw_freshness = app_check_in_metric(check_in, "freshness_score", "freshness")
+    if raw_freshness is None:
+        return None
+    return 10 - _num(raw_freshness)
 
 
 def app_readiness(check_in):
     # Readiness = freshness discounted by half of any pain, clamped to 0-10.
-    freshness = _num(app_check_in_metric(check_in, "freshness_score", "freshness"))
+    # No freshness recorded (e.g. a performance log) -> no readiness, rather than a phantom 0.
+    raw_freshness = app_check_in_metric(check_in, "freshness_score", "freshness")
+    if raw_freshness is None:
+        return None
     pain = _num(app_check_in_metric(check_in, "pain_score", "pain"))
-    return max(0, min(10, freshness - pain / 2))
+    return max(0, min(10, _num(raw_freshness) - pain / 2))
 
 
 def app_rsi(check_in):
