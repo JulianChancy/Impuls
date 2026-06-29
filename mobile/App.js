@@ -87,21 +87,32 @@ const ANALYSIS_API_URL = ANALYSIS_API_URLS[0];
 async function fetchAnalysisWithFallback(data) {
   const errors = [];
   for (const url of ANALYSIS_API_URLS) {
+    // Timeout per backend so a hung/cold server can never spin the app forever. Local backends
+    // fail fast (so we fall over to Render quickly when nothing is running locally); Render gets
+    // longer because the free tier can cold-start.
+    const isLocal = /127\.0\.0\.1|localhost/.test(url);
+    const timeoutMs = isLocal ? 4000 : 25000;
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
+        signal: controller?.signal,
       });
       if (!response.ok) {
         const body = await response.text();
         throw new Error(body || `Analysis request failed (${response.status})`);
       }
       if (url !== ANALYSIS_API_URL) console.log('[ANALYSIS] Fallback backend used', url);
-      return response.json();
+      return await response.json();
     } catch (error) {
-      errors.push(`${url}: ${error.message || 'Failed to fetch'}`);
-      console.warn('[ANALYSIS] Backend unavailable, trying next candidate.', url, error);
+      const reason = error?.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (error.message || 'Failed to fetch');
+      errors.push(`${url}: ${reason}`);
+      console.warn('[ANALYSIS] Backend unavailable, trying next candidate.', url, reason);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
   throw new Error(errors.join('\n'));
@@ -1862,6 +1873,7 @@ export default function App() {
   const [analysis, setAnalysis] = useState(null);
   const [analysisError, setAnalysisError] = useState(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisReloadKey, setAnalysisReloadKey] = useState(0);
   const [currentUser, setCurrentUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authEmail, setAuthEmail] = useState('');
@@ -2048,7 +2060,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [data]);
+  }, [data, analysisReloadKey]);
 
   useEffect(() => {
     const review = analysis?.checkInReview;
@@ -2544,9 +2556,13 @@ export default function App() {
         <View style={styles.backendState}>
           <Text style={styles.h1}>{analysisError ? 'Analysis backend unavailable.' : 'Analyzing stored data...'}</Text>
           <Text style={styles.bodyText}>
-            {analysisError || `Waiting for ${ANALYSIS_API_URL}. Start the FastAPI backend, then reload or edit any stored data.`}
+            {analysisError || `Waiting for ${ANALYSIS_API_URL}. The free backend can take ~30s to wake up.`}
           </Text>
-          {analysisLoading ? <Text style={styles.muted}>Request in progress.</Text> : null}
+          {analysisLoading ? <Text style={styles.muted}>Request in progress…</Text> : (
+            <Pressable style={styles.primaryBtn} onPress={() => setAnalysisReloadKey((key) => key + 1)}>
+              <Text style={styles.primaryBtnText}>Retry</Text>
+            </Pressable>
+          )}
         </View>
       </SafeAreaView>
     );
@@ -2724,6 +2740,15 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
   const hasPlannedSession = planned.id !== 'empty_plan';
   const displayName = String(data.profile?.name || '').trim();
 
+  // Latest check-in straight from stored data — used as a fallback so Home shows readiness/recovery/pain
+  // even when the backend analysis hasn't returned yet (e.g. it's waking up).
+  const latestCheckIn = (data?.checkIns || [])
+    .filter((item) => Number.isFinite(Number(item?.freshness_score)) || Number.isFinite(Number(item?.pain_score)))
+    .sort((a, b) => new Date(b.check_in_datetime) - new Date(a.check_in_datetime))[0] || null;
+  const localFresh = latestCheckIn && Number.isFinite(Number(latestCheckIn.freshness_score)) ? Number(latestCheckIn.freshness_score) : null;
+  const localPain = latestCheckIn && Number.isFinite(Number(latestCheckIn.pain_score)) ? Number(latestCheckIn.pain_score) : null;
+  const localReadiness = localFresh === null ? null : Math.max(0, Math.min(10, localFresh - (localPain || 0) / 2));
+
   const lastVal = (key) => {
     const pts = metricSeries(analysis, key);
     for (let i = pts.length - 1; i >= 0; i -= 1) {
@@ -2732,7 +2757,7 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
     const fallback = Number(analysis.latest?.[key]);
     return Number.isFinite(fallback) ? fallback : null;
   };
-  const readinessVal = lastVal('readiness');
+  const readinessVal = lastVal('readiness') ?? localReadiness;
   const readinessNum = Number.isFinite(readinessVal) ? readinessVal : 0;
   const readinessPct = Math.max(0, Math.min(1, readinessNum / 10));
   const ringDash = `${(readinessPct * 314).toFixed(1)} 314`;
@@ -2767,9 +2792,9 @@ function HomeScreen({ data, analysis, setScreen, setSelectedInsight, setSelected
           </View>
         </View>
         <View style={styles.statRow}>
-          <View style={styles.statCell}><Text style={styles.statCellLabel}>Recovery</Text><Text style={styles.statCellValue}>{pretty(lastVal('freshness'), 1)}</Text></View>
+          <View style={styles.statCell}><Text style={styles.statCellLabel}>Recovery</Text><Text style={styles.statCellValue}>{pretty(lastVal('freshness') ?? localFresh, 1)}</Text></View>
           <View style={styles.statCell}><Text style={styles.statCellLabel}>Load</Text><Text style={styles.statCellValue}>{pretty(lastVal('load'), 0)}</Text></View>
-          <View style={styles.statCell}><Text style={styles.statCellLabel}>Pain</Text><Text style={styles.statCellValue}>{pretty(lastVal('pain'), 0)}</Text></View>
+          <View style={styles.statCell}><Text style={styles.statCellLabel}>Pain</Text><Text style={styles.statCellValue}>{pretty(lastVal('pain') ?? localPain, 0)}</Text></View>
         </View>
       </View>
 
@@ -3369,7 +3394,14 @@ function ReviewLineSvg({ series, height = 150, compact = false }) {
   );
 }
 
-const BLANK_PERFORMANCE_FORM = { date: isoDate(), performance_score: 5, height: '', height_unit: 'cm', ft: '', ft_unit: 'seconds', gct: '', gct_unit: 'milliseconds', weight: '', weight_unit: 'kg', lift_name: '', bar_velocity: '' };
+const BLANK_PERFORMANCE_FORM = { date: isoDate(), performance_score: 5, height: '', height_unit: 'cm', ft: '', ft_unit: 'milliseconds', gct: '', gct_unit: 'milliseconds', weight: '', weight_unit: 'kg', lift_name: '', bar_velocity: '' };
+
+// Old logs may store flight time in seconds; show everything in ms now to avoid unit confusion.
+function timeFieldToMs(value, unit) {
+  if (!Number.isFinite(Number(value))) return '';
+  const seconds = !['milliseconds', 'millisecond', 'ms'].includes(String(unit || '').toLowerCase());
+  return String(seconds ? Number(value) * 1000 : Number(value));
+}
 
 function PerformanceLogScreen({ data, savePerformanceLog, updatePerformanceLog, deletePerformanceLog, setScreen }) {
   const [mode, setMode] = useState('jump');
@@ -3396,10 +3428,10 @@ function PerformanceLogScreen({ data, savePerformanceLog, updatePerformanceLog, 
       performance_score: Number.isFinite(log.performance_score) ? log.performance_score : 0,
       height: Number.isFinite(log.height_or_distance) ? String(log.height_or_distance) : '',
       height_unit: log.height_or_distance_unit || 'cm',
-      ft: Number.isFinite(log.ft) ? String(log.ft) : '',
-      ft_unit: log.ft_unit || 'seconds',
-      gct: Number.isFinite(log.gct) ? String(log.gct) : '',
-      gct_unit: log.gct_unit || 'milliseconds',
+      ft: timeFieldToMs(log.ft, log.ft_unit),
+      ft_unit: 'milliseconds',
+      gct: timeFieldToMs(log.gct, log.gct_unit),
+      gct_unit: 'milliseconds',
       weight: Number.isFinite(log.weight) ? String(log.weight) : '',
       weight_unit: log.weight_unit || 'kg',
       bar_velocity: Number.isFinite(log.bar_velocity) ? String(log.bar_velocity) : '',
@@ -3446,9 +3478,9 @@ function PerformanceLogScreen({ data, savePerformanceLog, updatePerformanceLog, 
           <SliderField label="Performance score" value={form.performance_score} onChange={(value) => up('performance_score', value)} />
           <Input label="Max touch height" value={form.height} onChangeText={(value) => up('height', value)} />
           <ChipWrap options={jumpDistanceUnitOptions} value={form.height_unit} onChange={(value) => up('height_unit', value)} />
-          <Input label="Flight time (optional)" value={form.ft} onChangeText={(value) => up('ft', value)} />
-          <ChipWrap options={sprintTimeUnitOptions} value={form.ft_unit} onChange={(value) => up('ft_unit', value)} />
+          <Input label="Flight time (ms, optional)" value={form.ft} onChangeText={(value) => up('ft', value)} />
           <Input label="Ground contact / GCT (ms, optional)" value={form.gct} onChangeText={(value) => up('gct', value)} />
+          <Text style={styles.unitHint}>Times are in milliseconds — 1 s = 1000 ms (so 0.42 s = 420 ms).</Text>
         </View>
       ) : (
         <View style={styles.card}>
@@ -8618,6 +8650,7 @@ const styles = StyleSheet.create({
   smallPill: { backgroundColor: '#111111', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
   dangerPill: { backgroundColor: '#C2422B' },
   expandHint: { fontSize: 11, color: '#1F7A40', fontFamily: SERIF, textAlign: 'center', marginTop: 4 },
+  unitHint: { fontSize: 11.5, color: '#8A8A80', fontFamily: SERIF, fontStyle: 'italic', marginTop: 8 },
   editingBanner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, backgroundColor: '#F3F8F0', borderWidth: 1, borderColor: '#CFE0D2', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14, marginBottom: 10 },
   editingBannerText: { flex: 1, fontSize: 12.5, color: '#1F6A38', fontFamily: SERIF },
   logListWrap: { marginTop: 22 },
