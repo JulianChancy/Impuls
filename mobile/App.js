@@ -1304,10 +1304,26 @@ function metricDirectionNote(key) {
   const dir = metricBetterDirection(key);
   return dir === 'lower' ? 'Lower is better' : dir === 'higher' ? 'Higher is better' : '';
 }
-// Drop null/NaN everywhere; for positive-only metrics also drop 0/negative blanks. Chronological, capped.
+// Time metrics live in SECONDS internally (display ×1000 → ms). Plausible ms bands let us snap
+// obvious 10×/100× unit slips (e.g. a mis-entered 820 ms next to 82 ms, or mixed ms/s) into range
+// so one bad/ambiguous entry doesn't make the chart leap a whole decade.
+const TIME_PLAUSIBLE_MS = { gct: { min: 50, max: 700 }, ft: { min: 80, max: 1300 } };
+function standardiseMetricValue(value, key) {
+  if (!Number.isFinite(value)) return value;
+  const band = TIME_PLAUSIBLE_MS[key];
+  if (!band) return value;
+  let ms = value * 1000;
+  let guard = 0;
+  while (ms > 0 && ms < band.min && guard < 6) { ms *= 10; guard += 1; }
+  guard = 0;
+  while (ms > band.max && guard < 6) { ms /= 10; guard += 1; }
+  return ms / 1000;
+}
+// Drop null/NaN everywhere; for positive-only metrics also drop 0/negative blanks; standardise units. Chronological, capped.
 function cleanMetricPoints(points, key, limit = 12) {
   return [...(points || [])]
     .filter((point) => Number.isFinite(point?.value) && (!isPositiveOnlyMetric(key) || point.value > 0))
+    .map((point) => ({ ...point, value: standardiseMetricValue(point.value, key) }))
     .sort((a, b) => new Date(a.date) - new Date(b.date))
     .slice(-limit);
 }
@@ -5945,7 +5961,9 @@ function DashboardScreen({ data, analysis, metricKey, setMetricKey, setSelectedI
   const [blockFilter, setBlockFilter] = useState('all');
   const metric = dashboardMetrics.find((item) => item.key === metricKey) || dashboardMetrics[0];
   const allPoints = metricSeries(analysis, metric.key);
-  const points = filterMetricPoints(allPoints, { range: rangeFilter, macroId: macroFilter, blockId: blockFilter }, data.programme);
+  const filteredPoints = filterMetricPoints(allPoints, { range: rangeFilter, macroId: macroFilter, blockId: blockFilter }, data.programme);
+  // Single clean + standardise pass so the chart, stats, ranked points and changes are all null-free and unit-consistent.
+  const points = cleanMetricPoints(filteredPoints, metric.key, 9999);
   const stats = metricStatsFromPoints(points);
   const filterLabel = `${rangeFilter === 'all' ? 'all time' : rangeFilter}${macroFilter === 'all' ? '' : ' / selected macro'}${blockFilter === 'all' ? '' : ' / selected block'}`;
   const trendInsight = filteredTrendInsight(analysis.trendInsights?.[metric.key], metric, stats, filterLabel);
@@ -6290,6 +6308,7 @@ function PerformanceMetricAnalysisChart({ analysis, selectedMetricKey }) {
 }
 
 function MetricFigure({ title, metric, points, insight, compact = false, filterControl = null }) {
+  const [inspectOpen, setInspectOpen] = useState(false);
   const stats = insight?.stats || metricStats(null, metric.key);
   const evidence = [
     ['n', stats.count],
@@ -6311,12 +6330,51 @@ function MetricFigure({ title, metric, points, insight, compact = false, filterC
       </View>
       <Text style={styles.figureResult}>{insight?.evidenceStatement || 'Trend insight is collecting.'}</Text>
       <Text style={styles.chartSubtitle}>{points.length ? `${dateShort(points[0].date)} to ${dateShort(points[points.length - 1].date)}` : 'No stored values yet'}</Text>
-      <TimeSeriesChart points={points} color={metric.color} metric={metric} />
+      <Pressable onPress={() => setInspectOpen(true)} accessibilityRole="button">
+        <TimeSeriesChart points={points} color={metric.color} metric={metric} />
+        <Text style={styles.expandHint}>⤢ Tap chart to expand &amp; inspect every value</Text>
+      </Pressable>
       {!compact ? renderBoxPlot(points, metric) : null}
       <FigureEvidence items={evidence} />
       <Text style={styles.figureInterpretation}>{insight?.interpretation || 'Trend interpretation is collecting.'}</Text>
       <Text style={styles.figureLimitation}>{insight?.limitation || 'Trend reflects stored logs only.'}</Text>
+      <ChartInspectModal visible={inspectOpen} onClose={() => setInspectOpen(false)} title={title} metric={metric} points={points} insight={insight} evidence={evidence} />
     </View>
+  );
+}
+
+// Tap any Evidence chart to open this: a larger plot plus the full, null-free, unit-standardised value table.
+function ChartInspectModal({ visible, onClose, title, metric, points, insight, evidence = [] }) {
+  const rows = cleanMetricPoints(points, metric.key, 400).slice().reverse();
+  const unit = metricUnitLabel(metric.key);
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.pickerBackdrop}>
+        <View style={styles.pickerSheet}>
+          <View style={styles.pickerHeader}>
+            <Text style={styles.pickerTitle}>{title}</Text>
+            <Pressable onPress={onClose}><Text style={styles.pickerClose}>Done</Text></Pressable>
+          </View>
+          <ScrollView style={styles.pickerScroll}>
+            <TimeSeriesChart points={points} color={metric.color} metric={metric} large />
+            {insight?.evidenceStatement ? <Text style={styles.figureResult}>{insight.evidenceStatement}</Text> : null}
+            {evidence.length ? <FigureEvidence items={evidence} /> : null}
+            <View style={styles.inspectHeadRow}>
+              <Text style={styles.inspectHeadCell}>Date</Text>
+              <Text style={[styles.inspectHeadCell, styles.inspectHeadRight]}>{metric.label}{unit ? ` (${unit})` : ''}</Text>
+            </View>
+            {rows.map((point, index) => (
+              <View key={`${point.id || 'pt'}-${point.date}-${index}`} style={styles.inspectRow}>
+                <Text style={styles.inspectDate}>{dateShort(point.date)}</Text>
+                <Text style={styles.inspectVal}>{displayMetricValue(metric.key, point.value, 1)}</Text>
+              </View>
+            ))}
+            {rows.length === 0 ? <Text style={styles.muted}>No stored values for this metric yet.</Text> : null}
+            <View style={styles.inspectSpacer} />
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -6333,9 +6391,9 @@ function FigureEvidence({ items }) {
   );
 }
 
-function TimeSeriesChart({ points, color, metric = { key: 'performance', label: 'Metric' } }) {
+function TimeSeriesChart({ points, color, metric = { key: 'performance', label: 'Metric' }, large = false }) {
   const kind = metricChartKind(metric);
-  const display = cleanMetricPoints(points, metric.key, 12);
+  const display = cleanMetricPoints(points, metric.key, large ? 60 : 12);
 
   if (!display.length) {
     return (
@@ -6358,7 +6416,7 @@ function TimeSeriesChart({ points, color, metric = { key: 'performance', label: 
   const min = kind === 'bar' ? Math.min(...values, 0) : Math.min(...values);
   const range = max - min || 1;
   const chartWidth = 320;
-  const chartHeight = 154;
+  const chartHeight = large ? 248 : 154;
   const padding = { left: 34, right: 14, top: 14, bottom: 30 };
   const coords = display.map((point, index) => ({
     ...scaleSvgPoint(point.value, index, display.length, min, range, chartWidth, chartHeight, padding),
@@ -6786,7 +6844,8 @@ function MultiMetricLineChart({ series }) {
   }
 
   function pointForDate(item, date) {
-    return item.points.find((point) => point.date === date);
+    const found = item.points.find((point) => point.date === date);
+    return found ? { ...found, value: standardiseMetricValue(found.value, item.key) } : found;
   }
 
   const plottedSeries = activeSeries.map((item) => {
@@ -7714,7 +7773,9 @@ function AttemptMetricChart({ series }) {
   return (
     <View style={styles.attemptMiniGrid}>
       {activeSeries.map((item) => {
-        const pts = item.points.filter((point) => Number.isFinite(point.value) && (!isPositiveOnlyMetric(item.key) || point.value > 0));
+        const pts = item.points
+          .filter((point) => Number.isFinite(point.value) && (!isPositiveOnlyMetric(item.key) || point.value > 0))
+          .map((point) => ({ ...point, value: standardiseMetricValue(point.value, item.key) }));
         if (pts.length < 2) return null;
         const values = pts.map((point) => point.value);
         const min = Math.min(...values);
@@ -8430,6 +8491,14 @@ const styles = StyleSheet.create({
   treeCardActive: { borderColor: '#2FA044', backgroundColor: '#F2FBF4' },
   smallPill: { backgroundColor: '#111111', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
   dangerPill: { backgroundColor: '#C2422B' },
+  expandHint: { fontSize: 11, color: '#1F7A40', fontFamily: SERIF, textAlign: 'center', marginTop: 4 },
+  inspectHeadRow: { flexDirection: 'row', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: '#E3E0D6', paddingBottom: 6, marginTop: 14, marginBottom: 2 },
+  inspectHeadCell: { fontSize: 11, fontWeight: '800', color: '#777771', fontFamily: SERIF, letterSpacing: 0.3 },
+  inspectHeadRight: { textAlign: 'right' },
+  inspectRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#F0EDE3' },
+  inspectDate: { fontSize: 13, color: '#3A3A34', fontFamily: SERIF },
+  inspectVal: { fontSize: 13, fontWeight: '700', color: '#181A14', fontFamily: MONO },
+  inspectSpacer: { height: 28 },
   smallPillText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
   programmeEditRow: { backgroundColor: '#FBF8F0', borderColor: '#E8E8E5', borderRadius: 8, borderWidth: 1, gap: 10, padding: 12 },
   programmeEditMain: { gap: 10 },
